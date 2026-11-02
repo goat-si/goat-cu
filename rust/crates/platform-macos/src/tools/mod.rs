@@ -672,9 +672,10 @@ pub(crate) fn default_window_for_pid(args: &mut serde_json::Value) {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct BackgroundMutationLease {
     pid: i32,
-    _guard: tokio::sync::OwnedMutexGuard<()>,
+    _guard: std::sync::Arc<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 impl BackgroundMutationLease {
@@ -923,7 +924,7 @@ pub(crate) async fn gate_background_window_action(
 pub(crate) async fn acquire_background_mutation(pid: i32) -> BackgroundMutationLease {
     BackgroundMutationLease {
         pid,
-        _guard: crate::background_mutation::acquire(pid).await,
+        _guard: std::sync::Arc::new(crate::background_mutation::acquire(pid).await),
     }
 }
 
@@ -949,10 +950,87 @@ pub(crate) async fn finish_window_observation(
 /// explicit proof of non-dispatch (a refused effect or background_unavailable).
 fn focus_error_allows_fallback(effect: Option<&str>, code: Option<&str>) -> bool {
     // An explicit uncertain effect wins over any non-dispatch code.
-    if effect == Some("unverifiable") {
+    if effect == Some("unverifiable")
+        || code.is_some_and(|code| {
+            matches!(
+                code,
+                "element_not_actionable" | "window_geometry_changed" | "window_points_unresolved"
+            ) || code.starts_with("hit_focus_")
+        })
+    {
         return false;
     }
     effect == Some("refused") || code == Some("background_unavailable")
+}
+
+fn prior_from_key_entry(
+    entry: Option<crate::input::skylight::KeyEntry>,
+) -> cua_driver_core::mutation::PriorInput {
+    if entry
+        .is_some_and(|entry| entry.records_posted > 0 || entry.records_uncertain || entry.ax_write)
+    {
+        cua_driver_core::mutation::PriorInput::MayHaveDelivered
+    } else {
+        cua_driver_core::mutation::PriorInput::None
+    }
+}
+
+#[cfg(test)]
+mod hit_focus_safety_tests {
+    use super::{decide_focus_next, prior_from_key_entry, FocusDecision};
+    use crate::input::skylight::KeyEntry;
+    use cua_driver_core::mutation::PriorInput;
+
+    #[test]
+    fn terminal_hit_focus_refusals_never_trigger_foreground_pixel_fallback() {
+        for code in [
+            "element_not_actionable",
+            "hit_focus_target_changed",
+            "hit_focus_unknown",
+            "hit_focus_write_failed",
+            "window_geometry_changed",
+        ] {
+            assert_eq!(
+                decide_focus_next(None, true, Some("refused"), Some(code)),
+                FocusDecision::StopOriginalError,
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn key_scope_receipt_drives_hit_focus_prior() {
+        assert_eq!(prior_from_key_entry(None), PriorInput::None);
+        assert_eq!(
+            prior_from_key_entry(Some(KeyEntry::default())),
+            PriorInput::None
+        );
+        for entry in [
+            KeyEntry {
+                records_posted: 1,
+                ..Default::default()
+            },
+            KeyEntry {
+                records_uncertain: true,
+                ..Default::default()
+            },
+            KeyEntry {
+                ax_write: true,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                prior_from_key_entry(Some(entry)),
+                PriorInput::MayHaveDelivered
+            );
+        }
+    }
+}
+
+pub(crate) fn prior_from_key_scope(
+    scope: Option<&crate::input::skylight::WindowKeyScope>,
+) -> cua_driver_core::mutation::PriorInput {
+    prior_from_key_entry(scope.map(|scope| scope.entry()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -967,6 +1045,7 @@ pub(crate) async fn focus_by_pixel(
     session_id: Option<String>,
     from_zoom: bool,
     mutation_lease: Option<&BackgroundMutationLease>,
+    prior: cua_driver_core::mutation::PriorInput,
     guard_editable: bool,
 ) -> Result<not_editable::FocusDispatch, cua_driver_core::protocol::ToolResult> {
     use cua_driver_core::tool::Tool;
@@ -984,7 +1063,8 @@ pub(crate) async fn focus_by_pixel(
                     None,
                     cua_driver_core::background_input::BackgroundAction::WindowPointer,
                 )
-                .await?;
+                .await
+                .map_err(|refusal| click::project_hit_focus_refusal(refusal, prior))?;
         }
     }
     if let Some(ref s) = session {
@@ -1000,7 +1080,8 @@ pub(crate) async fn focus_by_pixel(
     // (x, y) are pixels of the session's (possibly downsized or zoomed)
     // image, scaled back exactly as ClickTool does.
     let (native_x, native_y) =
-        window_click_point(state, &click_args, pid, window_id, x, y, from_zoom)?;
+        window_click_point(state, &click_args, pid, window_id, x, y, from_zoom)
+            .map_err(|refusal| click::project_hit_focus_refusal(refusal, prior))?;
     // The not_editable cell guard runs before ANY focus action: a
     // non-editing cell (or an unclassifiable hit) refuses the whole call, so
     // no focus action or key can reach it (handoff 3.7 point route). The
@@ -1010,16 +1091,24 @@ pub(crate) async fn focus_by_pixel(
     let mut guarded_click_args: Option<serde_json::Value> = None;
     if guard_editable {
         let Some(wid) = window_id else {
-            return Err(not_editable::unresolved_point_refusal());
+            return Err(click::project_hit_focus_refusal(
+                not_editable::unresolved_point_refusal(),
+                prior,
+            ));
         };
         let frame = match px_frame::resolve_or_refuse(wid).await {
             Ok(frame) => frame,
-            Err(_) => return Err(not_editable::unresolved_point_refusal()),
+            Err(_) => {
+                return Err(click::project_hit_focus_refusal(
+                    not_editable::unresolved_point_refusal(),
+                    prior,
+                ))
+            }
         };
         if let Some(refusal) =
             not_editable::guard_point_with_frame(pid, wid, &frame, native_x, native_y).await
         {
-            return Err(refusal);
+            return Err(click::project_hit_focus_refusal(refusal, prior));
         }
         click_args["coordinate_space"] = serde_json::json!("window_points");
         click_args["x"] = serde_json::json!(native_x / frame.scale);
@@ -1049,9 +1138,9 @@ pub(crate) async fn focus_by_pixel(
     let click_tool = click::ClickTool::new(state.clone());
     let click = click_tool.invoke(click_args);
     let focus = if let Some(lease) = mutation_lease {
-        crate::background_mutation::with_held_lease(lease.pid, click).await
+        crate::background_mutation::with_held_lease(lease.clone(), prior, click).await
     } else {
-        click.await
+        crate::background_mutation::with_input_prior(pid, prior, click).await
     };
     let ax_focus_sent = focus.is_error != Some(true);
     let (error_effect, error_code) = if focus.is_error == Some(true) {

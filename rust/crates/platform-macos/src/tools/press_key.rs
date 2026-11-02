@@ -1044,6 +1044,7 @@ impl Tool for PressKeyTool {
                     args.opt_str("_session_id"),
                     from_zoom,
                     _mutation_lease.as_ref(),
+                    super::prior_from_key_scope(_key_scope.as_ref()),
                     printable,
                 )
                 .await

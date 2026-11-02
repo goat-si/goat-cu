@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 tokio::task_local! {
-    static HELD_PID: i32;
+    static HELD_CONTEXT: (crate::tools::BackgroundMutationLease, cua_driver_core::mutation::PriorInput);
+    static PRIOR_CONTEXT: (i32, cua_driver_core::mutation::PriorInput);
 }
 
 fn process_locks() -> &'static Mutex<HashMap<i32, Weak<AsyncMutex<()>>>> {
@@ -48,14 +49,47 @@ pub(crate) fn try_acquire(pid: i32) -> Option<OwnedMutexGuard<()>> {
 
 /// Run one nested tool call with non-forgeable proof that its caller already
 /// owns this process's mutation lease.
-pub(crate) async fn with_held_lease<T>(pid: i32, future: impl Future<Output = T>) -> T {
-    HELD_PID.scope(pid, future).await
+pub(crate) async fn with_held_lease<T>(
+    lease: crate::tools::BackgroundMutationLease,
+    prior: cua_driver_core::mutation::PriorInput,
+    future: impl Future<Output = T>,
+) -> T {
+    HELD_CONTEXT.scope((lease, prior), future).await
 }
 
 pub(crate) fn held_by_current_task(pid: i32) -> bool {
-    HELD_PID
-        .try_with(|held_pid| *held_pid == pid)
+    HELD_CONTEXT
+        .try_with(|(lease, _)| lease.pid() == pid)
         .unwrap_or(false)
+}
+
+pub(crate) fn current_lease(pid: i32) -> Option<crate::tools::BackgroundMutationLease> {
+    HELD_CONTEXT
+        .try_with(|(lease, _)| (lease.pid() == pid).then(|| lease.clone()))
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn prior_for_current_task(pid: i32) -> cua_driver_core::mutation::PriorInput {
+    HELD_CONTEXT
+        .try_with(|(lease, prior)| (lease.pid() == pid).then_some(*prior))
+        .ok()
+        .flatten()
+        .or_else(|| {
+            PRIOR_CONTEXT
+                .try_with(|(context_pid, prior)| (*context_pid == pid).then_some(*prior))
+                .ok()
+                .flatten()
+        })
+        .unwrap_or(cua_driver_core::mutation::PriorInput::None)
+}
+
+pub(crate) async fn with_input_prior<T>(
+    pid: i32,
+    prior: cua_driver_core::mutation::PriorInput,
+    future: impl Future<Output = T>,
+) -> T {
+    PRIOR_CONTEXT.scope((pid, prior), future).await
 }
 
 #[cfg(test)]
@@ -112,11 +146,58 @@ mod tests {
     #[tokio::test]
     async fn nested_lease_proof_is_task_local_and_pid_bound() {
         assert!(!held_by_current_task(-91_004));
-        with_held_lease(-91_004, async {
+        let lease = crate::tools::acquire_background_mutation(-91_004).await;
+        with_held_lease(lease, cua_driver_core::mutation::PriorInput::None, async {
             assert!(held_by_current_task(-91_004));
             assert!(!held_by_current_task(-91_005));
         })
         .await;
         assert!(!held_by_current_task(-91_004));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn input_history_without_a_lease_stays_task_local_and_pid_bound() {
+        use cua_driver_core::mutation::PriorInput;
+        with_input_prior(-91_007, PriorInput::MayHaveDelivered, async {
+            assert!(!held_by_current_task(-91_007));
+            assert_eq!(
+                prior_for_current_task(-91_007),
+                PriorInput::MayHaveDelivered
+            );
+            assert_eq!(prior_for_current_task(-91_008), PriorInput::None);
+        })
+        .await;
+        assert_eq!(prior_for_current_task(-91_007), PriorInput::None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn nested_lease_survives_caller_cancellation_until_worker_ends() {
+        let pid = -91_006;
+        let lease = crate::tools::acquire_background_mutation(pid).await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let caller = tokio::spawn(with_held_lease(
+            lease,
+            cua_driver_core::mutation::PriorInput::None,
+            async move {
+                let held = current_lease(pid).expect("nested lease");
+                let worker = crate::goat::action_latency::spawn_action_blocking(move || {
+                    let held = held;
+                    let _ = started_tx.send(());
+                    release_rx.recv().expect("release worker");
+                    drop(held);
+                    let _ = done_tx.send(());
+                });
+                let _ = worker.await;
+            },
+        ));
+        started_rx.await.expect("worker started");
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(try_acquire(pid).is_none());
+        release_tx.send(()).expect("release worker");
+        done_rx.await.expect("worker finished");
+        assert!(try_acquire(pid).is_some());
     }
 }
