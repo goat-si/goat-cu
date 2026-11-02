@@ -3149,6 +3149,7 @@ enum SelectionSite {
     First,
     PostPress,
     NativeFocus,
+    HitFocus,
 }
 
 async fn dispatch_post_press_selection<C, P, A, F, T>(
@@ -4048,6 +4049,27 @@ where
     .map_err(|report| SelectionStageError::Refused(Box::new(report)))
 }
 
+async fn run_hit_focus_stage<C, D, E, P, A, F, T>(
+    clock: &(impl cua_driver_core::actionability::Clock + Sync),
+    budget: std::time::Duration,
+    prior: cua_driver_core::mutation::PriorInput,
+    discovery: D,
+    probe: P,
+    write: A,
+) -> Result<T, SelectionStageError<E>>
+where
+    C: Sync,
+    D: std::future::Future<Output = Result<C, E>>,
+    P: for<'a> FnMut(&'a C, std::time::Duration) -> std::pin::Pin<Box<dyn std::future::Future<Output = cua_driver_core::actionability::ActionabilityReport> + Send + 'a>> + Send,
+    A: FnOnce(C) -> F,
+    F: std::future::Future<Output = T>,
+{
+    let context = discovery.await.map_err(SelectionStageError::Discovery)?;
+    // Temporary revert of the production site gate to demonstrate RED.
+    let _ = (clock, budget, prior, probe);
+    Ok(write(context).await)
+}
+
 enum NativeFocusDiscoveryError {
     Next(Option<super::BackgroundMutationLease>),
     Refused(Option<super::BackgroundMutationLease>, Box<ToolResult>),
@@ -4173,6 +4195,25 @@ mod u32_stage_tests {
         fn sleep(&self, _: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
             Box::pin(std::future::pending())
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hit_focus_gate_refusal_prevents_write() {
+        let writes = AtomicUsize::new(0);
+        let counter = &writes;
+        let queue = std::sync::Mutex::new(std::collections::VecDeque::from([73_u32]));
+        let result = run_hit_focus_stage(
+            &FakeClock, Duration::ZERO, PriorInput::None,
+            async { Ok::<_, ()>(queue.lock().unwrap().pop_front().unwrap()) },
+            |candidate, _| Box::pin(async move {
+                assert_eq!(*candidate, 73);
+                ActionabilityReport { verdict: Verdict::Terminal { code: "disabled", reason: "disabled".into() }, checks: vec![], waited_ms: 0, samples: 0, last_facts: None, disposition: None }
+            }),
+            |candidate| async move { assert_eq!(candidate, 73); counter.fetch_add(1, Ordering::SeqCst); },
+        ).await;
+        assert_eq!(writes.load(Ordering::SeqCst), 0, "refusal must prevent hit-target AXFocused");
+        assert!(matches!(result, Err(SelectionStageError::Refused(_))));
+        assert!(queue.lock().unwrap().is_empty());
     }
 
     #[test]
