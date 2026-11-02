@@ -2325,7 +2325,7 @@ impl ClickTool {
             // BEFORE the AX hit-test backend and any cursor/dispatch work.
             // delivery_mode:"foreground" stays the explicit last resort.
             let mutation_lease_held = crate::background_mutation::held_by_current_task(pid);
-            let _mutation_lease = if !delivery_mode.is_foreground() && !mutation_lease_held {
+            let mut _mutation_lease = if !delivery_mode.is_foreground() && !mutation_lease_held {
                 if let Some(wid) = window_id {
                     match super::gate_background_window_action(
                         pid,
@@ -2408,7 +2408,14 @@ impl ClickTool {
                 if let Err(refusal) =
                     super::window_points::recheck_now(space, window_id, validated_frame.as_ref())
                 {
-                    return refusal;
+                    return if focus_only {
+                        project_hit_focus_refusal(
+                            refusal,
+                            crate::background_mutation::prior_for_current_task(pid),
+                        )
+                    } else {
+                        refusal
+                    };
                 }
                 let dispatch_guard = match super::window_points::DispatchGuard::new(
                     space,
@@ -2416,8 +2423,48 @@ impl ClickTool {
                     validated_frame.clone(),
                 ) {
                     Ok(guard) => guard,
-                    Err(refusal) => return refusal,
+                    Err(refusal) => {
+                        return if focus_only {
+                            project_hit_focus_refusal(
+                                refusal,
+                                crate::background_mutation::prior_for_current_task(pid),
+                            )
+                        } else {
+                            refusal
+                        }
+                    }
                 };
+                if focus_only {
+                    let prior = crate::background_mutation::prior_for_current_task(pid);
+                    if _mutation_lease.is_none() && mutation_lease_held {
+                        _mutation_lease = crate::background_mutation::current_lease(pid);
+                    }
+                    let Some(lease) = _mutation_lease.take() else {
+                        return project_hit_focus_refusal(hit_focus_refusal("hit_focus_lease_unavailable", "Hit focus could not retain the process mutation lease; AXFocused was not sent."), prior);
+                    };
+                    let (held, result) = run_live_hit_focus_stage(
+                        Some(lease),
+                        dispatch_guard,
+                        (pid, hit_test_wid),
+                        (screen_x, screen_y),
+                        prior,
+                    )
+                    .await;
+                    _mutation_lease = held;
+                    return match result {
+                        Ok(hit) => {
+                            crate::cursor::overlay::send_command(
+                                cursor_key.clone(),
+                                cursor_overlay::OverlayCommand::ClickPulse {
+                                    x: screen_x,
+                                    y: screen_y,
+                                },
+                            );
+                            px_ax_press_result("focused", None, hit)
+                        }
+                        Err(refusal) => refusal,
+                    };
+                }
                 let ax_result = latency::spawn_action_blocking(move || unsafe {
                     let Some(element) = element_at_screen_position(pid, screen_x, screen_y) else {
                         return Ok::<PxAxPress, anyhow::Error>(PxAxPress::FallThrough);
@@ -2458,37 +2505,7 @@ impl ClickTool {
                         CFRelease(element as _);
                         return Err(moved.into());
                     }
-                    let delivered = if focus_only {
-                        let err = crate::input::ax_actions::focus_element_raw(element as usize);
-                        let outcome = crate::ax::write_outcome::native_write_outcome(
-                            crate::ax::write_outcome::NativeWriteKind::SetAttribute,
-                            true,
-                            &crate::ax::write_outcome::Settable::Unknown(
-                                crate::ax::bindings::kAXErrorFailure,
-                            ),
-                            err,
-                        );
-                        let chain = cua_driver_core::mutation::ChainResult::from_recorded(
-                            vec![outcome],
-                            cua_driver_core::mutation::PriorInput::None,
-                        )
-                        .expect("one write");
-                        if outcome == cua_driver_core::mutation::WriteOutcome::Delivered {
-                            PxAxPress::Delivered(None, hit)
-                        } else {
-                            CFRelease(element as _);
-                            return Err(ClickWriteFailure {
-                                message: format!("AXFocused returned {err}"),
-                                disposition: chain
-                                    .error_disposition(
-                                        cua_driver_core::mutation::Postcondition::Indeterminate,
-                                        false,
-                                    )
-                                    .expect("unconfirmed write"),
-                            }
-                            .into());
-                        }
-                    } else {
+                    let delivered =
                         match ax_press_with_ancestors(element, &dispatch_guard, pid, reads) {
                             Ok(AxPressOutcome::Delivered(evidence)) => {
                                 PxAxPress::Delivered(evidence, hit)
@@ -2511,8 +2528,7 @@ impl ClickTool {
                                 CFRelease(element as _);
                                 return Err(moved.into());
                             }
-                        }
-                    };
+                        };
                     CFRelease(element as _);
                     Ok(delivered)
                 })
@@ -3149,6 +3165,7 @@ enum SelectionSite {
     First,
     PostPress,
     NativeFocus,
+    HitFocus,
 }
 
 async fn dispatch_post_press_selection<C, P, A, F, T>(
@@ -4048,6 +4065,229 @@ where
     .map_err(|report| SelectionStageError::Refused(Box::new(report)))
 }
 
+async fn run_hit_focus_stage<C, D, E, P, A, F, T>(
+    clock: &(impl cua_driver_core::actionability::Clock + Sync),
+    budget: std::time::Duration,
+    prior: cua_driver_core::mutation::PriorInput,
+    discovery: D,
+    probe: P,
+    write: A,
+) -> Result<T, SelectionStageError<E>>
+where
+    C: Sync,
+    D: std::future::Future<Output = Result<C, E>>,
+    P: for<'a> FnMut(
+            &'a C,
+            std::time::Duration,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = cua_driver_core::actionability::ActionabilityReport,
+                    > + Send
+                    + 'a,
+            >,
+        > + Send,
+    A: FnOnce(C) -> F,
+    F: std::future::Future<Output = T>,
+{
+    let context = discovery.await.map_err(SelectionStageError::Discovery)?;
+    dispatch_post_press_selection(
+        SelectionSite::HitFocus,
+        clock,
+        budget,
+        prior,
+        context,
+        probe,
+        write,
+    )
+    .await
+    .map_err(|report| SelectionStageError::Refused(Box::new(report)))
+}
+
+struct HitFocusCandidate {
+    target: crate::ax::snapshot::RetainedElement,
+    guard: Option<super::window_points::DispatchGuard>,
+    hit: Option<serde_json::Value>,
+}
+
+fn hit_focus_can_write(
+    guard_valid: bool,
+    same_hit: bool,
+    bound: bool,
+    capability: cua_driver_core::actionability::Evidence<bool>,
+) -> bool {
+    guard_valid && same_hit && bound && focus_capability(capability).is_ok()
+}
+
+fn hit_focus_refusal(code: &str, message: impl Into<String>) -> ToolResult {
+    super::pre_dispatch_refusal(code, message)
+        .with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED)
+}
+
+pub(super) fn project_hit_focus_refusal(
+    mut result: ToolResult,
+    prior: cua_driver_core::mutation::PriorInput,
+) -> ToolResult {
+    if prior == cua_driver_core::mutation::PriorInput::MayHaveDelivered {
+        fn qualify(text: &str) -> String {
+            text.replace(
+                "no focus action and no keys were sent.",
+                "the hit-target focus and keys were not sent.",
+            )
+            .replace("Nothing was sent.", "The hit-target focus was not sent.")
+            .replace("nothing was sent.", "the hit-target focus was not sent.")
+            .replace("no input was sent.", "the hit-target focus was not sent.")
+        }
+        for content in &mut result.content {
+            if let cua_driver_core::protocol::Content::Text { text, .. } = content {
+                *text = qualify(text);
+            }
+        }
+        result.content.extend(ToolResult::error("Earlier key-focus input may have been delivered; read fresh state before retrying.").content);
+        let value = result
+            .structured_content
+            .get_or_insert_with(|| serde_json::json!({}));
+        if let Some(object) = value.as_object_mut() {
+            object.insert("effect".into(), serde_json::json!("unverifiable"));
+            object.remove("dispatched");
+            object.remove("nothing_sent");
+            object.remove("delivered");
+            for key in ["message", "reason"] {
+                if let Some(serde_json::Value::String(text)) = object.get_mut(key) {
+                    *text = qualify(text);
+                }
+            }
+            if let Some(serde_json::Value::Object(refusal)) = object.get_mut("refusal") {
+                if let Some(serde_json::Value::String(text)) = refusal.get_mut("message") {
+                    *text = qualify(text);
+                }
+            }
+        }
+        result.disposition = Some(cua_driver_contract::ErrorDisposition::SUSPECTED_NOOP);
+    }
+    result
+}
+
+async fn run_live_hit_focus_stage(
+    lease: Option<super::BackgroundMutationLease>,
+    guard: Option<super::window_points::DispatchGuard>,
+    window: (i32, u32),
+    point: (f64, f64),
+    prior: cua_driver_core::mutation::PriorInput,
+) -> (
+    Option<super::BackgroundMutationLease>,
+    Result<Option<serde_json::Value>, ToolResult>,
+) {
+    let (pid, window_id) = window;
+    let (screen_x, screen_y) = point;
+    let discovery = async move {
+        let task = latency::spawn_action_blocking(move || {
+            let held = lease;
+            let run = || unsafe {
+                use crate::ax::actionability::{NativeReader, Reader};
+                super::window_points::check_guard(&guard).map_err(|error| hit_focus_refusal("hit_focus_target_changed", format!("Window geometry changed before hit discovery: {error}; AXFocused was not sent.")))?;
+                let element = element_at_screen_position(pid, screen_x, screen_y)
+                    .ok_or_else(|| hit_focus_refusal("hit_focus_unknown", "The accessibility hit target could not be read; AXFocused was not sent."))?;
+                let result = if crate::ax::exact_target::element_window_id(element) != Some(window_id) {
+                    Err(hit_focus_refusal("hit_focus_target_changed", "The hit target is not proven to belong to the requested window; AXFocused was not sent."))
+                } else if let Err(reason) = focus_capability(NativeReader.settable(element, "AXFocused")) {
+                    Err(hit_focus_refusal("hit_focus_unknown", format!("Hit focus capability is unavailable: {reason}; AXFocused was not sent.")))
+                } else {
+                    Ok(HitFocusCandidate {
+                        target: crate::ax::snapshot::RetainedElement::retain(element as usize),
+                        guard,
+                        hit: pointer_hit(element),
+                    })
+                };
+                CFRelease(element as _);
+                result
+            };
+            (run(), held)
+        }).await;
+        match task {
+            Ok((Ok(candidate), held)) => Ok((held, candidate)),
+            Ok((Err(refusal), held)) => Err((held, refusal)),
+            Err(error) => Err((
+                None,
+                hit_focus_refusal(
+                    "hit_focus_unknown",
+                    format!("Hit discovery failed: {error}; AXFocused was not sent."),
+                ),
+            )),
+        }
+    };
+    let clock = super::actionability::semantic_clock();
+    let result = run_hit_focus_stage(
+        &clock, cua_driver_core::actionability::DEFAULT_BUDGET, prior, discovery,
+        |(lease, candidate), _| super::actionability::semantic_probe(
+            lease.as_ref(), candidate.target.clone(), pid, window_id,
+            super::actionability::semantic::SemanticIntent::Focus,
+        ),
+        |(lease, candidate)| async move {
+            latency::spawn_action_blocking(move || {
+                let held = lease;
+                let run = || unsafe {
+                    use crate::ax::actionability::{NativeReader, Reader};
+                    use cua_driver_core::actionability::Evidence;
+                    let target = candidate.target.as_ptr() as AXUIElementRef;
+                    if super::window_points::check_guard(&candidate.guard).is_err() {
+                        return Err(hit_focus_refusal("hit_focus_target_changed", "The window geometry changed; AXFocused was not sent."));
+                    }
+                    let current = element_at_screen_position(pid, screen_x, screen_y);
+                    let same_hit = current.is_some_and(|current| {
+                        let same = CFEqual(current as CFTypeRef, target as CFTypeRef) != 0;
+                        CFRelease(current as _);
+                        same
+                    });
+                    if !same_hit {
+                        return Err(hit_focus_refusal("hit_focus_target_changed", "The hit target changed or could not be read; AXFocused was not sent."));
+                    }
+                    let bound = matches!(super::actionability::semantic::bind_exact_with(
+                        &mut super::actionability::semantic::NativeWindowReader,
+                        candidate.target.clone(), pid, window_id,
+                    ), Evidence::Known(_));
+                    let capability = NativeReader.settable(target, "AXFocused");
+                    if !hit_focus_can_write(true, same_hit, bound, capability)
+                        || super::window_points::check_guard(&candidate.guard).is_err() {
+                        return Err(hit_focus_refusal("hit_focus_target_changed", "The hit target, window binding, geometry, or AXFocused capability changed; AXFocused was not sent."));
+                    }
+                    let error = crate::input::ax_actions::focus_element_raw(candidate.target.as_ptr());
+                    let outcome = crate::ax::write_outcome::native_write_outcome(
+                        crate::ax::write_outcome::NativeWriteKind::SetAttribute, true,
+                        &crate::ax::write_outcome::Settable::Unknown(crate::ax::bindings::kAXErrorFailure), error,
+                    );
+                    let chain = cua_driver_core::mutation::ChainResult::from_recorded(vec![outcome], prior).expect("one write");
+                    if outcome == cua_driver_core::mutation::WriteOutcome::Delivered {
+                        Ok(candidate.hit)
+                    } else {
+                        let disposition = chain.error_disposition(cua_driver_core::mutation::Postcondition::Indeterminate, false).expect("unconfirmed write");
+                        let result = if disposition == cua_driver_contract::ErrorDisposition::NOT_DELIVERED {
+                            hit_focus_refusal("hit_focus_write_failed", format!("AXFocused returned {error}"))
+                        } else {
+                            ToolResult::error(format!("AXFocused returned {error}; focus may have been delivered."))
+                                .with_structured(serde_json::json!({"code":"hit_focus_write_failed", "effect":"unverifiable"}))
+                                .with_disposition(disposition)
+                        };
+                        Err(result)
+                    }
+                };
+                (run(), held)
+            }).await
+        },
+    ).await;
+    match result {
+        Err(SelectionStageError::Discovery((held, refusal))) => (held, Err(project_hit_focus_refusal(refusal, prior))),
+        Err(SelectionStageError::Refused(report)) => {
+            let mut refusal = report.refusal_result().expect("terminal report");
+            refusal.content.extend(ToolResult::error("The hit-target AXFocused write was not sent.").content);
+            (None, Err(project_hit_focus_refusal(refusal, prior)))
+        }
+        Ok(Err(error)) => (None, Err(click_task_failure(format!("Hit focus worker failed ({error}); it may have run. Read fresh state before retrying."))
+            .with_disposition(cua_driver_contract::ErrorDisposition::SUSPECTED_NOOP))),
+        Ok(Ok((result, held))) => (held, result.map_err(|error| project_hit_focus_refusal(error, prior))),
+    }
+}
+
 enum NativeFocusDiscoveryError {
     Next(Option<super::BackgroundMutationLease>),
     Refused(Option<super::BackgroundMutationLease>, Box<ToolResult>),
@@ -4173,6 +4413,194 @@ mod u32_stage_tests {
         fn sleep(&self, _: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
             Box::pin(std::future::pending())
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hit_focus_gate_refusal_prevents_write() {
+        let writes = AtomicUsize::new(0);
+        let counter = &writes;
+        let queue = std::sync::Mutex::new(std::collections::VecDeque::from([73_u32]));
+        let result = run_hit_focus_stage(
+            &FakeClock,
+            Duration::ZERO,
+            PriorInput::None,
+            async { Ok::<_, ()>(queue.lock().unwrap().pop_front().unwrap()) },
+            |candidate, _| {
+                Box::pin(async move {
+                    assert_eq!(*candidate, 73);
+                    ActionabilityReport {
+                        verdict: Verdict::Terminal {
+                            code: "disabled",
+                            reason: "disabled".into(),
+                        },
+                        checks: vec![],
+                        waited_ms: 0,
+                        samples: 0,
+                        last_facts: None,
+                        disposition: None,
+                    }
+                })
+            },
+            |candidate| async move {
+                assert_eq!(candidate, 73);
+                counter.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await;
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            0,
+            "refusal must prevent hit-target AXFocused"
+        );
+        assert!(matches!(result, Err(SelectionStageError::Refused(_))));
+        assert!(queue.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hit_focus_changed_target_after_gate_never_writes() {
+        use cua_driver_core::actionability::Evidence;
+        let writes = AtomicUsize::new(0);
+        let counter = &writes;
+        let current = std::sync::Arc::new(AtomicUsize::new(73));
+        let probe_current = current.clone();
+        let write_current = current.clone();
+        let result = run_hit_focus_stage(
+            &FakeClock,
+            Duration::ZERO,
+            PriorInput::None,
+            async { Ok::<_, ()>(73_u32) },
+            move |candidate, _| {
+                let current = probe_current.clone();
+                Box::pin(async move {
+                    assert_eq!(*candidate, 73);
+                    current.store(74, Ordering::SeqCst);
+                    ActionabilityReport {
+                        verdict: Verdict::Pass,
+                        checks: vec![],
+                        waited_ms: 0,
+                        samples: 0,
+                        last_facts: None,
+                        disposition: None,
+                    }
+                })
+            },
+            |candidate| async move {
+                if hit_focus_can_write(
+                    true,
+                    candidate as usize == write_current.load(Ordering::SeqCst),
+                    true,
+                    Evidence::Known(true),
+                ) {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    true
+                } else {
+                    false
+                }
+            },
+        )
+        .await
+        .unwrap_or_else(|_| panic!("gate passed"));
+        assert!(!result);
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hit_focus_unknown_capability_never_falls_through() {
+        use cua_driver_core::actionability::Evidence;
+        let writes = AtomicUsize::new(0);
+        let counter = &writes;
+        let result = run_hit_focus_stage(
+            &FakeClock,
+            Duration::ZERO,
+            PriorInput::None,
+            async { focus_capability(Evidence::Unknown("read failed".into())).map(|()| 73_u32) },
+            |_, _| Box::pin(async { panic!("unknown capability must not reach the gate") }),
+            |_| async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(SelectionStageError::Discovery(_))));
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hit_focus_gate_receives_prior_key_scope_history() {
+        let result = run_hit_focus_stage(
+            &FakeClock,
+            Duration::ZERO,
+            PriorInput::MayHaveDelivered,
+            async { Ok::<_, ()>(73_u32) },
+            |_, _| {
+                Box::pin(async {
+                    ActionabilityReport {
+                        verdict: Verdict::Terminal {
+                            code: "disabled",
+                            reason: "disabled".into(),
+                        },
+                        checks: vec![],
+                        waited_ms: 0,
+                        samples: 0,
+                        last_facts: None,
+                        disposition: None,
+                    }
+                })
+            },
+            |_| async { panic!("refusal must not write") },
+        )
+        .await;
+        let Err(SelectionStageError::Refused(report)) = result else {
+            panic!("gate must refuse")
+        };
+        assert_eq!(report.disposition, None);
+        let projected = project_hit_focus_refusal(
+            report.refusal_result().unwrap(),
+            PriorInput::MayHaveDelivered,
+        );
+        assert_eq!(
+            projected.disposition,
+            Some(cua_driver_contract::ErrorDisposition::SUSPECTED_NOOP)
+        );
+        assert_eq!(
+            projected.structured_content.unwrap()["effect"],
+            "unverifiable"
+        );
+    }
+
+    #[test]
+    fn hit_focus_prior_projection_and_delivery_are_truthful() {
+        use cua_driver_core::action_record::ActualDelivery;
+        let mut refusal = hit_focus_refusal(
+            "hit_focus_target_changed",
+            "target changed. Nothing was sent.",
+        );
+        refusal.structured_content.as_mut().unwrap()["nothing_sent"] = serde_json::json!(true);
+        refusal.structured_content.as_mut().unwrap()["message"] =
+            serde_json::json!("no focus action and no keys were sent.");
+        let projected = project_hit_focus_refusal(refusal, PriorInput::MayHaveDelivered);
+        assert_eq!(
+            projected.disposition,
+            Some(cua_driver_contract::ErrorDisposition::SUSPECTED_NOOP)
+        );
+        assert!(projected.content.iter().all(|content| match content {
+            cua_driver_core::protocol::Content::Text { text, .. } =>
+                !text.contains("Nothing was sent."),
+            _ => true,
+        }));
+        let structured = projected.structured_content.unwrap();
+        assert_eq!(structured["effect"], "unverifiable");
+        assert!(structured.get("dispatched").is_none());
+        assert!(structured.get("nothing_sent").is_none());
+        assert_eq!(
+            structured["message"],
+            "the hit-target focus and keys were not sent."
+        );
+        let delivered = px_ax_press_result("focused", None, None);
+        assert_eq!(delivered.structured_content.unwrap()["path"], "ax");
+        assert_eq!(
+            delivered.action_record.unwrap().actual_delivery,
+            Some(ActualDelivery::Background)
+        );
     }
 
     #[test]

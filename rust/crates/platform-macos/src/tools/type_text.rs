@@ -523,6 +523,7 @@ impl Tool for TypeTextTool {
                 args.opt_str("_session_id"),
                 from_zoom,
                 _mutation_lease.as_ref(),
+                super::prior_from_key_scope(_px_key_scope.as_ref()),
                 true,
             )
             .await
