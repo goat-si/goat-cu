@@ -357,6 +357,7 @@ const BROWSER_BOUND_INPUT_OPERATIONS: &[&str] = &[
     "browser_type",
     "browser_select",
     "browser_pointer",
+    "browser_fill_secret",
 ];
 const BROWSER_BOUND_INPUT_SCOPE_KEYS: &[&str] = &[
     "daemon_generation",
@@ -961,7 +962,8 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "page"
         | "browser_dialog"
         | "browser_set_input_files"
-        | "browser_download" => RiskClass::R3,
+        | "browser_download"
+        | "browser_fill_secret" => RiskClass::R3,
 
         _ => RiskClass::Unclassified,
     };

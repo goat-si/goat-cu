@@ -47,6 +47,10 @@ pub fn register_browser_tools(engine: &Arc<BrowserEngine>, registry: &mut ToolRe
     registry.register(Box::new(BrowserSetInputFilesTool::new(engine.clone())));
     registry.register(Box::new(BrowserDownloadTool::new(engine.clone())));
     registry.register(Box::new(BrowserPointerTool::new(engine.clone())));
+    registry.register(Box::new(super::secret_fill::BrowserFillSecretTool::new(
+        engine.clone(),
+    )));
+    registry.attach_browser_engine(engine);
 }
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
@@ -202,7 +206,7 @@ fn session_of(args: &Value) -> String {
 
 /// Target/ref minting requires an explicit (non-default) session so the
 /// capability namespace has a real owner whose end event cleans it up.
-fn require_explicit_session(args: &Value) -> Result<String, ToolResult> {
+pub(crate) fn require_explicit_session(args: &Value) -> Result<String, ToolResult> {
     let sid = session_of(args);
     if sid.is_empty() || sid == "default" {
         return Err(ToolResult::error(
@@ -391,6 +395,7 @@ async fn browser_tab_resource_scope(
         "get_browser_state" => "page_observation",
         "browser_navigate" => "navigation",
         "browser_dialog" => "page_dialog_resolution",
+        "browser_fill_secret" => "page_secret_fill",
         _ => "page_input",
     };
     let mut resource = json!({
@@ -790,6 +795,15 @@ impl Tool for GetBrowserStateTool {
                 Ok(proof) => proof,
                 Err(refusal) => return refusal.to_tool_result(),
             };
+            // A tab holding a value the host filled is not read.
+            let fence_epoch = match self
+                .engine
+                .admit_tab_read(&session, &target_id, &tab_id)
+                .await
+            {
+                Ok(epoch) => epoch,
+                Err(refusal) => return refusal.to_tool_result(),
+            };
             let result = self
                 .snapshot_mode(&args, &session, &target_id, &tab_id, proof.is_some())
                 .await;
@@ -813,6 +827,12 @@ impl Tool for GetBrowserStateTool {
                     proof.as_ref(),
                 )
                 .await
+            {
+                return refusal.to_tool_result();
+            }
+            if let Err(refusal) =
+                self.engine
+                    .confirm_tab_read(&session, &target_id, &tab_id, fence_epoch)
             {
                 return refusal.to_tool_result();
             }

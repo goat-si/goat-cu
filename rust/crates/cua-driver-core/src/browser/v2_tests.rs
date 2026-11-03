@@ -39,6 +39,8 @@ use super::types::{
 
 #[path = "origin_scope_tests.rs"]
 mod origin_scope_tests;
+#[path = "secret_fill_tests.rs"]
+mod secret_fill_tests;
 
 // ── Scripted Chromium fixture ────────────────────────────────────────────────
 
@@ -95,8 +97,35 @@ pub(super) struct FixtureState {
     pending_commit: Option<(String, usize)>,
     /// The page navigates here while `DOM.getDocument` is being read.
     dom_read_navigates_to: Option<String>,
+    /// The page `browser_fill_secret` fills; see [`FillPage`].
+    fill: FillPage,
     /// Every incoming CDP call: (sessionId, method, params).
     calls: Vec<(Option<String>, String, Value)>,
+}
+
+/// A scripted form for `browser_fill_secret`: what its fixed in-page
+/// functions answer, and what reached the page.
+#[derive(Debug, Default)]
+pub(super) struct FillPage {
+    /// FIND's answer: the offered field names, or a refusal reason.
+    pub(super) find: Option<Result<Vec<&'static str>, &'static str>>,
+    /// Document generation; a handle from an older one no longer resolves.
+    pub(super) generation: u64,
+    /// Writes the page applied: (field, value).
+    pub(super) applied: Vec<(String, String)>,
+    pub(super) write_attempts: usize,
+    /// Before this write (0-based) the tab navigates to a new document.
+    pub(super) navigate_before_write: Option<usize>,
+    /// Before this write the form is replaced: the write answers "changed".
+    pub(super) replace_form_before_write: Option<usize>,
+    /// This write's answer instead of true ("no_option", "account").
+    pub(super) answer_write: Option<(usize, &'static str)>,
+    /// This write reaches the page but its reply is lost.
+    pub(super) lose_reply_of_write: Option<usize>,
+    pub(super) read_back: bool,
+    /// The fence check's answer; `None` fails the call.
+    pub(super) holds: Option<Value>,
+    pub(super) holds_checks: usize,
 }
 
 impl Default for FixtureState {
@@ -139,6 +168,7 @@ impl Default for FixtureState {
             navigate_commit_after_reads: 0,
             pending_commit: None,
             dom_read_navigates_to: None,
+            fill: FillPage::default(),
             calls: Vec::new(),
         }
     }
@@ -474,6 +504,9 @@ fn fixture_handler(state: SharedState) -> MockHandler {
         let is_tab = sess.starts_with("tab-sess-");
         let is_oopif = sess.starts_with("oopif-sess-");
 
+        if let Some(reply) = fill_page_reply(&mut st, call) {
+            return reply;
+        }
         match call.method.as_str() {
             "Target.getTargets" => {
                 let mut infos: Vec<Value> = Vec::new();
@@ -799,6 +832,65 @@ fn fixture_handler(state: SharedState) -> MockHandler {
             other => MockReply::method_not_found(other),
         }
     })
+}
+
+/// The scripted fill page's answers to the fixed in-page functions of
+/// `browser_fill_secret` and the fence check, or `None` for any other call.
+fn fill_page_reply(st: &mut FixtureState, call: &super::mock_cdp::MockCall) -> Option<MockReply> {
+    let declaration = call.params["functionDeclaration"].as_str().unwrap_or_default();
+    let expression = call.params["expression"].as_str().unwrap_or_default();
+    let is_find = declaration.contains("CUA_SECRET_FILL_FIND") || expression.contains("CUA_SECRET_FILL_FIND");
+    if expression.contains("CUA_SECRET_FENCE_HOLDS") {
+        st.fill.holds_checks += 1;
+        return Some(match st.fill.holds.clone() {
+            Some(value) => MockReply::ok(json!({ "result": { "value": value } })),
+            None => MockReply::err(-32000, "fixture fence check failure"),
+        });
+    }
+    if is_find {
+        return Some(match st.fill.find.clone() {
+            Some(Ok(_)) => MockReply::ok(json!({
+                "result": { "type": "object", "objectId": format!("fill-handle-{}", st.fill.generation) }
+            })),
+            Some(Err(reason)) => MockReply::ok(json!({ "result": { "type": "string", "value": reason } })),
+            None => MockReply::ok(json!({ "result": { "type": "string", "value": "no_form" } })),
+        });
+    }
+    let handle = call.params["objectId"].as_str()?.strip_prefix("fill-handle-")?;
+    if handle != st.fill.generation.to_string() {
+        return Some(MockReply::err(-32000, "Could not find object with given id"));
+    }
+    let arguments = call.params["arguments"].as_array().cloned().unwrap_or_default();
+    let value = if declaration.contains("Object.keys(this.fields)") {
+        json!(st.fill.find.clone().and_then(Result::ok).unwrap_or_default())
+    } else if declaration.contains("CUA_SECRET_FILL_MUTATE") {
+        let index = st.fill.write_attempts;
+        st.fill.write_attempts += 1;
+        if st.fill.navigate_before_write == Some(index) {
+            st.fill.generation += 1;
+            st.main_loader = "L_MAIN_AFTER_FILL_NAVIGATION".into();
+            return Some(MockReply::err(-32000, "Could not find object with given id"));
+        }
+        if st.fill.replace_form_before_write == Some(index) {
+            json!("changed")
+        } else if let Some((_, answer)) = st.fill.answer_write.filter(|(at, _)| *at == index) {
+            json!(answer)
+        } else {
+            st.fill.applied.push((
+                arguments[0]["value"].as_str().unwrap_or_default().to_owned(),
+                arguments[1]["value"].as_str().unwrap_or_default().to_owned(),
+            ));
+            if st.fill.lose_reply_of_write == Some(index) {
+                return Some(MockReply::err(-32000, "Inspected target navigated or closed"));
+            }
+            json!(true)
+        }
+    } else if declaration.contains("CUA_SECRET_FILL_READ_BACK") {
+        json!(st.fill.read_back)
+    } else {
+        json!(true)
+    };
+    Some(MockReply::ok(json!({ "result": { "value": value } })))
 }
 
 /// Platform adapter pointing at the fixture endpoint: pid 1 is a

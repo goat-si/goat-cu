@@ -19,7 +19,7 @@ use crate::protocol::ToolResult;
 pub const MAX_ORIGIN_SCOPE: usize = 64;
 
 /// The browser tools that read or act on one page and accept `origin_scope`.
-pub const PAGE_TOOLS: [&str; 9] = [
+pub const PAGE_TOOLS: [&str; 10] = [
     "get_browser_state",
     "browser_navigate",
     "browser_click",
@@ -29,6 +29,7 @@ pub const PAGE_TOOLS: [&str; 9] = [
     "browser_dialog",
     "browser_set_input_files",
     "browser_download",
+    "browser_fill_secret",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +74,15 @@ impl OriginScope {
     pub(crate) fn allows_url(&self, url: &str) -> bool {
         crate::session_manifest::canonical_origin(url)
             .is_ok_and(|origin| self.origins.contains(&origin))
+    }
+
+    /// The scope's origin when it lists exactly one.
+    pub(crate) fn single_origin(&self) -> Option<&str> {
+        let mut origins = self.origins.iter();
+        match (origins.next(), origins.next()) {
+            (Some(origin), None) => Some(origin.as_str()),
+            _ => None,
+        }
     }
 }
 

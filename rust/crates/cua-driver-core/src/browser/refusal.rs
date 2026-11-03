@@ -82,6 +82,20 @@ pub enum BrowserRefusalCode {
     /// `delivery_mode:"foreground"`. Uses the driver-wide wire code shared by
     /// every background refusal.
     BackgroundUnavailable,
+    /// A field in this tab still holds a value `browser_fill_secret`
+    /// delivered (or that could not be ruled out). Page reads of the tab and
+    /// desktop observation of its window are refused until the field lets go
+    /// of it or the tab shows another document. Nothing was read.
+    BrowserSecretHeld,
+    /// `browser_fill_secret` was called without the host authority this
+    /// driver was started with. Only the host may fill saved secrets.
+    /// Nothing was sent.
+    BrowserSecretFillHostOnly,
+    /// `browser_fill_secret` could not fill the form: `detail.reason` names
+    /// why (no form, ambiguous or missing fields, the form or document
+    /// changed, an uncertain delivery). `delivered` lists what reached the
+    /// page before it stopped.
+    BrowserSecretFillRefused,
 }
 
 impl BrowserRefusalCode {
@@ -108,6 +122,9 @@ impl BrowserRefusalCode {
             Self::BrowserBatchRefused => "browser_batch_refused",
             Self::BrowserProcessProtected => "browser_process_protected",
             Self::BackgroundUnavailable => "background_unavailable",
+            Self::BrowserSecretHeld => "browser_secret_held",
+            Self::BrowserSecretFillHostOnly => "browser_secret_fill_host_only",
+            Self::BrowserSecretFillRefused => "browser_secret_fill_refused",
         }
     }
 }
