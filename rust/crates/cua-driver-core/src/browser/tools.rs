@@ -3613,7 +3613,8 @@ mod tests {
                 "browser_dialog",
                 "browser_set_input_files",
                 "browser_download",
-                "browser_pointer"
+                "browser_pointer",
+                "browser_fill_secret"
             ]
         );
     }
