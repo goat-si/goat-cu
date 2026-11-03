@@ -116,7 +116,7 @@ pub(super) const MUTATE: &str = r#"
   const field = h.fields[which];
   if (!field) return "changed";
   if (field instanceof HTMLSelectElement) {
-    const options = matchOption(field, which, extra.month, extra.year);
+    const options = matchOption(field, which, extra.month, extra.full_year);
     if (options.length !== 1) return "no_option";
     Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(field, options[0].value);
   } else {
@@ -137,7 +137,7 @@ pub(super) const READ_BACK: &str = r#"
     const field = h.fields[which];
     if (!field || !field.isConnected || field.ownerDocument !== document || field.form !== h.form) return false;
     if (field instanceof HTMLSelectElement) {
-      const options = matchOption(field, which, extra.month, extra.year);
+      const options = matchOption(field, which, extra.month, extra.full_year);
       return options.length === 1 && field.selectedOptions.length === 1 && field.selectedOptions[0] === options[0];
     }
     const actual = which === "expiry" && field.type === "month" ? extra.full_year + "-" + extra.month : expected[which];
@@ -198,4 +198,3 @@ pub(super) fn find_message(reason: &str) -> &'static str {
         _ => "the form lacks a field this fill needs",
     }
 }
-

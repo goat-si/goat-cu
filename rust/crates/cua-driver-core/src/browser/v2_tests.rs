@@ -837,9 +837,12 @@ fn fixture_handler(state: SharedState) -> MockHandler {
 /// The scripted fill page's answers to the fixed in-page functions of
 /// `browser_fill_secret` and the fence check, or `None` for any other call.
 fn fill_page_reply(st: &mut FixtureState, call: &super::mock_cdp::MockCall) -> Option<MockReply> {
-    let declaration = call.params["functionDeclaration"].as_str().unwrap_or_default();
+    let declaration = call.params["functionDeclaration"]
+        .as_str()
+        .unwrap_or_default();
     let expression = call.params["expression"].as_str().unwrap_or_default();
-    let is_find = declaration.contains("CUA_SECRET_FILL_FIND") || expression.contains("CUA_SECRET_FILL_FIND");
+    let is_find =
+        declaration.contains("CUA_SECRET_FILL_FIND") || expression.contains("CUA_SECRET_FILL_FIND");
     if expression.contains("CUA_SECRET_FENCE_HOLDS") {
         st.fill.holds_checks += 1;
         return Some(match st.fill.holds.clone() {
@@ -852,24 +855,42 @@ fn fill_page_reply(st: &mut FixtureState, call: &super::mock_cdp::MockCall) -> O
             Some(Ok(_)) => MockReply::ok(json!({
                 "result": { "type": "object", "objectId": format!("fill-handle-{}", st.fill.generation) }
             })),
-            Some(Err(reason)) => MockReply::ok(json!({ "result": { "type": "string", "value": reason } })),
+            Some(Err(reason)) => {
+                MockReply::ok(json!({ "result": { "type": "string", "value": reason } }))
+            }
             None => MockReply::ok(json!({ "result": { "type": "string", "value": "no_form" } })),
         });
     }
-    let handle = call.params["objectId"].as_str()?.strip_prefix("fill-handle-")?;
+    let handle = call.params["objectId"]
+        .as_str()?
+        .strip_prefix("fill-handle-")?;
     if handle != st.fill.generation.to_string() {
-        return Some(MockReply::err(-32000, "Could not find object with given id"));
+        return Some(MockReply::err(
+            -32000,
+            "Could not find object with given id",
+        ));
     }
-    let arguments = call.params["arguments"].as_array().cloned().unwrap_or_default();
+    let arguments = call.params["arguments"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let value = if declaration.contains("Object.keys(this.fields)") {
-        json!(st.fill.find.clone().and_then(Result::ok).unwrap_or_default())
+        json!(st
+            .fill
+            .find
+            .clone()
+            .and_then(Result::ok)
+            .unwrap_or_default())
     } else if declaration.contains("CUA_SECRET_FILL_MUTATE") {
         let index = st.fill.write_attempts;
         st.fill.write_attempts += 1;
         if st.fill.navigate_before_write == Some(index) {
             st.fill.generation += 1;
             st.main_loader = "L_MAIN_AFTER_FILL_NAVIGATION".into();
-            return Some(MockReply::err(-32000, "Could not find object with given id"));
+            return Some(MockReply::err(
+                -32000,
+                "Could not find object with given id",
+            ));
         }
         if st.fill.replace_form_before_write == Some(index) {
             json!("changed")
@@ -877,11 +898,20 @@ fn fill_page_reply(st: &mut FixtureState, call: &super::mock_cdp::MockCall) -> O
             json!(answer)
         } else {
             st.fill.applied.push((
-                arguments[0]["value"].as_str().unwrap_or_default().to_owned(),
-                arguments[1]["value"].as_str().unwrap_or_default().to_owned(),
+                arguments[0]["value"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                arguments[1]["value"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
             ));
             if st.fill.lose_reply_of_write == Some(index) {
-                return Some(MockReply::err(-32000, "Inspected target navigated or closed"));
+                return Some(MockReply::err(
+                    -32000,
+                    "Inspected target navigated or closed",
+                ));
             }
             json!(true)
         }

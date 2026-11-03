@@ -37,7 +37,10 @@ fn assert_no_secret(result: &ToolResult) {
 }
 
 /// An existing-profile tab bound with the fixture's origin in scope.
-async fn claimed(transport: &str, configure: impl FnOnce(&mut FixtureState)) -> (Fixture, String, String) {
+async fn claimed(
+    transport: &str,
+    configure: impl FnOnce(&mut FixtureState),
+) -> (Fixture, String, String) {
     let (f, _) = protected_existing_profile_fixture().await;
     configure(&mut f.state.lock().unwrap());
     let prepare = BrowserPrepareTool::new(f.engine.clone())
@@ -47,7 +50,12 @@ async fn claimed(transport: &str, configure: impl FnOnce(&mut FixtureState)) -> 
             "strategy": { "kind": "existing_profile" }
         }))
         .await;
-    assert_eq!(structured(&prepare)["status"], "ok", "{}", structured(&prepare));
+    assert_eq!(
+        structured(&prepare)["status"],
+        "ok",
+        "{}",
+        structured(&prepare)
+    );
     let bound = GetBrowserStateTool::new(f.engine.clone())
         .invoke(json!({
             "pid": 1, "window_id": 7, "session": SESSION,
@@ -96,7 +104,8 @@ fn page_function_calls(f: &Fixture) -> usize {
         .filter(|(_, method, params)| {
             let text = params.to_string();
             method.starts_with("Runtime.")
-                && (text.contains("CUA_SECRET_FILL_FIND") || text.contains("CUA_SECRET_FILL_MUTATE"))
+                && (text.contains("CUA_SECRET_FILL_FIND")
+                    || text.contains("CUA_SECRET_FILL_MUTATE"))
         })
         .count()
 }
@@ -117,7 +126,9 @@ async fn read(f: &Fixture, target: &str, tab: &str, extra: Value) -> ToolResult 
     args.as_object_mut()
         .unwrap()
         .extend(extra.as_object().unwrap().clone());
-    GetBrowserStateTool::new(f.engine.clone()).invoke(args).await
+    GetBrowserStateTool::new(f.engine.clone())
+        .invoke(args)
+        .await
 }
 
 #[tokio::test]
@@ -146,7 +157,10 @@ async fn a_login_fill_writes_both_fields_confirms_and_returns_no_value() {
     assert_eq!(writes.len(), 2);
     for (_, params) in &writes {
         assert_eq!(params["arguments"][2]["value"], ORIGIN);
-        assert!(params["objectId"].as_str().unwrap().starts_with("fill-handle-"));
+        assert!(params["objectId"]
+            .as_str()
+            .unwrap()
+            .starts_with("fill-handle-"));
     }
     assert!(held(&f));
     crate::session::fire_session_end(TRANSPORT);
@@ -220,7 +234,11 @@ async fn run_steps_and_recordings_never_carry_a_fill() {
         .start(output.path().to_str().unwrap(), false, None)
         .unwrap();
     let recording = registry
-        .invoke_with_context("browser_fill_secret", login_args(&target, &tab), standard_context())
+        .invoke_with_context(
+            "browser_fill_secret",
+            login_args(&target, &tab),
+            standard_context(),
+        )
         .await;
     assert_eq!(refusal_code(&recording), "browser_secret_fill_refused");
     assert_eq!(reason(&recording), "recording_active");
@@ -265,7 +283,10 @@ async fn a_navigation_before_the_first_write_sends_nothing_and_leaves_no_fence()
     let result = fill(&f, login_args(&target, &tab)).await;
     let s = structured(&result).clone();
     assert_eq!(reason(&result), "document_changed", "{s}");
-    assert_eq!(s["delivered"], json!({"username": false, "password": false}));
+    assert_eq!(
+        s["delivered"],
+        json!({"username": false, "password": false})
+    );
     assert_eq!(s["verdict"], "not_filled");
     assert_eq!(s["secret_held"], false);
     assert!(applied(&f).is_empty());
@@ -363,14 +384,21 @@ async fn a_lost_reply_leaves_the_fence_held_until_the_field_lets_go() {
     const TRANSPORT: &str = "transport-fill-lost-reply";
     let (f, target, tab) = claimed(TRANSPORT, |st| {
         login_page(st);
-        st.fill.lose_reply_of_write = Some(1);
+        // The first write reaches the page but its reply is lost: nothing is
+        // confirmed delivered, yet the value may be in the field.
+        st.fill.lose_reply_of_write = Some(0);
         st.fill.holds = None;
     })
     .await;
     let result = fill(&f, login_args(&target, &tab)).await;
     let s = structured(&result).clone();
     assert_eq!(reason(&result), "delivery_uncertain", "{s}");
-    assert_eq!(s["uncertain_field"], "password");
+    assert_eq!(s["uncertain_field"], "username");
+    assert_eq!(
+        s["delivered"],
+        json!({"username": false, "password": false})
+    );
+    assert_eq!(s["verdict"], "unverifiable");
     assert_eq!(s["secret_held"], true);
     assert!(held(&f));
     // A check that cannot run counts as holding.
@@ -381,7 +409,12 @@ async fn a_lost_reply_leaves_the_fence_held_until_the_field_lets_go() {
     assert_eq!(refusal_code(&unknown), "browser_secret_held");
     f.state.lock().unwrap().fill.holds = Some(json!(false));
     let cleared = read(&f, &target, &tab, json!({})).await;
-    assert_eq!(structured(&cleared)["status"], "ok", "{}", structured(&cleared));
+    assert_eq!(
+        structured(&cleared)["status"],
+        "ok",
+        "{}",
+        structured(&cleared)
+    );
     assert!(!held(&f));
     crate::session::fire_session_end(TRANSPORT);
 }
@@ -393,11 +426,18 @@ async fn reads_are_refused_while_a_field_holds_a_value_and_allowed_after() {
     let filled = fill(&f, login_args(&target, &tab)).await;
     assert_eq!(structured(&filled)["status"], "ok");
     let documents_before = recorded_calls(&f, "DOM.getDocument").len();
-    for extra in [json!({}), json!({"include_screenshot": true}), json!({"snapshot_format": "semantic_v2"})] {
+    for extra in [
+        json!({}),
+        json!({"include_screenshot": true}),
+        json!({"snapshot_format": "semantic_v2"}),
+    ] {
         let refused = read(&f, &target, &tab, extra).await;
         assert_eq!(refusal_code(&refused), "browser_secret_held");
     }
-    assert_eq!(recorded_calls(&f, "DOM.getDocument").len(), documents_before);
+    assert_eq!(
+        recorded_calls(&f, "DOM.getDocument").len(),
+        documents_before
+    );
     assert!(recorded_calls(&f, "Page.captureScreenshot").is_empty());
     // The check never carries a value: only salted digests.
     let checks: Vec<_> = recorded_calls(&f, "Runtime.evaluate")
@@ -421,7 +461,12 @@ async fn reads_are_refused_while_a_field_holds_a_value_and_allowed_after() {
     let checks_before = f.state.lock().unwrap().fill.holds_checks;
     f.state.lock().unwrap().main_loader = "L_MAIN_NEXT_DOCUMENT".into();
     let navigated = read(&f, &target, &tab, json!({})).await;
-    assert_eq!(structured(&navigated)["status"], "ok", "{}", structured(&navigated));
+    assert_eq!(
+        structured(&navigated)["status"],
+        "ok",
+        "{}",
+        structured(&navigated)
+    );
     assert_eq!(f.state.lock().unwrap().fill.holds_checks, checks_before);
     crate::session::fire_session_end(TRANSPORT);
 }
@@ -492,16 +537,26 @@ async fn desktop_observation_of_the_filled_window_is_refused_while_held() {
     assert_eq!(structured(&filled)["status"], "ok");
     for (name, args) in [
         ("get_window_state", window.clone()),
-        ("get_window_state", json!({"target": {"kind": "window", "pid": 1, "window_id": 7}})),
+        (
+            "get_window_state",
+            json!({"target": {"kind": "window", "pid": 1, "window_id": 7}}),
+        ),
         ("get_window_state", json!({"pid": 1})),
         ("get_desktop_state", json!({})),
     ] {
         let refused = observe(name, args.clone()).await;
-        assert_eq!(refusal_code(&refused), "browser_secret_held", "{name} {args}");
+        assert_eq!(
+            refusal_code(&refused),
+            "browser_secret_held",
+            "{name} {args}"
+        );
         assert_eq!(refused.is_error, Some(true));
     }
     // Other windows and processes stay observable.
-    for args in [json!({"pid": 1, "window_id": 8}), json!({"pid": 2, "window_id": 7})] {
+    for args in [
+        json!({"pid": 1, "window_id": 8}),
+        json!({"pid": 2, "window_id": 7}),
+    ] {
         let other = observe("get_window_state", args.clone()).await;
         assert_eq!(other.is_error, None, "{args}: {other:?}");
     }
@@ -527,8 +582,10 @@ async fn telemetry_of_a_fill_holds_no_value() {
     )
     .finish(&response);
     let text = format!("{observation:?}");
-    assert!(!text.contains("SENTINEL") && !text.contains(HOST_KEY), "{text}");
+    assert!(
+        !text.contains("SENTINEL") && !text.contains(HOST_KEY),
+        "{text}"
+    );
     assert!(observation.computer_action);
     crate::session::fire_session_end(TRANSPORT);
 }
-

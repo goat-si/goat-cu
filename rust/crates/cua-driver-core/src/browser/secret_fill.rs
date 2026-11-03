@@ -29,12 +29,12 @@ use super::engine::BrowserEngine;
 use super::origin_scope::OriginScope;
 use super::refusal::{BrowserRefusal, BrowserRefusalCode};
 use super::secret_fence::{FenceDigest, FenceKey, SecretFence};
-use super::store::FrameKind;
-use super::types::EndpointAccessClass;
-use crate::protocol::ToolResult;
 use super::secret_fill_page::{
     find_message, find_reason, page_function, FIELDS, FIND, MUTATE, READ_BACK, RELEASE,
 };
+use super::store::FrameKind;
+use super::types::EndpointAccessClass;
+use crate::protocol::ToolResult;
 use crate::tool::{ProtectedResourceOwnership, Tool, ToolDef};
 
 pub const TOOL_NAME: &str = "browser_fill_secret";
@@ -187,7 +187,10 @@ impl FillValues {
         for key in accepted {
             let Some(value) = raw.get(*key) else {
                 if required.contains(key) {
-                    return Err(format!("values.{key} is required for kind {}", kind.as_str()));
+                    return Err(format!(
+                        "values.{key} is required for kind {}",
+                        kind.as_str()
+                    ));
                 }
                 continue;
             };
@@ -275,7 +278,10 @@ fn plan(kind: FillKind, values: &FillValues, offered: &[String]) -> Result<Vec<W
     };
     let writes = match kind {
         FillKind::Password => vec![secret("password", "password")],
-        FillKind::Login => vec![secret("username", "username"), secret("password", "password")],
+        FillKind::Login => vec![
+            secret("username", "username"),
+            secret("password", "password"),
+        ],
         FillKind::OneTimeCode => vec![secret("code", "code")],
         FillKind::Card => {
             let mut writes = vec![secret("number", "number")];
@@ -556,8 +562,10 @@ impl Tool for BrowserFillSecretTool {
             Ok(guard) => guard,
             Err(refusal) => return refusal.to_tool_result(),
         };
-        self.fill(&session, target_id, tab_id, &scope, &origin, kind, &values, hint)
-            .await
+        self.fill(
+            &session, target_id, tab_id, &scope, &origin, kind, &values, hint,
+        )
+        .await
     }
 }
 
@@ -699,11 +707,16 @@ impl BrowserFillSecretTool {
             .map(str::to_owned)
         else {
             let reason = find_reason(found.pointer("/result/value"));
-            return fill_refusal(reason, &format!("{}; nothing was sent", find_message(reason)))
-                .to_tool_result();
+            return fill_refusal(
+                reason,
+                &format!("{}; nothing was sent", find_message(reason)),
+            )
+            .to_tool_result();
         };
         let result = self
-            .write_fields(session, &validated, &handle, origin, kind, values, &loader_id)
+            .write_fields(
+                session, &validated, &handle, origin, kind, values, &loader_id,
+            )
             .await;
         let _ = conn
             .call(
@@ -927,9 +940,15 @@ mod tests {
     fn values_errors_name_keys_and_never_values() {
         let sentinel = "SENTINEL-not-a-month";
         for (kind, raw) in [
-            (FillKind::Card, json!({"number": "4", "exp_month": sentinel, "exp_year": "2030", "cvc": "1"})),
+            (
+                FillKind::Card,
+                json!({"number": "4", "exp_month": sentinel, "exp_year": "2030", "cvc": "1"}),
+            ),
             (FillKind::Login, json!({"username": sentinel})),
-            (FillKind::Password, json!({"password": sentinel, "code": sentinel})),
+            (
+                FillKind::Password,
+                json!({"password": sentinel, "code": sentinel}),
+            ),
             (FillKind::OneTimeCode, json!({"code": 7})),
         ] {
             let error = FillValues::parse(kind, Some(&raw)).err().expect("refused");
@@ -946,7 +965,10 @@ mod tests {
     fn the_host_key_compares_whole_values() {
         assert!(same_key("k".repeat(40).as_str(), "k".repeat(40).as_str()));
         assert!(!same_key("k".repeat(40).as_str(), "k".repeat(39).as_str()));
-        assert!(!same_key(&format!("{}x", "k".repeat(39)), "k".repeat(40).as_str()));
+        assert!(!same_key(
+            &format!("{}x", "k".repeat(39)),
+            "k".repeat(40).as_str()
+        ));
     }
 
     #[test]
@@ -958,13 +980,20 @@ mod tests {
         .unwrap();
         let offered = ["number", "month", "year", "cvc"].map(str::to_owned);
         let writes = plan(FillKind::Card, &values, &offered).unwrap();
-        let order: Vec<_> = writes.iter().map(|write| (write.field, write.secret)).collect();
+        let order: Vec<_> = writes
+            .iter()
+            .map(|write| (write.field, write.secret))
+            .collect();
         assert_eq!(
             order,
-            [("number", true), ("month", false), ("year", false), ("cvc", true)]
+            [
+                ("number", true),
+                ("month", false),
+                ("year", false),
+                ("cvc", true)
+            ]
         );
         assert_eq!(writes[1].value.as_str(), "07");
         assert!(plan(FillKind::Login, &values, &offered).is_err());
     }
 }
-

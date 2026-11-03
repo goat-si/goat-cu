@@ -435,10 +435,11 @@ fn call_target(args: &Value) -> (Option<i64>, Option<u64>) {
     let target = args
         .get("target")
         .filter(|target| target.get("kind").and_then(Value::as_str) == Some("window"));
-    let pid = args
-        .get("pid")
-        .and_then(Value::as_i64)
-        .or_else(|| target.and_then(|target| target.get("pid")).and_then(Value::as_i64));
+    let pid = args.get("pid").and_then(Value::as_i64).or_else(|| {
+        target
+            .and_then(|target| target.get("pid"))
+            .and_then(Value::as_i64)
+    });
     let window_id = args.get("window_id").and_then(Value::as_u64).or_else(|| {
         target
             .and_then(|target| target.get("window_id"))
@@ -535,4 +536,3 @@ mod tests {
         assert_eq!(fences.get(&key).unwrap().loader_id, "L1");
     }
 }
-

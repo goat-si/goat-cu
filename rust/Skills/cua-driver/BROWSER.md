@@ -542,6 +542,76 @@ every outcome, and returns only an opaque download id and byte count. It never
 returns the source URL, filename, or destination path. Direct raw calls without
 the host approval proof are refused.
 
+### Saved secrets (host only) and the read fence
+
+`browser_fill_secret` lets the host application fill a saved password, a
+login (username and password), a card or a one-time code into a tab of the
+person's own browser, without any agent seeing the values. Agents cannot use
+it: an agent's call is refused with `browser_secret_fill_host_only` and
+nothing is sent. If you need a sign-in, ask the person or the host.
+
+Admission is the same as the other page tools: an exact binding of a tab
+attached with the person's existing profile, the capability manifest, and an
+`origin_scope` naming exactly one origin, plus the host authority. A call
+from `run_steps` or `run_script` is refused with `browser_batch_refused`,
+and a fill while a recording runs is refused (`recording_active`).
+
+Arguments: `target_id`, `tab_id`, `session`, `origin_scope`, `kind`
+(`password`, `login`, `card`, `one_time_code`), `values` (`{password}`,
+`{username, password}`, `{number, exp_month, exp_year, cvc, name?}`,
+`{code}`), an optional main-frame field `ref` (its form is filled; for
+`password`, the field itself), and `host_authority`. Without a `ref` the
+focused field's form is filled.
+
+One fixed in-page function per kind finds the fields: the form's one password
+field and its one `username`/`email` field (or the one identifier field
+before the password); the form's `cc-number`, `cc-csc`, `cc-exp` or
+`cc-exp-month`/`cc-exp-year` (lists match the month or year option) and
+`cc-name` fields; the form's `one-time-code` field (or a focused short code
+field). Autocomplete tokens match with section prefixes. Missing or ambiguous
+fields, a field inside a frame, split names and split codes are refused with
+nothing sent. Every write is its own evaluation that first checks the
+document's origin against the scope, the document and the form (and, without
+a `ref`, that focus is still in a card or code form), then sets the value
+and fires `input` and `change`. A navigation in between leaves the
+remaining writes unsent (`document_changed`).
+
+The reply holds `delivered` (one flag per field), `verdict` (`confirmed`
+only when the page read every value back, otherwise `unverifiable`, or
+`not_filled`) and, when it stopped early,
+`refusal.code: "browser_secret_fill_refused"` with `detail.reason`
+(`no_form`, `missing_*`, `ambiguous_*`, `unsupported_*`,
+`field_in_frame`, `form_changed`, `document_changed`, `account_mismatch`,
+`no_option_<field>`, `delivery_uncertain` with `uncertain_field`,
+`unsupported_target`, `recording_active`). It never holds a value, and
+neither do errors, recordings, telemetry or logs: `values` and
+`host_authority` are withheld from trajectories, lengths included.
+
+**Read fence.** Before its first write, a fill marks the tab. While any text
+field in the tab's top-level document still holds a filled value (checked in
+the page on every read; a check that cannot run counts as holding),
+`get_browser_state` snapshots and screenshots of that tab, and desktop
+observation of its window (`get_window_state`, `get_accessibility_tree`,
+`zoom`, `parse_visual_regions`, `verify_state`, `page`, `start_recording`;
+`get_desktop_state` and any observation naming no process) are refused with
+`browser_secret_held`. A read that was already running when a fill marked
+the tab is discarded the same way. The mark clears when no field holds a
+filled value any more (the page cleared it) or the tab shows another document
+(it submitted or navigated). Binding the window and listing its tabs still
+works. The fence keeps no value: only the document's loader id and salted
+digests the page recomputes.
+
+**Host contract.** The host starts the driver with
+`CUA_DRIVER_SECRET_FILL_HOST_KEY` set to a random key of at least 32
+characters, generated per driver start. The driver reads it once at startup
+and removes it from its environment, so applications it launches do not
+inherit it. The host passes the same key as `host_authority` on its own
+fills and strips `host_authority` from every call it relays for an agent.
+The driver compares it in constant time; a driver started without the key
+refuses every fill. If the session that filled ends while a field still holds
+a value, desktop observation of that window stays refused until a browser
+read of the tab clears the mark or the browser quits.
+
 ## Browser chrome and native fallbacks
 
 The browser tools operate on page content, not the surrounding native UI. Use
