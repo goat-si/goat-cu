@@ -72,6 +72,19 @@ fn process_host_key() -> Option<&'static str> {
         .map(|key| key.as_str())
 }
 
+/// Whether `args` carry the key this process was started with. The registry
+/// checks it before admission, so an agent's call never reaches the tab,
+/// a consent prompt or the page.
+pub(crate) fn host_authorized_by_process(args: &Value) -> bool {
+    match (
+        process_host_key(),
+        args.get(HOST_AUTHORITY_ARG).and_then(Value::as_str),
+    ) {
+        (Some(expected), Some(presented)) => same_key(presented, expected),
+        _ => false,
+    }
+}
+
 /// Compare without stopping at the first differing byte.
 fn same_key(presented: &str, expected: &str) -> bool {
     let (presented, expected) = (presented.as_bytes(), expected.as_bytes());
@@ -101,7 +114,7 @@ pub(crate) fn fill_refusal(reason: &str, message: &str) -> BrowserRefusal {
     .with_detail(json!({ "reason": reason }))
 }
 
-fn host_only_refusal() -> BrowserRefusal {
+pub(crate) fn host_only_refusal() -> BrowserRefusal {
     BrowserRefusal::new(
         BrowserRefusalCode::BrowserSecretFillHostOnly,
         "browser_fill_secret is for the host application only; ask the person to fill the \

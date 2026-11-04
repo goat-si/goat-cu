@@ -243,6 +243,22 @@ async fn run_steps_and_recordings_never_carry_a_fill() {
     assert_eq!(refusal_code(&recording), "browser_secret_fill_refused");
     assert_eq!(reason(&recording), "recording_active");
     assert_no_secret(&recording);
+
+    // An agent's call through the registry is refused before admission
+    // proves the tab: no browser call at all, so no consent prompt either.
+    registry.recording.stop_owner(None).unwrap();
+    let calls_before = f.state.lock().unwrap().calls.len();
+    let agent = registry
+        .invoke_with_context(
+            "browser_fill_secret",
+            login_args(&target, &tab),
+            standard_context(),
+        )
+        .await;
+    assert_eq!(refusal_code(&agent), "browser_secret_fill_host_only");
+    assert_eq!(agent.is_error, Some(true));
+    assert_no_secret(&agent);
+    assert_eq!(f.state.lock().unwrap().calls.len(), calls_before);
     assert_eq!(page_function_calls(&f), 0);
     crate::session::fire_session_end(TRANSPORT);
 }

@@ -448,9 +448,10 @@ fn call_target(args: &Value) -> (Option<i64>, Option<u64>) {
     (pid, window_id)
 }
 
-/// The registry's fence admission for `tool`: `browser_fill_secret` runs
-/// only as a direct call while no recording is on, and desktop observation
-/// of a fenced window is refused while its fence holds.
+/// The registry's fence admission for `tool`, before authorization:
+/// `browser_fill_secret` runs only as a direct host call while no recording
+/// is on, and desktop observation of a fenced window is refused while its
+/// fence holds.
 pub(crate) async fn admit_dispatch(
     tool: &str,
     args: &Value,
@@ -466,6 +467,9 @@ pub(crate) async fn admit_dispatch(
                 "recording_active",
                 "a recording is running, and it would capture the filled fields; stop it first",
             )));
+        }
+        if !super::secret_fill::host_authorized_by_process(args) {
+            return Err(dispatch_refusal(super::secret_fill::host_only_refusal()));
         }
         return Ok(None);
     }
