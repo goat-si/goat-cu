@@ -494,6 +494,9 @@ mod mcp_runtime_selection_tests {
 fn main() {
     let startup_parent = goat_host_lifetime::StartupParent::capture();
     cua_driver_core::build_info::init(env!("CUA_DRIVER_GIT_SHA"));
+    // Before any thread starts: take the host's secret-fill key out of the
+    // environment so processes the driver launches never inherit it.
+    cua_driver_core::browser::secret_fill::capture_host_key_from_env();
     cua_driver_sdk::configure_perception_client_resolver(
         extension_manager::perception_client_resolver(),
     );
@@ -936,6 +939,9 @@ fn main() {
 fn main() -> anyhow::Result<()> {
     let startup_parent = goat_host_lifetime::StartupParent::capture();
     cua_driver_core::build_info::init(env!("CUA_DRIVER_GIT_SHA"));
+    // Before any thread starts: take the host's secret-fill key out of the
+    // environment so processes the driver launches never inherit it.
+    cua_driver_core::browser::secret_fill::capture_host_key_from_env();
     // An elevated Driver runs shell launches through this executable with a
     // standard-user token (#3607). Checked first so the helper does no other
     // Driver work.

@@ -858,6 +858,7 @@ mod tests {
             "browser_set_input_files",
             "browser_download",
             "browser_pointer",
+            "browser_fill_secret",
             "start_session",
             "escalate_session",
             "get_session",

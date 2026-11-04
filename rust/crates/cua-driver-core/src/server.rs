@@ -279,6 +279,12 @@ impl From<crate::browser::refusal::BrowserRefusalCode> for ToolRefusalCode {
             // Not a browser-specific code: the shared background refusal is
             // classified through `ToolErrorClass::BackgroundUnavailable`.
             BrowserRefusalCode::BackgroundUnavailable => Self::Other,
+            // Secret-fill outcomes stay outside the closed telemetry
+            // vocabulary: the observation records only that a refusal
+            // happened.
+            BrowserRefusalCode::BrowserSecretHeld
+            | BrowserRefusalCode::BrowserSecretFillHostOnly
+            | BrowserRefusalCode::BrowserSecretFillRefused => Self::Other,
         }
     }
 }
@@ -494,7 +500,7 @@ pub fn is_computer_action(tool_name: &str, operation: ToolOperation) -> bool {
     }
     if matches!(
         tool_name,
-        "browser_set_input_files" | "browser_download" | "browser_pointer"
+        "browser_set_input_files" | "browser_download" | "browser_pointer" | "browser_fill_secret"
     ) {
         return true;
     }
@@ -725,6 +731,7 @@ fn structured_refusal_code(tool_name: &str, result: Option<&serde_json::Value>) 
             | "browser_set_input_files"
             | "browser_download"
             | "browser_pointer"
+            | "browser_fill_secret"
     ) {
         return ToolRefusalCode::None;
     }

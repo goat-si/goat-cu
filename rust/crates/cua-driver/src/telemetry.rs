@@ -607,6 +607,7 @@ impl AgentSessionState {
                 | "browser_set_input_files"
                 | "browser_download"
                 | "browser_pointer"
+                | "browser_fill_secret"
         );
         let refused = outcome.refusal_code.is_refusal();
         let completed_computer_action = computer_action && !refused;

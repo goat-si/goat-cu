@@ -920,6 +920,7 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
         "browser_set_input_files" => &["browser.input.files"],
         "browser_download" => &["browser.download"],
         "browser_pointer" => &["browser.input.pointer"],
+        "browser_fill_secret" => &["browser.input.secret_fill"],
 
         // ── driver self-service ──────────────────────────────────────
         "check_for_update" => &["driver.update_check"],
@@ -1239,6 +1240,9 @@ pub struct ToolRegistry {
     /// The bundle id and launch path of each running app instance, so a call
     /// under a capability manifest does not list every app again.
     application_identities: Arc<crate::application_identity::ApplicationIdentityCache>,
+    /// Browser engines whose tools this registry serves: their read fences
+    /// apply to this registry's desktop observation tools.
+    browser_engines: Vec<std::sync::Weak<crate::browser::BrowserEngine>>,
 }
 
 impl ToolRegistry {
@@ -1332,6 +1336,7 @@ impl ToolRegistry {
             protected_resource_grants,
             protected_resource_ownership,
             application_identities,
+            browser_engines: Vec::new(),
         }
     }
 
@@ -1482,6 +1487,12 @@ impl ToolRegistry {
         registration: crate::session::CursorOutcomeReaderRegistration,
     ) {
         self.cursor_outcome_readers.push(registration);
+    }
+
+    /// Fence this registry's desktop observation tools with the engine's
+    /// secret-fill read fence. Called by `register_browser_tools`.
+    pub fn attach_browser_engine(&mut self, engine: &Arc<crate::browser::BrowserEngine>) {
+        self.browser_engines.push(Arc::downgrade(engine));
     }
 
     pub fn retain_runtime_cleanup(&mut self, cleanup: impl FnOnce() + Send + Sync + 'static) {
@@ -1912,10 +1923,33 @@ impl ToolRegistry {
         context: &crate::session_authorization::EffectiveAuthorizationContext,
         evidence: &TrustedInvocationEvidence,
     ) -> ToolResult {
+        // The secret-fill read fence: a desktop observation of a window
+        // whose tab holds a filled value is refused, and one that ran while
+        // a fill marked it is discarded.
+        let fenced_tool = match name {
+            "type_text_chars" => "type_text",
+            other => renamed_tool(other).unwrap_or(other),
+        };
+        let fence_ticket = match crate::browser::secret_fence::admit_dispatch(
+            fenced_tool,
+            &args,
+            &self.browser_engines,
+            self.recording.current_state().enabled,
+        )
+        .await
+        {
+            Ok(ticket) => ticket,
+            Err(refusal) => return registry_disposition(refusal, true, false),
+        };
         let mut dispatched = false;
         let result = self
             .invoke_authorized_dispatch(name, args, context, evidence, &mut dispatched)
             .await;
+        if let Some(ticket) = fence_ticket {
+            if let Err(refusal) = ticket.confirm(fenced_tool) {
+                return registry_disposition(refusal, false, true);
+            }
+        }
         if dispatched {
             result
         } else {
@@ -2555,6 +2589,9 @@ impl ToolRegistry {
                     | "run_script"
                     | "start_session"
                     | "end_session"
+                    // A host secret fill is never recorded: a recording
+                    // refuses it, and its arguments are secrets.
+                    | "browser_fill_secret"
             );
         let private_consent_turn = is_existing_profile_prepare(resolved_name, &args);
         let file_lease = if changes_app_or_desktop_state(tool.def(), resolved_name, &args)
@@ -9214,6 +9251,7 @@ fn recording_args_for(tool_name: &str, args: &Value) -> Value {
             "set_value" => &["value"],
             "browser_dialog" => &["prompt_text"],
             "clipboard_write" => &["text", "image_path", "file_path"],
+            "browser_fill_secret" => crate::browser::secret_fill::SECRET_ARGS,
             _ => &[],
         };
         let mut withheld = Vec::new();
@@ -9221,7 +9259,11 @@ fn recording_args_for(tool_name: &str, args: &Value) -> Value {
         for &field in fields {
             if let Some(value) = arguments.remove(field) {
                 withheld.push(field);
-                if let Some(value) = value.as_str() {
+                // A secret's length is not recorded either.
+                if let Some(value) = value
+                    .as_str()
+                    .filter(|_| tool_name != crate::browser::secret_fill::TOOL_NAME)
+                {
                     lengths.insert(field.to_owned(), serde_json::json!(value.chars().count()));
                 }
             }
@@ -9359,6 +9401,24 @@ mod capability_tests {
         assert_eq!(recorded["pid"], 42);
         assert_eq!(recorded["window_id"], 7);
         assert_eq!(recorded["strategy"]["kind"], "existing_profile");
+    }
+
+    #[test]
+    fn secret_fill_recording_args_hold_no_value_key_or_length() {
+        let args = serde_json::json!({
+            "target_id": "t", "tab_id": "tab", "kind": "card",
+            "values": {"number": "SENTINEL-4111", "cvc": "SENTINEL-123", "name": "SENTINEL NAME"},
+            "host_authority": "SENTINEL-host-key-0123456789abcdef0123",
+        });
+        let recorded = recording_args_for("browser_fill_secret", &args);
+        let text = recorded.to_string();
+        assert!(!text.contains("SENTINEL"), "{text}");
+        assert_eq!(
+            recorded["_withheld_args"],
+            serde_json::json!(["values", "host_authority"])
+        );
+        assert_eq!(recorded["_withheld_lengths"], serde_json::json!({}));
+        assert_eq!(recorded["kind"], "card");
     }
 
     #[test]
@@ -9526,6 +9586,7 @@ mod capability_tests {
         "browser_set_input_files",
         "browser_download",
         "browser_pointer",
+        "browser_fill_secret",
         "history_status",
         "history_query",
         "parse_visual_regions",
@@ -9614,6 +9675,7 @@ mod capability_tests {
         "browser.input.click",
         "browser.input.type",
         "browser.input.select",
+        "browser.input.secret_fill",
         "browser.input.files",
         "browser.dialog",
         "browser.download",

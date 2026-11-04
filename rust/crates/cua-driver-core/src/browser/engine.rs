@@ -81,6 +81,8 @@ pub struct BrowserEngine {
     pub(crate) existing_profile_grants: ExistingProfileGrants,
     pub(crate) approval_broker: Arc<crate::consent::ApprovalBroker>,
     pub(crate) protected_resource_ownership: Arc<crate::consent::ProtectedResourceOwnershipStore>,
+    /// Tabs holding values `browser_fill_secret` delivered.
+    pub(crate) secret_fences: super::secret_fence::SecretFences,
     mutation_gates: MutationGates,
     reconnect_gates: ReconnectGates,
     pending_existing_profile_cleanups: Mutex<HashMap<String, Vec<ExistingProfileSetupRequest>>>,
@@ -673,6 +675,7 @@ impl BrowserEngine {
             existing_profile_grants: ExistingProfileGrants::new(),
             approval_broker,
             protected_resource_ownership,
+            secret_fences: Default::default(),
             mutation_gates: MutationGates::new(),
             reconnect_gates: ReconnectGates::new(),
             pending_existing_profile_cleanups: Mutex::new(HashMap::new()),
@@ -1040,7 +1043,7 @@ impl BrowserEngine {
         })))
     }
 
-    async fn connection_for_record(
+    pub(crate) async fn connection_for_record(
         &self,
         session: &str,
         record: &TargetRecord,
@@ -1249,7 +1252,7 @@ impl BrowserEngine {
     }
 
     /// Attach (flattened) to a tab's target and return the CDP session id.
-    async fn attach(
+    pub(crate) async fn attach(
         &self,
         conn: &CdpConnection,
         cdp_target_id: &str,

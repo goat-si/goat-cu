@@ -1811,6 +1811,7 @@ fn register_platform_browser_tools(
     use cua_driver_core::browser::{
         download::BrowserDownloadTool,
         pointer::BrowserPointerTool,
+        secret_fill::BrowserFillSecretTool,
         tools::{
             BrowserClickTool, BrowserDialogTool, BrowserNavigateTool, BrowserPrepareTool,
             BrowserSelectTool, BrowserSetInputFilesTool, BrowserTypeTool, GetBrowserStateTool,
@@ -1826,6 +1827,10 @@ fn register_platform_browser_tools(
     registry.register(Box::new(BrowserSetInputFilesTool::new(engine.clone())));
     registry.register(Box::new(BrowserDownloadTool::new(engine.clone())));
     registry.register(Box::new(BrowserPointerTool::new(engine.clone())));
+    registry.register(Box::new(BrowserFillSecretTool::new(engine.clone())));
+    // Desktop observation of a window whose tab holds a filled secret is
+    // refused while it holds; see `cua_driver_core::browser::secret_fence`.
+    registry.attach_browser_engine(engine);
 }
 
 #[cfg(test)]
