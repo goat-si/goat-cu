@@ -1053,6 +1053,13 @@ export type ActionResult = {
      */
     nextCall?: ActionNextCall,
     /**
+     * Present only when the `fast_path` config key is `on`: the check cost,
+     * the target class and the changed regions since the last read, as one
+     * JSON object. Absent when the flag is off, so default results are
+     * unchanged.
+     */
+    fastPath?: string,
+    /**
      * Producer confirmation retained for the macOS drag/right-click readbacks.
      */
     verified?: boolean,
@@ -1125,6 +1132,7 @@ const FfiConverterTypeActionResult = (() => {
                 error: FfiConverterOptionalTypeActionError.read(from),
                 hint: FfiConverterOptionalString.read(from),
                 nextCall: FfiConverterOptionalTypeActionNextCall.read(from),
+                fastPath: FfiConverterOptionalString.read(from),
                 verified: FfiConverterOptionalBoolean.read(from),
                 selectionChanged: FfiConverterOptionalBoolean.read(from),
                 selectedTextRange: FfiConverterOptionalTypeActionSelectedTextRange.read(from),
@@ -1150,6 +1158,7 @@ const FfiConverterTypeActionResult = (() => {
             FfiConverterOptionalTypeActionError.write(value.error, into);
             FfiConverterOptionalString.write(value.hint, into);
             FfiConverterOptionalTypeActionNextCall.write(value.nextCall, into);
+            FfiConverterOptionalString.write(value.fastPath, into);
             FfiConverterOptionalBoolean.write(value.verified, into);
             FfiConverterOptionalBoolean.write(value.selectionChanged, into);
             FfiConverterOptionalTypeActionSelectedTextRange.write(value.selectedTextRange, into);
@@ -1174,6 +1183,7 @@ const FfiConverterTypeActionResult = (() => {
              FfiConverterOptionalTypeActionError.allocationSize(value.error) +
              FfiConverterOptionalString.allocationSize(value.hint) +
              FfiConverterOptionalTypeActionNextCall.allocationSize(value.nextCall) +
+             FfiConverterOptionalString.allocationSize(value.fastPath) +
              FfiConverterOptionalBoolean.allocationSize(value.verified) +
              FfiConverterOptionalBoolean.allocationSize(value.selectionChanged) +
              FfiConverterOptionalTypeActionSelectedTextRange.allocationSize(value.selectedTextRange) +

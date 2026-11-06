@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 use crate::goat::action_latency as latency;
 
 use async_trait::async_trait;
@@ -674,7 +677,7 @@ impl Tool for PressKeyTool {
                     super::not_editable::desktop_dispatch_guard(checked_pid, printable_desktop)?;
                     let modifier_refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
                     crate::input::key_hold::deliver(
-                        crate::input::key_hold::KeyRoute::Global,
+                        crate::input::key_hold::KeyRoute::Global(None),
                         &key_for_input,
                         &modifier_refs,
                         duration,
@@ -1179,7 +1182,7 @@ impl Tool for PressKeyTool {
                                         || {
                                 verify_raw_key_target(pid, Some(wid), pre_focus_ptr, false)?;
                                 late_cell_refusal(pid, Some(wid), printable, pre_focus_ptr.is_some())?;
-                                crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal, &key, &m, duration, &control)
+                                crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control)
                             },
                                     )
                                 },

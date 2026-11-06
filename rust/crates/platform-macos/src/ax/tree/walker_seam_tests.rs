@@ -428,6 +428,7 @@ fn run_fake_inner(
         merge_fold_reasons(&mut budget, reasons);
     }
     let outcome = budget.outcome();
+    let depth_truncated = ledger.depth_truncated();
     finalize_walk(
         lines,
         nodes,
@@ -435,6 +436,7 @@ fn run_fake_inner(
         query,
         outcome,
         ledger.finish(),
+        depth_truncated,
         None,
     )
 }

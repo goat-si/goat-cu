@@ -220,7 +220,7 @@ impl cua_driver_core::tool::Tool for AdmittedTool {
         &self,
         adapter: &str,
         args: &serde_json::Value,
-    ) -> Result<Option<serde_json::Value>, String> {
+    ) -> Result<Option<serde_json::Value>, cua_driver_core::tool::ProtectedResourceScopeError> {
         self.0.protected_resource_scope(adapter, args).await
     }
     async fn validate_protected_resource_scope(
@@ -228,7 +228,7 @@ impl cua_driver_core::tool::Tool for AdmittedTool {
         adapter: &str,
         args: &serde_json::Value,
         approved: &serde_json::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), cua_driver_core::tool::ProtectedResourceScopeError> {
         self.0
             .validate_protected_resource_scope(adapter, args, approved)
             .await

@@ -571,7 +571,7 @@ async fn an_existing_profile_bind_is_admitted_as_a_browser_window_only_with_a_sc
         )
         .await
         .unwrap_err();
-    let refusal = super::super::refusal::BrowserRefusal::from_scope_error(&unscoped)
+    let refusal = super::super::refusal::BrowserRefusal::from_scope_error(&unscoped.message)
         .expect("a typed refusal");
     assert_eq!(code(&refusal), "browser_origin_scope_required");
     let scoped = tool

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Immutable daemon permission-mode configuration.
 //!
 //! Capability policy answers whether an operation is inside the configured
@@ -1928,6 +1931,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "yaml")]
     #[test]
     fn standard_manifest_scope_is_checked_before_existing_profile_approval() {
         use std::io::Write as _;

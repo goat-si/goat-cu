@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Background keyboard injection via PostMessage.
 //!
 //! WM_CHAR — posts a character code; simpler and more reliable for text entry.
@@ -10,7 +13,7 @@
 //! the system input queue, not posted messages. This module exposes
 //! [`is_xaml_host_hwnd`] so callers (e.g. the `type_text` tool) can route
 //! around the PostMessage path for those targets — see CUA-543 and
-//! `tools::impl_::TypeTextTool` for the routing logic. The actual UIA
+//! `tools::type_text::TypeTextTool` for the routing logic. The actual UIA
 //! `ValuePattern.SetValue` injection lives in the tools layer alongside
 //! the existing `set_value` tool; this module deliberately stays
 //! Win32-only so the unit tests don't depend on UIA initialisation.
@@ -399,38 +402,73 @@ pub fn post_type_text_with_delay(hwnd: u64, text: &str, inter_char_ms: u64) -> R
     // race with text-insertion side effects on the focus.
     let h = focused_descendant(h_parent).unwrap_or(h_parent);
 
-    let mut prev_was_cr = false;
-    for ch in text.chars() {
-        match ch {
-            // `\r\n` (Windows-style line ending) → single Enter. The `\r`
-            // does the Enter; the following `\n` is consumed silently.
-            '\n' if prev_was_cr => {
-                prev_was_cr = false;
-            }
-            '\n' | '\r' => {
+    let units = text_units(text);
+    let mut since_barrier = 0usize;
+    for unit in &units {
+        match unit {
+            // The Enter keystroke makes the target's TranslateMessage append a
+            // WM_CHAR(0x0D) to ITS queue when it dispatches the WM_KEYDOWN.
+            // Anything we post before that lands ahead of the Return and the
+            // text is reordered. Wait for the target to pump (twice, because a
+            // sent message can overtake the posted keydown) before moving on.
+            TextUnit::Return => {
                 unsafe {
                     post_enter_keystroke(h)?;
                 }
-                prev_was_cr = ch == '\r';
-                // Extra settle after Enter — paragraph creation in rich
+                wait_for_target_pump(h);
+                // Extra settle after Enter: paragraph creation in rich
                 // editors (VCL Writer, Scintilla, RichEdit) is heavier than
-                // a single-character insert, so the baseline KEY_DELAY_MS +
-                // inter_char_ms is not enough on slower hosts. The extra
-                // 20 ms covers the queue drain without noticeably slowing
-                // multi-line typing.
+                // a single-character insert.
                 sleep(Duration::from_millis(KEY_DELAY_MS + inter_char_ms + 20));
+                since_barrier = 0;
             }
-            _ => {
-                prev_was_cr = false;
-                let code = ch as u32 as usize;
+            // One UTF-16 unit per WM_CHAR. A supplementary scalar (emoji) is a
+            // high then a low surrogate; posting the scalar value in a single
+            // WM_CHAR is truncated by the target and shows up as garbage.
+            TextUnit::Packet(code) => {
                 unsafe {
-                    PostMessageW(h, WM_CHAR, WPARAM(code), LPARAM(1))?;
+                    PostMessageW(h, WM_CHAR, WPARAM(*code as usize), LPARAM(1))?;
                 }
+                since_barrier += 1;
                 sleep(Duration::from_millis(KEY_DELAY_MS + inter_char_ms));
+                // Bound the target's backlog so the read-back after the call
+                // sees a settled field, and so a hung target aborts the call.
+                if since_barrier >= POST_CHUNK_UNITS {
+                    wait_for_target_pump(h);
+                    since_barrier = 0;
+                }
             }
         }
     }
+    wait_for_target_pump(h);
     Ok(())
+}
+
+/// Posted characters between two pump barriers.
+const POST_CHUNK_UNITS: usize = 32;
+
+/// Round-trip `WM_NULL` to `h`'s thread twice. Sent messages are serviced
+/// whenever the target's message loop next retrieves a message, so this
+/// returns once the target has gone around its loop after everything posted
+/// so far. Bounded and best effort: a hung target just times out.
+fn wait_for_target_pump(h: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SendMessageTimeoutW, SMTO_ABORTIFHUNG, SMTO_BLOCK, WM_NULL,
+    };
+    for _ in 0..2 {
+        let mut out = 0usize;
+        let _ = unsafe {
+            SendMessageTimeoutW(
+                h,
+                WM_NULL,
+                WPARAM(0),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                250,
+                Some(&mut out),
+            )
+        };
+    }
 }
 
 /// Press a named key (and optional modifiers) via WM_KEYDOWN/WM_KEYUP.
@@ -444,10 +482,12 @@ pub fn post_key(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<()> {
     // the renderer; mirror the WM_CHAR path and retarget to that child when
     // the target thread exposes one.
     let target = focused_descendant(hwnd_win).unwrap_or(hwnd_win);
-    let vk = key_name_to_vk(key)?;
+    let (vk, scan) = match resolve_press(target, key, modifiers)? {
+        Press::Key { vk, scan } => (vk, scan),
+        Press::Text(ch) => return post_type_text(hwnd, &ch.to_string()),
+    };
     let has_alt = modifiers.iter().any(|m| *m == "alt" || *m == "menu");
 
-    let scan = unsafe { MapVirtualKeyW(vk.0 as u32, MAPVK_VK_TO_VSC) };
     let repeat_lp = |scan: u32, extended: bool, key_up: bool| {
         let mut lp: u32 = 1; // repeat count
         lp |= scan << 16;
@@ -551,7 +591,10 @@ pub fn send_key_synthesized_after_focus(
         // diagnostic early than silently no-op.
         bail!(msg);
     }
-    let key_vk = key_name_to_vk(key)?;
+    let (key_vk, key_scan) = match resolve_press(target, key, modifiers)? {
+        Press::Key { vk, scan } => (vk, scan),
+        Press::Text(ch) => return send_text_synthesized_after_focus(hwnd, &ch.to_string(), focus),
+    };
     let mod_vks: Vec<VIRTUAL_KEY> = modifiers.iter().filter_map(|m| modifier_vk(m)).collect();
 
     // Build the INPUT sequence: modifiers down, key down, key up, modifiers up
@@ -561,8 +604,8 @@ pub fn send_key_synthesized_after_focus(
     for mvk in &mod_vks {
         events.push(key_input(*mvk, false));
     }
-    events.push(key_input(key_vk, false));
-    events.push(key_input(key_vk, true));
+    events.push(scanned_key_input(key_vk, key_scan, false));
+    events.push(scanned_key_input(key_vk, key_scan, true));
     for mvk in mod_vks.iter().rev() {
         events.push(key_input(*mvk, true));
     }
@@ -1016,7 +1059,12 @@ fn unicode_key_input(unit: u16, up: bool) -> INPUT {
 /// or up (`up = true`). Uses scancode + EXTENDEDKEY where applicable so the
 /// target sees a hardware-like keystroke.
 fn key_input(vk: VIRTUAL_KEY, up: bool) -> INPUT {
-    let scan = unsafe { MapVirtualKeyW(vk.0 as u32, MAPVK_VK_TO_VSC) } as u16;
+    let scan = unsafe { MapVirtualKeyW(vk.0 as u32, MAPVK_VK_TO_VSC) };
+    scanned_key_input(vk, scan, up)
+}
+
+fn scanned_key_input(vk: VIRTUAL_KEY, scan: u32, up: bool) -> INPUT {
+    let scan = scan as u16;
     let mut flags: KEYBD_EVENT_FLAGS = KEYBD_EVENT_FLAGS(0);
     // Scancode is more reliable than VK for some apps. EXTENDEDKEY flag
     // makes arrow / nav / right-side modifier keys work correctly.
@@ -1100,6 +1148,47 @@ fn is_extended(vk: VIRTUAL_KEY) -> bool {
             | VK_NUMLOCK
             | VK_SNAPSHOT
     )
+}
+
+/// A key press resolved for one target window.
+enum Press {
+    /// A virtual key and its scan code on the layout that translates it.
+    Key { vk: VIRTUAL_KEY, scan: u32 },
+    /// A character the target's layout cannot type with one unshifted key;
+    /// it goes through `type_text`'s Unicode path instead.
+    Text(char),
+}
+
+/// A single printable character with no modifiers must type that character,
+/// so it is resolved on the target thread's keyboard layout (#6181): on Thai
+/// Kedmanee VK_3 types '-', and on AZERTY '3' needs Shift. Named keys and
+/// chords such as ctrl+s stay on their virtual keys.
+fn resolve_press(target: HWND, key: &str, modifiers: &[&str]) -> Result<Press> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyboardLayout, MapVirtualKeyExW, VkKeyScanExW,
+    };
+    let mut chars = key.chars();
+    if let (Some(ch), None, true) = (chars.next(), chars.next(), modifiers.is_empty()) {
+        if !ch.is_control() {
+            // Letter names are case-insensitive, as on the other platforms:
+            // "A" types what "a" types and does not add Shift.
+            let ch = ch.to_ascii_lowercase();
+            let hkl = unsafe { GetKeyboardLayout(GetWindowThreadProcessId(target, None)) };
+            let vk = u16::try_from(ch as u32).ok().and_then(|unit| {
+                crate::keycodes::unshifted_layout_key(unsafe { VkKeyScanExW(unit, hkl) })
+            });
+            return Ok(match vk {
+                Some(vk) => Press::Key {
+                    vk: VIRTUAL_KEY(vk),
+                    scan: unsafe { MapVirtualKeyExW(vk as u32, MAPVK_VK_TO_VSC, hkl) },
+                },
+                None => Press::Text(ch),
+            });
+        }
+    }
+    let vk = key_name_to_vk(key)?;
+    let scan = unsafe { MapVirtualKeyW(vk.0 as u32, MAPVK_VK_TO_VSC) };
+    Ok(Press::Key { vk, scan })
 }
 
 fn key_name_to_vk(key: &str) -> Result<VIRTUAL_KEY> {
@@ -1383,5 +1472,33 @@ mod text_unit_tests {
             let flags = unsafe { input.Anonymous.ki.dwFlags };
             assert_eq!(flags.0 & KEYEVENTF_UNICODE.0, 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod post_text_unit_tests {
+    use super::*;
+
+    fn packets(text: &str) -> Vec<Option<u16>> {
+        text_units(text)
+            .into_iter()
+            .map(|u| match u {
+                TextUnit::Packet(c) => Some(c),
+                TextUnit::Return => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn supplementary_scalar_is_two_surrogate_units() {
+        assert_eq!(packets("\u{1F600}"), vec![Some(0xD83D), Some(0xDE00)]);
+    }
+
+    #[test]
+    fn crlf_is_one_return_and_symbols_survive() {
+        assert_eq!(
+            packets("a\r\nb\n~é"),
+            vec![Some(97), None, Some(98), None, Some(126), Some(0xE9)]
+        );
     }
 }

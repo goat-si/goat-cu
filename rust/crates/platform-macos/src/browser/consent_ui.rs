@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Exact macOS handling for Chrome's browser-owned remote-debugging consent.
 
 use std::time::{Duration, Instant};
@@ -639,6 +642,7 @@ mod tests {
                     tree_markdown: String::new(),
                     truncated: false,
                     nodes_skipped: false,
+                    depth_truncated: false,
                     walk: budget.outcome(),
                     window_scope: None,
                 })?;

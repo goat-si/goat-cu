@@ -1,4 +1,6 @@
 use super::*;
+// Declared from `tools/set_value.rs`; the bounded text-write spawn lives in `impl_`.
+use super::super::impl_::spawn_text_write_until;
 use crate::atspi::native::{
     gated_route, text_write_stop, text_write_timeout_error, TextWriteDispatch,
 };

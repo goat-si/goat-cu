@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Tool trait and registry.
 
 use std::collections::{HashMap, HashSet};
@@ -36,6 +39,8 @@ tokio::task_local! {
     /// Opaque generation for runtime-owned mutable resources. Nested
     /// dispatches inherit this key, while public arguments can never select it.
     static DISPATCH_RUNTIME_SCOPE: String;
+    /// The physical desktop action this task dispatches.
+    static DESKTOP_LEASE: DesktopLease;
 }
 
 /// Trusted task-local dispatch state captured before an owned worker is
@@ -136,9 +141,163 @@ pub fn with_runtime_scope<T>(scope: String, action: impl FnOnce() -> T) -> T {
     action()
 }
 
+/// GOAT: the in-process coordinator paired with the cross-process desktop file
+/// lease. Every coordinated registry dispatch takes it before the desktop lane
+/// below, and external interactive batches (`desktop_lease::acquire_owned`)
+/// take it alone, so both stay serialized.
 pub(crate) fn desktop_action_coordinator() -> &'static tokio::sync::Mutex<()> {
     static COORDINATOR: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     COORDINATOR.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// How long a call waits for the desktop lane once its holder is a worker
+/// whose call already ended. It matches the base budget of one foreground
+/// input call, so a waiting call never outlasts its own budget behind it.
+const STALE_LANE_WAIT: Duration = Duration::from_secs(12);
+
+/// The process-wide physical input lane: one desktop action at a time.
+struct DesktopLane {
+    lock: Arc<tokio::sync::Mutex<()>>,
+    holder: Arc<Mutex<LaneHolder>>,
+    stale_wait: Duration,
+}
+
+/// Which hold of the lane is current, and when its call ended while a
+/// worker still held the lane. A mark belongs to its holder's generation,
+/// so it never applies to the holder after it.
+#[derive(Default)]
+struct LaneHolder {
+    generation: u64,
+    stale_since: Option<tokio::time::Instant>,
+}
+
+fn desktop_lane() -> &'static DesktopLane {
+    static LANE: OnceLock<DesktopLane> = OnceLock::new();
+    LANE.get_or_init(|| DesktopLane::new(STALE_LANE_WAIT))
+}
+
+fn lock_holder(holder: &Mutex<LaneHolder>) -> std::sync::MutexGuard<'_, LaneHolder> {
+    holder
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl DesktopLane {
+    fn new(stale_wait: Duration) -> Self {
+        Self {
+            lock: Arc::new(tokio::sync::Mutex::new(())),
+            holder: Arc::new(Mutex::new(LaneHolder::default())),
+            stale_wait,
+        }
+    }
+
+    /// Wait for the lane. Waiting behind a call still running is ordinary
+    /// serialization; waiting behind a worker that outlived its call gives
+    /// up after `stale_wait` with an `input_busy` refusal.
+    async fn acquire(&self) -> Result<DesktopCall, ToolResult> {
+        // Avoid yielding the dispatch task when the process-wide input
+        // lane is uncontended. On Windows, that yield creates a window in
+        // which the foreground target can lose keyboard eligibility
+        // between the fixture's focus proof and SendInput. Contended
+        // runtimes still wait and serialize through the same mutex.
+        let guard = match self.lock.clone().try_lock_owned() {
+            Ok(guard) => guard,
+            Err(_) => {
+                let wait = self.lock.clone().lock_owned();
+                tokio::pin!(wait);
+                loop {
+                    // Read the holder on every pass, the first one before any
+                    // wait included: a stale worker seen earlier may have
+                    // stopped, and its successor be a call still running.
+                    let stale_since = lock_holder(&self.holder).stale_since;
+                    if stale_since
+                        .is_some_and(|since| tokio::time::Instant::now() >= since + self.stale_wait)
+                    {
+                        return Err(protected_refusal(
+                            "input_busy",
+                            "a previous call's input is still finishing: its call ended, but its worker still holds the desktop; retry once it has stopped",
+                        ));
+                    }
+                    tokio::select! {
+                        guard = &mut wait => break guard,
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                    }
+                }
+            }
+        };
+        let generation = {
+            let mut holder = lock_holder(&self.holder);
+            holder.generation += 1;
+            holder.stale_since = None;
+            holder.generation
+        };
+        Ok(DesktopCall(DesktopLease(Arc::new(HeldLane {
+            holder: self.holder.clone(),
+            generation,
+            _guard: guard,
+        }))))
+    }
+}
+
+struct HeldLane {
+    holder: Arc<Mutex<LaneHolder>>,
+    generation: u64,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for HeldLane {
+    fn drop(&mut self) {
+        // Runs before `_guard` unlocks the lane for the next holder.
+        let mut holder = lock_holder(&self.holder);
+        if holder.generation == self.generation {
+            holder.stale_since = None;
+        }
+    }
+}
+
+/// One physical desktop action's hold on the process-wide input lane, freed
+/// once every clone is dropped. A platform worker that outlives its call (it
+/// timed out, or its caller went away) keeps a clone, as does any cleanup it
+/// hands off, so the next desktop action waits until both have stopped
+/// instead of overlapping their late input, for at most [`STALE_LANE_WAIT`].
+#[derive(Clone)]
+pub struct DesktopLease(Arc<HeldLane>);
+
+impl DesktopLease {
+    /// The lease of the desktop action this task runs, if it holds one.
+    pub fn current() -> Option<Self> {
+        DESKTOP_LEASE.try_with(Clone::clone).ok()
+    }
+}
+
+/// The dispatching call's own hold on the desktop lane. Dropping it while a
+/// worker still holds a [`DesktopLease`] clone marks that worker stale.
+pub struct DesktopCall(DesktopLease);
+
+impl DesktopCall {
+    /// Wait for the process-wide input lane, or refuse with `input_busy`
+    /// once a worker that outlived its call has held it too long.
+    pub async fn acquire() -> Result<Self, ToolResult> {
+        desktop_lane().acquire().await
+    }
+
+    /// Run `action` as the desktop action holding this lane, so that
+    /// [`DesktopLease::current`] returns it.
+    pub async fn scope<F: std::future::Future>(&self, action: F) -> F::Output {
+        DESKTOP_LEASE.scope(self.0.clone(), action).await
+    }
+}
+
+impl Drop for DesktopCall {
+    fn drop(&mut self) {
+        let held = &self.0 .0;
+        // Checked under the holder lock that the last clone's drop takes,
+        // so a worker stopping now cannot leave its mark behind.
+        let mut holder = lock_holder(&held.holder);
+        if holder.generation == held.generation && Arc::strong_count(held) > 1 {
+            holder.stale_since = Some(tokio::time::Instant::now());
+        }
+    }
 }
 
 fn active_text_input_pids() -> &'static Mutex<HashSet<i64>> {
@@ -1048,6 +1207,42 @@ impl ApprovedObservation {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectedResourceScopeError {
+    pub code: Option<&'static str>,
+    pub message: String,
+}
+
+impl From<String> for ProtectedResourceScopeError {
+    fn from(message: String) -> Self {
+        Self {
+            code: None,
+            message,
+        }
+    }
+}
+
+impl From<&str> for ProtectedResourceScopeError {
+    fn from(message: &str) -> Self {
+        Self::from(message.to_owned())
+    }
+}
+
+impl From<crate::browser::BrowserRefusal> for ProtectedResourceScopeError {
+    fn from(refusal: crate::browser::BrowserRefusal) -> Self {
+        Self {
+            code: Some(refusal.code.as_str()),
+            message: refusal.message,
+        }
+    }
+}
+
+impl std::fmt::Display for ProtectedResourceScopeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// A callable tool handler. Object-safe — uses `Box<dyn Tool>`.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -1082,7 +1277,7 @@ pub trait Tool: Send + Sync {
         &self,
         _adapter_id: &str,
         _args: &Value,
-    ) -> Result<Option<Value>, String> {
+    ) -> Result<Option<Value>, ProtectedResourceScopeError> {
         Ok(None)
     }
 
@@ -1093,11 +1288,11 @@ pub trait Tool: Send + Sync {
         adapter_id: &str,
         args: &Value,
         approved_scope: &Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), ProtectedResourceScopeError> {
         match self.protected_resource_scope(adapter_id, args).await? {
             Some(current) if current == *approved_scope => Ok(()),
-            Some(_) => Err("the protected resource identity changed before dispatch".to_owned()),
-            None => Err("the protected resource identity cannot be re-proven".to_owned()),
+            Some(_) => Err("the protected resource identity changed before dispatch".into()),
+            None => Err("the protected resource identity cannot be re-proven".into()),
         }
     }
 
@@ -1216,6 +1411,9 @@ pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     desktop_lease: crate::desktop_lease::LeaseManager,
     desktop_coordinator: &'static tokio::sync::Mutex<()>,
+    /// The upstream in-process desktop lane; the process-wide lane outside
+    /// tests that give a registry its own.
+    desktop_lane: &'static DesktopLane,
     /// Ordered list of tool names for `tools/list`.
     order: Vec<String>,
     /// Shared recording session — auto-records each non-read-only tool call.
@@ -1322,6 +1520,7 @@ impl ToolRegistry {
             #[cfg(test)]
             desktop_lease: crate::desktop_lease::test_support::manager(),
             desktop_coordinator: desktop_action_coordinator(),
+            desktop_lane: desktop_lane(),
             order: Vec::new(),
             recording,
             history: None,
@@ -1893,6 +2092,9 @@ impl ToolRegistry {
         } else {
             Ok(crate::post_action_wait::PostActionWait::Default)
         };
+        let delta_target = (!in_batch && crate::fast_path::wire::returns_delta(tool))
+            .then(|| crate::fast_path::wire::delta_target(&args))
+            .flatten();
         let mut result = match wait {
             Ok(wait) => {
                 crate::post_action_wait::scope(
@@ -1907,6 +2109,21 @@ impl ToolRegistry {
                 false,
             ),
         };
+        // Fast path `on` (CUA-3102): a direct action returns the window's
+        // delta in the same result, so the agent needs no separate re-read.
+        if let Some((pid, window_id)) = delta_target.filter(|_| result.is_error != Some(true)) {
+            let mut read = serde_json::json!({
+                "pid": pid,
+                "window_id": window_id,
+                "since": "latest",
+            });
+            if let Some(session) = session.as_deref() {
+                read["session"] = Value::String(session.to_owned());
+            }
+            let delta =
+                Box::pin(self.invoke_authorized("get_window_state", read, context, evidence)).await;
+            crate::fast_path::wire::attach_delta(&mut result, delta);
+        }
         crate::recovery_hint::annotate(tool, &seed, &mut result);
         crate::batch_nudge::annotate(tool, session.as_deref(), in_batch, &mut result);
         let read_only = self
@@ -2594,12 +2811,16 @@ impl ToolRegistry {
                     | "browser_fill_secret"
             );
         let private_consent_turn = is_existing_profile_prepare(resolved_name, &args);
-        let file_lease = if changes_app_or_desktop_state(tool.def(), resolved_name, &args)
+        // GOAT: every app- or desktop-changing call coordinates (fail closed), across
+        // processes through the file lease and in process through the coordinator
+        // and the upstream desktop lane, whose lease platform workers clone.
+        let coordinate = changes_app_or_desktop_state(tool.def(), resolved_name, &args)
             && requires_desktop_coordination(
                 resolved_name,
                 &args,
                 tool.has_independent_input_lane(&args),
-            ) {
+            );
+        let file_lease = if coordinate {
             let owner = runtime_session.clone().unwrap_or_else(|| {
                 crate::desktop_lease::runtime_owner(&context.runtime_scope_key())
             });
@@ -2642,6 +2863,14 @@ impl ToolRegistry {
         } else {
             None
         };
+        let (desktop_call, lane_refusal) = if coordinate {
+            match self.desktop_lane.acquire().await {
+                Ok(call) => (Some(call), None),
+                Err(refusal) => (None, Some(refusal)),
+            }
+        } else {
+            (None, None)
+        };
         let pending_turn = should_record
             .then(|| {
                 // Use the same trusted identities the recording owner was minted from.
@@ -2680,11 +2909,17 @@ impl ToolRegistry {
         // back to the uncapped capture before any platform interprets them.
         crate::desktop_capture_scale::map_desktop_args(&mut args);
         crate::tool_activity::note_tool_activity();
-        *dispatched = true;
-        let dispatch = crate::recording::scope_dispatch_click_capture(
-            pending_turn.as_ref(),
-            tool.invoke(args.clone()),
-        );
+        // A desktop lane refusal never reached the tool.
+        *dispatched = lane_refusal.is_none();
+        let invoke = tool.invoke(args.clone());
+        let dispatch =
+            crate::recording::scope_dispatch_click_capture(pending_turn.as_ref(), async {
+                match (&desktop_call, lane_refusal) {
+                    (_, Some(refusal)) => refusal,
+                    (Some(call), None) => call.scope(invoke).await,
+                    (None, None) => invoke.await,
+                }
+            });
         let mut admission = admission.map(|(lease, coordinator)| {
             crate::desktop_lease::DispatchAdmission::new(
                 lease,
@@ -2760,7 +2995,10 @@ impl ToolRegistry {
         // Coordinate the physical action itself, not post-action evidence
         // capture or result shaping. Keeping the global desktop lock through
         // recording/PiP screenshots would unnecessarily block an unrelated
-        // runtime after the input side effect has already completed.
+        // runtime after the input side effect has already completed. A
+        // platform worker still running keeps its own clone of the lane lease
+        // (or a GOAT worker hold on the file lease).
+        drop(desktop_call);
         drop(admission);
         restore_public_runtime_result(&mut result, &runtime_prefix);
         // Preserve the producer's private summary for recording/replay before
@@ -2904,7 +3142,7 @@ impl ToolRegistry {
                 && tool
                     .protected_resource_scope("private_observation", args)
                     .await
-                    .map_err(crate::consent::ConsentError::Provider)?
+                    .map_err(crate::consent::ConsentError::ProtectedScope)?
                     .is_none()
             {
                 return Err(crate::consent::ConsentError::Provider(
@@ -2920,7 +3158,7 @@ impl ToolRegistry {
         let browser_scope = if history_resource.is_none() {
             tool.protected_resource_scope("private_observation", args)
                 .await
-                .map_err(crate::consent::ConsentError::Provider)?
+                .map_err(crate::consent::ConsentError::ProtectedScope)?
         } else {
             None
         };
@@ -3409,7 +3647,7 @@ impl ToolRegistry {
         let mut resource = tool
             .protected_resource_scope(adapter_id, args)
             .await
-            .map_err(|message| protected_scope_refusal(&message))?
+            .map_err(|error| protected_scope_error_refusal(&error))?
             .ok_or_else(|| {
                 protected_scope_refusal(
                     "the concrete tool cannot attest an exact protected resource scope",
@@ -3460,10 +3698,12 @@ impl ToolRegistry {
                 scope.remove("driver_owned");
             }
         }
-        if let Err(message) = tool
+        if let Err(error) = tool
             .validate_protected_resource_scope(adapter_id, args, &validation_scope)
             .await
         {
+            // Any validation error revokes the grant, whatever code it carries:
+            // a CDP timeout here still means the caller must re-bind, not wait.
             if let Some(grant) = self.protected_resource_grants.revoke_resource(
                 context,
                 lifecycle_session,
@@ -3472,8 +3712,16 @@ impl ToolRegistry {
             ) {
                 self.approval_broker.revoke(&grant).await;
             }
-            return Err(crate::browser::BrowserRefusal::from_scope_error(&message)
-                .unwrap_or_else(|| protected_refusal("protected_resource_scope_stale", &message)));
+            return Err(
+                crate::browser::BrowserRefusal::from_scope_error(&error.message).unwrap_or_else(
+                    || {
+                        protected_refusal(
+                            error.code.unwrap_or("protected_resource_scope_stale"),
+                            &error.message,
+                        )
+                    },
+                ),
+            );
         }
         Ok(())
     }
@@ -3757,8 +4005,19 @@ fn canonical_proposed_path(raw: &str) -> Result<String, ToolResult> {
     Ok(canonical.to_string_lossy().into_owned())
 }
 
+/// Tools that drive shared native input or window state. Derived from the
+/// contract's action-result vocabulary so a new native action tool cannot
+/// skip the desktop lane. `bring_to_front` returns its own result shape but
+/// still activates a window.
+fn is_physical_desktop_action(tool: &str) -> bool {
+    cua_driver_contract::is_desktop_action_result_tool(tool) || tool == "bring_to_front"
+}
+
+/// GOAT: every call that can change app or desktop state coordinates (fail
+/// closed for tools the contract vocabulary does not list), and every
+/// physical desktop action does even if its definition claims read-only.
 fn changes_app_or_desktop_state(def: &ToolDef, tool: &str, args: &Value) -> bool {
-    if def.read_only
+    if (def.read_only && !is_physical_desktop_action(tool))
         || matches!(
             tool,
             "start_session"
@@ -4320,9 +4579,10 @@ fn restore_public_runtime_value(value: &mut Value, runtime_prefix: &str) -> bool
 #[cfg(test)]
 mod runtime_isolation_tests {
     use super::{
-        canonical_proposed_path, desktop_action_coordinator, namespace_runtime_args,
-        publish_action_result, restore_public_runtime_result, try_admit_text_input,
-        TrustedInvocationEvidence, DISPATCH_AUTHORIZATION_CONTEXT, DISPATCH_RUNTIME_SCOPE,
+        canonical_proposed_path, namespace_runtime_args, publish_action_result,
+        restore_public_runtime_result, try_admit_text_input,
+        DesktopCall, DesktopLane, DesktopLease, TrustedInvocationEvidence,
+        DISPATCH_AUTHORIZATION_CONTEXT, DISPATCH_RUNTIME_SCOPE,
         DISPATCH_TRUSTED_INVOCATION_EVIDENCE,
     };
     use crate::{
@@ -4331,6 +4591,7 @@ mod runtime_isolation_tests {
         protocol::{Content, ToolResult},
         session_authorization::{SessionAuthorizationRegistry, SessionModeCeiling},
     };
+    #[cfg(feature = "yaml")]
     use std::io::Write;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -4364,12 +4625,14 @@ mod runtime_isolation_tests {
             .unwrap()
     }
 
+    #[cfg(feature = "yaml")]
     fn bounded_context(
         manifest_source: &str,
     ) -> Arc<crate::session_authorization::EffectiveAuthorizationContext> {
         manifest_context(PermissionMode::Bounded, manifest_source)
     }
 
+    #[cfg(feature = "yaml")]
     fn manifest_context(
         mode: PermissionMode,
         manifest_source: &str,
@@ -4800,7 +5063,7 @@ mod runtime_isolation_tests {
             &self,
             _adapter_id: &str,
             _args: &serde_json::Value,
-        ) -> Result<Option<serde_json::Value>, String> {
+        ) -> Result<Option<serde_json::Value>, super::ProtectedResourceScopeError> {
             Ok(Some(self.scope.clone()))
         }
 
@@ -4809,14 +5072,14 @@ mod runtime_isolation_tests {
             _adapter_id: &str,
             _args: &serde_json::Value,
             approved_scope: &serde_json::Value,
-        ) -> Result<(), String> {
+        ) -> Result<(), super::ProtectedResourceScopeError> {
             if self.stale_before_dispatch {
-                return Err("synthetic process identity changed".to_owned());
+                return Err("synthetic process identity changed".into());
             }
             if *approved_scope == self.scope {
                 Ok(())
             } else {
-                Err("synthetic scope mismatch".to_owned())
+                Err("synthetic scope mismatch".into())
             }
         }
 
@@ -4853,6 +5116,29 @@ mod runtime_isolation_tests {
                 "window_id": args["window_id"].as_u64().unwrap_or(7),
                 "snapshot_id": "synthetic-snapshot", "elements": []
             }))
+        }
+    }
+
+    struct StringScopeProbe {
+        def: super::ToolDef,
+    }
+
+    #[async_trait::async_trait]
+    impl super::Tool for StringScopeProbe {
+        fn def(&self) -> &super::ToolDef {
+            &self.def
+        }
+
+        async fn protected_resource_scope(
+            &self,
+            _adapter_id: &str,
+            _args: &serde_json::Value,
+        ) -> Result<Option<serde_json::Value>, super::ProtectedResourceScopeError> {
+            Err("synthetic scope lookup failed".into())
+        }
+
+        async fn invoke(&self, _args: serde_json::Value) -> crate::protocol::ToolResult {
+            crate::protocol::ToolResult::text("must not run")
         }
     }
 
@@ -5257,6 +5543,7 @@ mod runtime_isolation_tests {
         assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(feature = "yaml")]
     #[tokio::test]
     async fn bounded_history_requires_the_matching_operation_resource() {
         for (operations, expected_allowed) in
@@ -5284,6 +5571,53 @@ mod runtime_isolation_tests {
         }
     }
 
+    #[cfg(feature = "yaml")]
+    #[tokio::test]
+    async fn manifest_launch_reaches_the_platform_only_for_launchable_apps() {
+        const MANIFEST: &str = "version: 3\nexpires_after: 1h\nidle_timeout: 30m\nresources:\n  apps:\n    - bundle_id: com.apple.TextEdit\n      launch: true\n    - bundle_id: com.apple.Preview\n      launch: false\nallow:\n  tools: [launch_app]\n";
+        // A loaded manifest narrows every mode, so the launch grant applies to
+        // standard and unrestricted runtimes as well as bounded ones.
+        for mode in [
+            PermissionMode::Bounded,
+            PermissionMode::Standard,
+            PermissionMode::Unrestricted,
+        ] {
+            for (bundle_id, expected_allowed) in [
+                ("com.apple.TextEdit", true),
+                ("com.apple.Preview", false),
+                ("com.apple.calculator", false),
+            ] {
+                let hits = Arc::new(AtomicUsize::new(0));
+                let registry = observation_registry_for("launch_app", None, hits.clone());
+                let context = manifest_context(mode, MANIFEST);
+                let result = registry
+                    .invoke_with_context(
+                        "launch_app",
+                        serde_json::json!({"bundle_id": bundle_id, "session": "review"}),
+                        context,
+                    )
+                    .await;
+                assert_eq!(
+                    hits.load(Ordering::SeqCst),
+                    usize::from(expected_allowed),
+                    "{mode:?} {bundle_id}"
+                );
+                if expected_allowed {
+                    assert_ne!(result.is_error, Some(true));
+                } else {
+                    let structured = result.structured_content.unwrap();
+                    assert_eq!(structured["refusal"]["code"], "permission_denied");
+                    let expected = format!(
+                        "Permission denied: launch_app bundle_id '{bundle_id}' {}",
+                        "is outside the capability manifest"
+                    );
+                    assert_eq!(structured["refusal"]["message"], expected, "{mode:?}");
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "yaml")]
     #[tokio::test]
     async fn bounded_observation_uses_only_the_manifest_without_a_protected_host() {
         let hits = Arc::new(AtomicUsize::new(0));
@@ -5317,6 +5651,7 @@ resources:
         assert_ne!(result.is_error, Some(true));
     }
 
+    #[cfg(feature = "yaml")]
     #[tokio::test]
     async fn capability_manifest_typed_resources_narrow_standard_and_unrestricted() {
         for mode in [PermissionMode::Standard, PermissionMode::Unrestricted] {
@@ -5380,6 +5715,7 @@ resources:
         }
     }
 
+    #[cfg(feature = "yaml")]
     #[tokio::test]
     async fn capability_manifest_tools_narrow_standard_and_unrestricted() {
         for mode in [PermissionMode::Standard, PermissionMode::Unrestricted] {
@@ -5405,6 +5741,7 @@ allow:
         }
     }
 
+    #[cfg(feature = "yaml")]
     #[tokio::test]
     async fn rejected_typed_resource_does_not_refresh_manifest_idle_lease() {
         let denied_hits = Arc::new(AtomicUsize::new(0));
@@ -5771,6 +6108,7 @@ resources:
         assert_eq!(provider.requests.load(Ordering::SeqCst), 0);
     }
 
+    #[cfg(feature = "yaml")]
     #[tokio::test]
     async fn background_input_rechecks_manifest_before_every_adapter_dispatch() {
         // The adapter may retain a native connection after a successful call.
@@ -5835,9 +6173,9 @@ resources:
             &self,
             _adapter_id: &str,
             _args: &serde_json::Value,
-        ) -> Result<Option<serde_json::Value>, String> {
+        ) -> Result<Option<serde_json::Value>, super::ProtectedResourceScopeError> {
             if !self.alive.load(Ordering::SeqCst) {
-                return Err("process 42 is not running".to_owned());
+                return Err("process 42 is not running".into());
             }
             Ok(Some(serde_json::json!({
                 "kind": "process_instance",
@@ -6886,7 +7224,7 @@ allow:
             &self,
             _: &str,
             _: &serde_json::Value,
-        ) -> Result<Option<serde_json::Value>, String> {
+        ) -> Result<Option<serde_json::Value>, super::ProtectedResourceScopeError> {
             Ok(self.fingerprint.as_ref().map(|fingerprint| serde_json::json!({"kind": "process_instance", "fingerprint": fingerprint})))
         }
         async fn validate_protected_resource_scope(
@@ -6894,7 +7232,7 @@ allow:
             _: &str,
             _: &serde_json::Value,
             _: &serde_json::Value,
-        ) -> Result<(), String> {
+        ) -> Result<(), super::ProtectedResourceScopeError> {
             Ok(())
         }
         async fn invoke(&self, args: serde_json::Value) -> ToolResult {
@@ -7026,7 +7364,7 @@ allow:
             &self,
             _: &str,
             _: &serde_json::Value,
-        ) -> Result<Option<serde_json::Value>, String> {
+        ) -> Result<Option<serde_json::Value>, super::ProtectedResourceScopeError> {
             let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
             let fingerprint = if first {
                 serde_json::json!({"pid": 424242, "start_time": 7, "executable": "/tmp/ordinary"})
@@ -7042,7 +7380,7 @@ allow:
             _: &str,
             _: &serde_json::Value,
             _: &serde_json::Value,
-        ) -> Result<(), String> {
+        ) -> Result<(), super::ProtectedResourceScopeError> {
             Ok(())
         }
         async fn invoke(&self, _: serde_json::Value) -> ToolResult {
@@ -7150,6 +7488,7 @@ allow:
         );
     }
 
+    #[cfg(feature = "yaml")]
     #[tokio::test]
     async fn manifest_cannot_widen_standard_foreign_process_termination() {
         let hits = Arc::new(AtomicUsize::new(0));
@@ -7187,6 +7526,7 @@ resources:
         );
     }
 
+    #[cfg(feature = "yaml")]
     #[tokio::test]
     async fn manifest_preserves_standard_owned_process_termination_inside_scope() {
         let hits = Arc::new(AtomicUsize::new(0));
@@ -7428,6 +7768,51 @@ resources:
                 .and_then(serde_json::Value::as_str),
             Some("protected_resource_scope_stale")
         );
+    }
+
+    #[tokio::test]
+    async fn a_plain_string_scope_error_keeps_the_generic_refusal_codes() {
+        for (name, read_only, code) in [
+            ("get_browser_state", true, "authorization_host_failed"),
+            ("browser_click", false, "protected_resource_scope_invalid"),
+        ] {
+            let mut registry = super::ToolRegistry::new_with_protected_consent_provider(Some(
+                Arc::new(AcceptingProvider {
+                    requests: AtomicUsize::new(0),
+                }),
+            ));
+            registry.register(Box::new(StringScopeProbe {
+                def: super::ToolDef {
+                    name: name.to_owned(),
+                    description: "test string scope error".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    read_only,
+                    destructive: false,
+                    idempotent: read_only,
+                    open_world: true,
+                },
+            }));
+            let result = registry
+                .invoke_with_context(
+                    name,
+                    serde_json::json!({
+                        "target_id": "target-1",
+                        "tab_id": "tab-1",
+                        "session": "browser"
+                    }),
+                    standard_context(),
+                )
+                .await;
+            assert_eq!(
+                result
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value.pointer("/refusal/code"))
+                    .and_then(serde_json::Value::as_str),
+                Some(code),
+                "{name}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -8412,6 +8797,7 @@ resources:
         let mut registry = super::ToolRegistry::new();
         registry.desktop_lease = LeaseManager::new(backend, Arc::new(TestClock::default()));
         registry.desktop_coordinator = Box::leak(Box::new(tokio::sync::Mutex::new(())));
+        registry.desktop_lane = Box::leak(Box::new(DesktopLane::new(Duration::from_secs(12))));
         registry.register(Box::new(LeaseProbe {
             hits,
             retain,
@@ -8858,7 +9244,7 @@ resources:
             let active = active.clone();
             let max_active = max_active.clone();
             tasks.push(tokio::spawn(async move {
-                let _admission = desktop_action_coordinator().lock().await;
+                let _admission = DesktopCall::acquire().await.unwrap();
                 let now = active.fetch_add(1, Ordering::SeqCst) + 1;
                 max_active.fetch_max(now, Ordering::SeqCst);
                 tokio::task::yield_now().await;
@@ -8869,6 +9255,106 @@ resources:
             task.await.unwrap();
         }
         assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_call_behind_a_worker_that_never_returns_is_refused_within_its_budget() {
+        let lane = DesktopLane::new(Duration::from_millis(300));
+        let call = lane.acquire().await.unwrap();
+        // The call timed out; its platform worker never returns, so its lease
+        // clone is never dropped.
+        call.scope(async { std::mem::forget(DesktopLease::current().unwrap()) })
+            .await;
+        drop(call);
+        let next = tokio::time::timeout(Duration::from_secs(10), lane.acquire())
+            .await
+            .expect("the next call waited forever behind a stale worker");
+        let Err(refusal) = next else {
+            panic!("the lane was handed out while the stale worker still holds it");
+        };
+        assert_eq!(
+            refusal.structured_content.as_ref().unwrap()["refusal"]["code"],
+            "input_busy"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn calls_after_the_stale_bound_are_refused_without_waiting_again() {
+        let lane = DesktopLane::new(Duration::from_secs(12));
+        let call = lane.acquire().await.unwrap();
+        let _worker = call.scope(async { DesktopLease::current().unwrap() }).await;
+        drop(call);
+        assert!(lane.acquire().await.is_err());
+        let started = tokio::time::Instant::now();
+        assert!(lane.acquire().await.is_err());
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_behind_the_healthy_successor_of_a_stale_worker_waits_its_turn() {
+        let lane = Arc::new(DesktopLane::new(Duration::from_secs(12)));
+        let call = lane.acquire().await.unwrap();
+        let worker = call.scope(async { DesktopLease::current().unwrap() }).await;
+        drop(call);
+        // Queued first: runs for 400 ms once the stale worker stops.
+        let first = tokio::spawn({
+            let lane = lane.clone();
+            async move {
+                let call = lane.acquire().await.ok()?;
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                drop(call);
+                Some(())
+            }
+        });
+        tokio::task::yield_now().await;
+        let second = tokio::spawn({
+            let lane = lane.clone();
+            async move { lane.acquire().await.map(drop) }
+        });
+        // The stale worker stops just before the bound.
+        tokio::time::sleep(Duration::from_millis(11_983)).await;
+        drop(worker);
+        assert!(first.await.unwrap().is_some());
+        let second = second.await.unwrap();
+        assert!(
+            second.is_ok(),
+            "refused behind a call still running: {:?}",
+            second.err().map(|refusal| refusal.structured_content)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_call_still_running_is_waited_for_past_the_stale_bound() {
+        let lane = Arc::new(DesktopLane::new(Duration::from_millis(100)));
+        let call = lane.acquire().await.unwrap();
+        let next = tokio::spawn({
+            let lane = lane.clone();
+            async move { lane.acquire().await.is_ok() }
+        });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        drop(call);
+        assert!(next.await.unwrap());
+    }
+
+    #[test]
+    fn every_native_action_result_tool_takes_the_desktop_lane() {
+        use super::is_physical_desktop_action;
+        for name in cua_driver_contract::ACTION_RESULT_TOOLS {
+            assert_eq!(
+                is_physical_desktop_action(name),
+                !name.starts_with("browser_"),
+                "{name}"
+            );
+        }
+        assert!(is_physical_desktop_action("bring_to_front"));
+        for name in [
+            "get_window_state",
+            "screenshot",
+            "launch_app",
+            "browser_click",
+        ] {
+            assert!(!is_physical_desktop_action(name), "{name}");
+        }
     }
 
     #[test]
@@ -9125,10 +9611,15 @@ fn registry_disposition(
 }
 
 fn protected_consent_refusal(error: crate::consent::ConsentError) -> ToolResult {
-    if let crate::consent::ConsentError::Provider(message) = &error {
-        if let Some(refusal) = crate::browser::BrowserRefusal::from_scope_error(message) {
-            return refusal;
-        }
+    // GOAT: a browser refusal encoded into a scope error (origin scope, protected
+    // browser process) is returned whole, whichever consent error carries it.
+    let encoded = match &error {
+        crate::consent::ConsentError::Provider(message) => Some(message.as_str()),
+        crate::consent::ConsentError::ProtectedScope(error) => Some(error.message.as_str()),
+        _ => None,
+    };
+    if let Some(refusal) = encoded.and_then(crate::browser::BrowserRefusal::from_scope_error) {
+        return refusal;
     }
     let code = match &error {
         crate::consent::ConsentError::Unavailable => "authorization_required",
@@ -9137,6 +9628,9 @@ fn protected_consent_refusal(error: crate::consent::ConsentError) -> ToolResult 
         crate::consent::ConsentError::DigestMismatch => "authorization_scope_mismatch",
         crate::consent::ConsentError::Expired => "authorization_expired",
         crate::consent::ConsentError::Provider(_) => "authorization_host_failed",
+        crate::consent::ConsentError::ProtectedScope(error) => {
+            error.code.unwrap_or("authorization_host_failed")
+        }
         crate::consent::ConsentError::BoundedResource(_) => "bounded_resource_outside_manifest",
     };
     let message = error.to_string();
@@ -9186,6 +9680,15 @@ fn protected_browser_process_refusal(
         }
         _ => None,
     }
+}
+
+fn protected_scope_error_refusal(error: &ProtectedResourceScopeError) -> ToolResult {
+    crate::browser::BrowserRefusal::from_scope_error(&error.message).unwrap_or_else(|| {
+        protected_refusal(
+            error.code.unwrap_or("protected_resource_scope_invalid"),
+            &error.message,
+        )
+    })
 }
 
 /// Recovery text for a call on an ended lifecycle episode. A named session is

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Platform-independent Driver core and dual-era MCP dispatch.
 //!
 //! Stdio supports legacy initialization and modern per-request negotiation.
@@ -43,7 +46,12 @@ pub const PARENT_LIVENESS_STDIN_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_STDIN";
 
 /// Only the exact value `1` counts — fail-safe for anything else.
 pub fn embedded_mode() -> bool {
-    std::env::var_os(EMBEDDED_ENV).is_some_and(|v| v == "1")
+    is_embedded_sentinel(std::env::var_os(EMBEDDED_ENV).as_deref())
+}
+
+/// The [`EMBEDDED_ENV`] rule on an already-read value.
+pub fn is_embedded_sentinel(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| v == "1")
 }
 
 static HOST_OWNED_RUNTIME: std::sync::atomic::AtomicBool =
@@ -76,6 +84,7 @@ pub mod action_target;
 pub mod actionability;
 pub mod agent_cursor;
 mod application_identity;
+pub mod app_names;
 pub mod authorization;
 pub mod background_input;
 pub mod basis_capture;
@@ -107,9 +116,12 @@ pub mod element_frame;
 pub mod element_query;
 pub mod element_token;
 pub mod expectation;
+pub mod fast_path;
 pub mod ffmpeg_install;
 pub mod health_report;
 pub mod history;
+#[cfg(feature = "keyring")]
+pub mod history_keyring;
 pub mod image_utils;
 pub mod input_resource;
 #[cfg(test)]

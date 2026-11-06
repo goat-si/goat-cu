@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 use async_trait::async_trait;
 use cua_driver_core::{
     protocol::ToolResult,
@@ -24,8 +27,9 @@ fn with_cursor_motion_properties(mut schema: Value) -> Value {
     if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
         properties.extend(cursor_overlay::motion_defaults::config_schema_properties());
         properties.extend(cursor_overlay::badge_mode::config_schema_properties());
+        properties.extend(cursor_overlay::cursor_options::config_schema_properties());
     }
-    schema
+    cua_driver_core::fast_path::wire::with_config_property(schema)
 }
 
 fn def() -> &'static ToolDef {
@@ -36,8 +40,10 @@ fn def() -> &'static ToolDef {
             cursor.motion.timing and cursor.motion.effects.<trail|glow|magnet|ripple|squish> are saved there \
             and seed sessions started afterwards (start_session cursor_motion and set_agent_cursor_motion \
             override them; reduced motion wins). cursor.badges (minimal by default, verbose or off) is saved \
-            and applies to every cursor. capture_mode is a per-call argument; the capture_scope key is \
-            retired."
+            and applies to every cursor. cursor.float and cursor.halo (on by default), cursor.marks (off by \
+            default) and cursor.rotate (heading by default, lean or off) are saved and apply to every cursor; \
+            each also takes default. fast_path applies now and is not saved. capture_mode is a per-call \
+            argument; the capture_scope key is retired."
             .into(),
         input_schema: with_cursor_motion_properties(serde_json::json!({
             "type": "object",
@@ -101,6 +107,15 @@ impl Tool for SetConfigTool {
 
         let badge_key = match cursor_overlay::badge_mode::apply_config_args(&args) {
             Ok(key) => key,
+            Err(message) => return ToolResult::error(message),
+        };
+        let option_keys = match cursor_overlay::cursor_options::apply_config_args(&args) {
+            Ok(keys) => keys,
+            Err(message) => return ToolResult::error(message),
+        };
+
+        let fast_path = match cua_driver_core::fast_path::wire::apply_config_args(&args) {
+            Ok(mode) => mode,
             Err(message) => return ToolResult::error(message),
         };
 
@@ -177,7 +192,13 @@ impl Tool for SetConfigTool {
                 motion_keys.join(", ")
             ));
         }
-        if let Some(key) = badge_key {
+        if let Some(mode) = fast_path {
+            pip_note.push_str(&format!(
+                " — fast_path={} (applies now, not saved)",
+                mode.as_str()
+            ));
+        }
+        for key in badge_key.into_iter().chain(option_keys) {
             pip_note.push_str(&format!(" — saved {key} (applies now)"));
         }
         let scope_note = if session_id.is_some() {
@@ -193,6 +214,7 @@ impl Tool for SetConfigTool {
             "version": env!("CARGO_PKG_VERSION"),
             "platform": "macos",
             "max_image_dimension": effective_dim,
+            "fast_path": cua_driver_core::fast_path::wire::config_value(),
         }))
     }
 }

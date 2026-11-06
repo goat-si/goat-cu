@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Keyed per-session cursor render map shared by every platform overlay.
 //!
 //! Each declared session owns one cursor, keyed by [`CursorKey`]. The macOS,
@@ -700,16 +703,52 @@ mod tests {
         assert!(!map.needs_frame_tick(), "a finished pulse must park");
     }
 
-    // A settled default-theme cursor parks during its opaque idle-hide delay
-    // so the overlay does not keep running at frame cadence while static.
+    // With `cursor.float` off the cursor rests still: once activity settles,
+    // nothing changes pixels until the idle fade, so the overlay stops
+    // rendering.
     #[test]
-    fn a_visible_resting_default_cursor_parks_until_idle_fade() {
+    fn a_still_resting_cursor_lets_the_overlay_park() {
         let mut map = map();
         let core = placed(&mut map, DEFAULT_CURSOR_KEY);
+        core.options_override = Some(crate::CursorOptions::NONE);
         core.motion.idle_hide_ms = 20_000.0;
         settle(core);
         assert!(!core.has_resting_motion());
-        assert!(!map.needs_frame_tick());
+
+        let paint = |core: &RenderStateCore| {
+            let mut pixmap = tiny_skia::Pixmap::new(200, 200).unwrap();
+            crate::paint_cursor(&mut pixmap, core, 0.0, 0.0, None, 1.0);
+            pixmap.data().to_vec()
+        };
+        let core = &mut map.cursors[DEFAULT_CURSOR_KEY];
+        let before = paint(core);
+        core.tick_motion(0.4);
+        assert_eq!(before, paint(core), "resting frames are identical");
+    }
+
+    // The resting float (`cursor.float`, on by default) is painted by every adapter
+    // through `paint_cursor`, so a visible resting cursor with it on must keep
+    // receiving frames on every platform until its idle fade hides it.
+    #[test]
+    fn a_visible_resting_cursor_keeps_ticking_for_its_resting_motion() {
+        let mut map = map();
+        let core = placed(&mut map, DEFAULT_CURSOR_KEY);
+        core.options_override = Some(crate::CursorOptions::default());
+        core.motion.idle_hide_ms = 20_000.0;
+        settle(core);
+        assert!(core.has_resting_motion());
+        assert!(map.needs_frame_tick());
+
+        // The bob actually moves pixels between two resting frames.
+        let paint = |core: &RenderStateCore| {
+            let mut pixmap = tiny_skia::Pixmap::new(200, 200).unwrap();
+            crate::paint_cursor(&mut pixmap, core, 0.0, 0.0, None, 1.0);
+            pixmap.data().to_vec()
+        };
+        let core = &mut map.cursors[DEFAULT_CURSOR_KEY];
+        let before = paint(core);
+        core.tick_motion(0.4);
+        assert_ne!(before, paint(core), "resting frames must differ");
     }
 
     #[test]
@@ -723,6 +762,7 @@ mod tests {
         let mut map = map();
         let core = placed(&mut map, DEFAULT_CURSOR_KEY);
         core.theme = Some(std::sync::Arc::new(looping));
+        core.options_override = Some(crate::CursorOptions::ALL_ON);
         core.motion.idle_hide_ms = 20_000.0;
         settle(core);
         assert!(core.has_resting_motion());

@@ -44,8 +44,12 @@ impl Drop for CancelOnDrop {
 #[derive(Clone, Copy)]
 pub(crate) enum KeyRoute {
     Pid(i32),
-    Global,
-    BareGlobal,
+    /// The HID queue with flags. `Some(pid)` is the app the chord is aimed
+    /// at; `None` (desktop scope) means whichever app is frontmost.
+    Global(Option<i32>),
+    /// The HID queue without flags, aimed at `pid` (the route Screen Sharing
+    /// targets use).
+    BareGlobal(i32),
 }
 
 pub(crate) fn deliver_menu(
@@ -56,7 +60,7 @@ pub(crate) fn deliver_menu(
     control: &HoldControl,
 ) -> keyboard::ChordPost {
     deliver_menu_with(
-        keyboard::chord_events(key, modifiers),
+        keyboard::chord_events(pid, key, modifiers),
         |event| keyboard::post_chord_event_no_auth(pid, event),
         || control.is_cancelled(),
         || control.wait(duration.unwrap_or_else(keyboard::key_gap)),
@@ -100,7 +104,7 @@ pub(crate) fn deliver(
     duration: Option<Duration>,
     control: &HoldControl,
 ) -> anyhow::Result<()> {
-    let source = if matches!(route, KeyRoute::Global) {
+    let source = if matches!(route, KeyRoute::Global(_)) {
         Some(
             CGEventSource::new(CGEventSourceStateID::HIDSystemState)
                 .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?,
@@ -108,24 +112,29 @@ pub(crate) fn deliver(
     } else {
         None
     };
+    // Resolve the base key where the target's layout types it (upstream
+    // #6659), Screen Sharing keeping US positions. A desktop-scope chord
+    // reaches the frontmost app, which may itself be Screen Sharing.
+    let target = layout_target(route, crate::apps::frontmost_pid);
     deliver_with_pacing(
         key,
         modifiers,
         duration.unwrap_or_else(keyboard::key_gap),
         (
-            matches!(route, KeyRoute::Global | KeyRoute::BareGlobal),
-            matches!(route, KeyRoute::BareGlobal),
+            matches!(route, KeyRoute::Global(_) | KeyRoute::BareGlobal(_)),
+            matches!(route, KeyRoute::BareGlobal(_)),
         ),
+        |key, modifiers| keyboard::target_key_code(target, key, modifiers),
         |code, down, flags| match route {
             KeyRoute::Pid(pid) => keyboard::post_key(pid, code, down, flags),
-            KeyRoute::Global => keyboard::post_global_key(
+            KeyRoute::Global(_) => keyboard::post_global_key(
                 source.as_ref().expect("global source"),
                 code,
                 down,
                 flags,
                 CGEventTapLocation::HID,
             ),
-            KeyRoute::BareGlobal => {
+            KeyRoute::BareGlobal(_) => {
                 let event = keyboard::create_bare_keyboard_event(code, down)?;
                 event.set_flags(flags);
                 post_hid(|| event.post(CGEventTapLocation::HID));
@@ -135,6 +144,14 @@ pub(crate) fn deliver(
         || control.is_cancelled(),
         |hold| control.wait(hold),
     )
+}
+
+/// The app whose keyboard layout resolves a chord's key on `route`.
+fn layout_target(route: KeyRoute, frontmost: impl FnOnce() -> Option<i32>) -> Option<i32> {
+    match route {
+        KeyRoute::Pid(pid) | KeyRoute::BareGlobal(pid) | KeyRoute::Global(Some(pid)) => Some(pid),
+        KeyRoute::Global(None) => frontmost(),
+    }
 }
 
 /// A key posted to the HID queue. Recorded so a pending focus restoration
@@ -157,24 +174,32 @@ pub(crate) fn deliver_with(
         modifiers,
         duration,
         (false, false),
+        // Tests pin US key positions: the host layout is per-user state.
+        |key, _| keyboard::key_name_to_code(key),
         post,
         cancelled,
         wait,
     )
 }
 
+/// Press `key` with `modifiers` held for `duration`, then release everything
+/// in reverse order. `resolve` maps the base key name and the chord's
+/// modifiers to its virtual key; it runs before anything is posted, so a
+/// failure leaves nothing down.
+#[allow(clippy::too_many_arguments)]
 fn deliver_with_pacing(
     key: &str,
     modifiers: &[&str],
     duration: Duration,
     pacing: (bool, bool),
+    resolve: impl FnOnce(&str, &[&str]) -> anyhow::Result<u16>,
     mut post: impl FnMut(u16, bool, CGEventFlags) -> anyhow::Result<()>,
     mut cancelled: impl FnMut() -> bool,
     mut wait: impl FnMut(Duration) -> bool,
 ) -> anyhow::Result<()> {
     let (pace_modifiers, pace_base_up) = pacing;
     let plus = key == "+" || key.eq_ignore_ascii_case("plus");
-    let base = keyboard::key_name_to_code(if plus { "=" } else { key })?;
+    let base = resolve(if plus { "=" } else { key }, modifiers)?;
     let mut keys = Vec::new();
     for modifier in modifiers.iter().copied().chain(plus.then_some("shift")) {
         if let Some((code, flag)) = keyboard::modifier_key_code_and_flag(modifier) {
@@ -357,6 +382,7 @@ mod tests {
             &["cmd", "shift"],
             Duration::from_millis(99),
             (true, false),
+            |key, _| keyboard::key_name_to_code(key),
             |_, _, _| Ok(()),
             || false,
             |duration| {
@@ -385,6 +411,7 @@ mod tests {
             &["cmd"],
             Duration::from_millis(9),
             (true, true),
+            |key, _| keyboard::key_name_to_code(key),
             |_, down, _| {
                 events.borrow_mut().push(if down { "down" } else { "up" });
                 Ok(())
@@ -424,6 +451,107 @@ mod tests {
         );
         assert!(matches!(interrupted, keyboard::ChordPost::Uncertain(_)));
         assert_eq!(*events.borrow(), vec![1, 2]);
+    }
+
+    /// The base key is the one the resolver reads from the target's layout
+    /// (AZERTY types `a` with Command on US Q, key 12), and `+` resolves as
+    /// `=` with the chord's own modifiers while Shift is still pressed.
+    #[test]
+    fn base_key_is_resolved_on_the_target_layout_before_posting() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let asked = std::cell::RefCell::new(Vec::new());
+        deliver_with_pacing(
+            "a",
+            &["cmd"],
+            Duration::ZERO,
+            (false, false),
+            |key, modifiers| {
+                asked
+                    .borrow_mut()
+                    .push((key.to_owned(), modifiers.join("+")));
+                Ok(12)
+            },
+            |code, down, _| {
+                events.borrow_mut().push((code, down));
+                Ok(())
+            },
+            || false,
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(
+            *events.borrow(),
+            vec![(55, true), (12, true), (12, false), (55, false)]
+        );
+
+        events.borrow_mut().clear();
+        deliver_with_pacing(
+            "+",
+            &["cmd"],
+            Duration::ZERO,
+            (false, false),
+            |key, modifiers| {
+                asked
+                    .borrow_mut()
+                    .push((key.to_owned(), modifiers.join("+")));
+                Ok(24)
+            },
+            |code, down, _| {
+                events.borrow_mut().push((code, down));
+                Ok(())
+            },
+            || false,
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(
+            *asked.borrow(),
+            vec![("a".into(), "cmd".into()), ("=".into(), "cmd".into())]
+        );
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                (55, true),
+                (56, true),
+                (24, true),
+                (24, false),
+                (56, false),
+                (55, false)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_key_that_does_not_resolve_posts_nothing() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let result = deliver_with_pacing(
+            "asterisk",
+            &["cmd"],
+            Duration::ZERO,
+            (false, false),
+            |_, _| Err(anyhow::anyhow!("Unknown key name")),
+            |code, down, _| {
+                events.borrow_mut().push((code, down));
+                Ok(())
+            },
+            || false,
+            |_| false,
+        );
+        assert!(result.is_err());
+        assert!(events.borrow().is_empty());
+    }
+
+    /// A HID-queue chord aimed at an app reads that app's layout (a Screen
+    /// Sharing target keeps US positions even when another app is frontmost);
+    /// only a desktop-scope chord falls back to the frontmost app.
+    #[test]
+    fn layout_target_is_the_routes_own_pid() {
+        let frontmost = || Some(99);
+        assert_eq!(layout_target(KeyRoute::Pid(7), frontmost), Some(7));
+        assert_eq!(layout_target(KeyRoute::BareGlobal(7), frontmost), Some(7));
+        assert_eq!(layout_target(KeyRoute::Global(Some(7)), frontmost), Some(7));
+        assert_eq!(layout_target(KeyRoute::Global(None), frontmost), Some(99));
+        assert_eq!(layout_target(KeyRoute::Global(None), || None), None);
     }
 
     #[test]

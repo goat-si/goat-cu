@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! macOS Accessibility (AX) API bindings and tree walker.
 //!
 //! # AX element indexing
@@ -33,6 +36,7 @@ pub mod exact_target;
 mod item_owner_tests;
 pub(crate) mod label_reader;
 pub mod launch;
+pub(crate) mod main_thread;
 pub mod reveal_scroll;
 pub mod scroll_area;
 pub mod snapshot;

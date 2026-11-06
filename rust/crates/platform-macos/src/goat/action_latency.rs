@@ -385,7 +385,7 @@ impl Tool for TracedTool {
         &self,
         adapter: &str,
         args: &Value,
-    ) -> Result<Option<Value>, String> {
+    ) -> Result<Option<Value>, cua_driver_core::tool::ProtectedResourceScopeError> {
         self.inner.protected_resource_scope(adapter, args).await
     }
     async fn validate_protected_resource_scope(
@@ -393,7 +393,7 @@ impl Tool for TracedTool {
         adapter: &str,
         args: &Value,
         approved: &Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), cua_driver_core::tool::ProtectedResourceScopeError> {
         self.inner
             .validate_protected_resource_scope(adapter, args, approved)
             .await

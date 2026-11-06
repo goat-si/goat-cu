@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 use crate::ax::write_outcome::{native_write_outcome, NativeWriteKind, Settable};
 use async_trait::async_trait;
 use cua_driver_core::mutation::{ChainResult, Postcondition, PriorInput, Reason, WriteOutcome};

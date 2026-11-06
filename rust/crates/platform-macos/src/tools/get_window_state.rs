@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 use crate::goat::action_latency as latency;
 use async_trait::async_trait;
 use cua_driver_core::{
@@ -340,7 +343,7 @@ impl Tool for GetWindowStateTool {
         &self,
         _adapter_id: &str,
         args: &Value,
-    ) -> Result<Option<Value>, String> {
+    ) -> Result<Option<Value>, cua_driver_core::tool::ProtectedResourceScopeError> {
         let Some(pid) = args.get("pid").and_then(Value::as_i64) else {
             return Ok(None);
         };
@@ -370,7 +373,7 @@ impl Tool for GetWindowStateTool {
         _adapter_id: &str,
         args: &Value,
         approved_scope: &Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), cua_driver_core::tool::ProtectedResourceScopeError> {
         let pid = args
             .get("pid")
             .and_then(Value::as_i64)
@@ -498,6 +501,13 @@ impl Tool for GetWindowStateTool {
         // still forces a capture (an explicit "write the frame to disk").
         let include_screenshot = args.get("include_screenshot").and_then(|v| v.as_bool());
         let should_capture = include_screenshot != Some(false) || screenshot_out_file.is_some();
+        // Fast path `on`: re-reads skip the screenshot unless asked for one.
+        let should_capture = should_capture
+            && !cua_driver_core::fast_path::wire::skip_reread_screenshot(
+                &args,
+                pid,
+                u64::from(window_id),
+            );
         // `include_accessibility_tree` (default true) is the mirror image of
         // `include_screenshot`: set false to SKIP the AX walk (the expensive
         // part) and return just the screenshot + window metadata — the
@@ -565,7 +575,7 @@ impl Tool for GetWindowStateTool {
             == Some(true);
         let observation_only = display_only || verify_read;
         // Optional caps — when omitted, fall back to the defaults baked into
-        // the AX walker (#22865). minimum:1 keyed in the schema, but defend
+        // the AX walker. minimum:1 is keyed in the schema, but defend
         // against 0 here as well so a misbehaving client can't disable the
         // walk entirely.
         let max_elements = view.max_elements(
@@ -629,6 +639,7 @@ impl Tool for GetWindowStateTool {
                         nodes: Vec::new(),
                         truncated: true,
                         nodes_skipped: false,
+                        depth_truncated: false,
                         walk,
                         window_scope: Some(crate::ax::window_scope::WindowScope::Matched),
                     };
@@ -759,6 +770,7 @@ impl Tool for GetWindowStateTool {
                     &bounds,
                     || crate::capture::screenshot_window_image(window_id),
                 )?;
+                crate::fast_path_guard::record_read_image(pid, window_id, &raw, &bounds);
                 // Resize and encode once from the raw pixels; the PNG bytes
                 // are identical to the former encode-decode-resize round trip.
                 // The model-sized screenshot is capped at point resolution by
@@ -952,6 +964,19 @@ impl Tool for GetWindowStateTool {
                 })
                 .unzip(),
         };
+        if let (Some(sid), Some(tree)) = (snapshot_id, tree_result.as_ref()) {
+            if !observation_only {
+                crate::fast_path_guard::record_snapshot(
+                    pid,
+                    u64::from(window_id),
+                    sid,
+                    &tree.nodes,
+                );
+                if screenshot.is_none() {
+                    crate::fast_path_guard::record_window(pid, window_id);
+                }
+            }
+        }
         // The capture registry holds PNG captures only; a JPEG read mints none.
         let capture_id = match (snapshot_id, screenshot.as_ref().filter(|_| !jpeg)) {
             (Some(_), Some((png, _, width, height, native_width, native_height, _, _))) => {
@@ -2760,6 +2785,26 @@ mod tests {
         assert_eq!(entry["max"], 8.0);
         assert_eq!(entry["enabled"], true);
         assert_eq!(entry["selected"], false);
+    }
+
+    #[test]
+    fn elements_publish_a_disabled_control() {
+        let mut nodes = vec![node(
+            Some(0),
+            "AXCheckBox",
+            Some("Reset"),
+            1,
+            None,
+            Some([10.0, 20.0, 16.0, 16.0]),
+            vec!["AXPress".into()],
+        )];
+        nodes[0].enabled = Some(false);
+        let elements = build_elements_array_with_token(&nodes, Some(3));
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0]["label"], "Reset");
+        assert_eq!(elements[0]["enabled"], false);
+        assert_eq!(elements[0]["element_token"], "s00000003:0");
+        assert!(elements[0]["frame"].is_object());
     }
 
     #[test]

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! AX action dispatch — the preferred click/interaction path for indexed elements.
 
 use crate::ax::bindings::*;
@@ -495,6 +498,23 @@ pub fn capture_nearest_container_selection(element_ptr: usize) -> Option<Selecti
         peer_model_observed,
         previously_selected_peers: peers,
     })
+}
+
+/// The live `AXEnabled` read said the target is disabled, so nothing was sent.
+/// Tools turn this into a structured `element_disabled` refusal before any
+/// cursor or input work (`tools::refuse_if_disabled`); the dispatch-time
+/// check below keeps GOAT's foreground-aware refusal.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "refusing {action}: the target reports AXEnabled=false, so the app would ignore it. \
+     Nothing was sent. Snapshot again and act once the element reports enabled"
+)]
+pub struct ElementDisabled {
+    pub action: String,
+}
+
+impl ElementDisabled {
+    pub const CODE: &'static str = "element_disabled";
 }
 
 /// The error for a target that reads AXEnabled=false; the action is not sent.
@@ -1179,6 +1199,24 @@ mod tests {
         assert!(message.contains("AXPress was not sent"), "{message}");
         assert!(!message.contains("delivery_mode"), "{message}");
         assert_eq!(element_action_refusal_code(&foreground), None);
+    }
+
+    #[test]
+    fn element_disabled_is_a_typed_refusal_without_a_retry_hint() {
+        // The pre-dispatch refusal is typed; the tools layer adds a foreground
+        // escalation only when fronting the app could enable the control.
+        let error = anyhow::Error::from(ElementDisabled {
+            action: "AXPick".to_owned(),
+        });
+        let disabled = error
+            .downcast_ref::<ElementDisabled>()
+            .expect("a disabled target is a typed refusal");
+        assert_eq!(disabled.action, "AXPick");
+        assert_eq!(ElementDisabled::CODE, "element_disabled");
+        let message = error.to_string();
+        assert!(message.contains("AXEnabled=false"));
+        assert!(!message.contains("foreground"));
+        assert!(!message.contains("bring_to_front"));
     }
 
     #[test]

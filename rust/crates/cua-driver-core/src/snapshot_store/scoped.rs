@@ -138,7 +138,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         })?;
         let inner = self.inner.lock().unwrap();
         let lane = inner
-            .snapshots
+            .lanes
             .get(&pid)
             .map(Vec::as_slice)
             .unwrap_or_default();
@@ -238,7 +238,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         let (id, evicted) = {
             let mut inner = self.inner.lock().unwrap();
             let parent = inner
-                .snapshots
+                .lanes
                 .get(&capture.pid)
                 .and_then(|lane| {
                     lane.iter().find(|s| {
