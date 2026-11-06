@@ -251,7 +251,7 @@ fn connect_bounded(path: &std::path::Path, timeout: Duration) -> Result<std::os:
 /// The compositor's pid: the peer of a bounded connection to its socket.
 fn compositor_pid(path: PathBuf) -> Result<libc::pid_t> {
     let fd = connect_bounded(&path, CALL_TIMEOUT)?;
-    super::hyprland::peer_pid(fd.as_raw_fd())
+    super::compositor_peer::peer_pid(fd.as_raw_fd())
 }
 
 /// The three bus steps of an attested read, so the order can be proven without a bus.
