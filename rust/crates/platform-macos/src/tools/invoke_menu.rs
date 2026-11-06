@@ -2502,7 +2502,7 @@ mod tests {
         }
 
         async fn invoke(&self, _args: Value) -> ToolResult {
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.fail_validation {
                 menu_validation_failure(
                     "",

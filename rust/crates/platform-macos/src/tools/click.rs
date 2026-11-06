@@ -1686,7 +1686,7 @@ impl ClickTool {
             )
             .await
             {
-                crate::fast_path_guard::Outcome::Refuse(refusal) => return refusal,
+                crate::fast_path_guard::Outcome::Refuse(refusal) => return *refusal,
                 crate::fast_path_guard::Outcome::Proceed { summary, .. } => *fast_path = summary,
             }
 
@@ -2410,7 +2410,7 @@ impl ClickTool {
                 )
                 .await
                 {
-                    crate::fast_path_guard::Outcome::Refuse(refusal) => return refusal,
+                    crate::fast_path_guard::Outcome::Refuse(refusal) => return *refusal,
                     crate::fast_path_guard::Outcome::Proceed { summary, relocate } => {
                         *fast_path = summary;
                         match relocate {

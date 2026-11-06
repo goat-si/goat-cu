@@ -327,7 +327,9 @@ pub enum Outcome {
         summary: Option<Value>,
         relocate: Option<(f64, f64)>,
     },
-    Refuse(ToolResult),
+    /// Boxed: GOAT's `ToolResult` (action record, disposition) is much larger
+    /// than `Proceed`.
+    Refuse(Box<ToolResult>),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -348,9 +350,9 @@ fn finish(
         tool, verified, check_ms = ms, verdict = ?verdict, "fast-path check"
     );
     match &verdict {
-        Verdict::Refuse { reason, detail } if enforce => Outcome::Refuse(wire::refusal(
+        Verdict::Refuse { reason, detail } if enforce => Outcome::Refuse(Box::new(wire::refusal(
             tool, *reason, detail, class, pid, window_id, ms,
-        )),
+        ))),
         Verdict::Relocated { dx, dy } if enforce => Outcome::Proceed {
             summary: Some(wire::check_summary(&verdict, class, verified, ms)),
             relocate: Some((dx / relocate_scale, dy / relocate_scale)),
