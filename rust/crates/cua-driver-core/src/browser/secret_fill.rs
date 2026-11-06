@@ -519,7 +519,7 @@ impl Tool for BrowserFillSecretTool {
         &self,
         adapter_id: &str,
         args: &Value,
-    ) -> Result<Option<Value>, String> {
+    ) -> Result<Option<Value>, crate::tool::ProtectedResourceScopeError> {
         if adapter_id == "browser_bound_input" {
             super::tools::browser_protected_resource_scope(&self.engine, args, TOOL_NAME).await
         } else {

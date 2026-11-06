@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 use crate::goat::action_latency as latency;
 
 use async_trait::async_trait;
@@ -375,6 +378,11 @@ impl RightClickTool {
                 Ok(lease) => lease,
                 Err(refusal_result) => return refusal_result,
             };
+            if let Some(refusal) =
+                super::refuse_if_disabled(pid, wid, &element_guard, "AXShowMenu", false).await
+            {
+                return refusal;
+            }
 
             let action_guard = element_guard.clone();
             let advertised = latency::spawn_blocking(move || {

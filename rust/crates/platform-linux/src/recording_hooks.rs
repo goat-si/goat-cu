@@ -1,4 +1,35 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Application-state snapshots used by trajectory recording on Linux.
+
+#[cfg(target_os = "linux")]
+use cua_driver_core::video::{VideoBackend, VideoBackendFactory};
+
+#[cfg(target_os = "linux")]
+pub(crate) fn install() {
+    cua_driver_core::recording::set_screenshot_fn(screenshot_for_recording);
+    cua_driver_core::recording::set_click_marker_fn(|png_bytes, x, y| {
+        crate::capture::crosshair_png_bytes(png_bytes, x, y).ok()
+    });
+    cua_driver_core::recording::set_budgeted_ax_snapshot_fn(app_state_json_for);
+    cua_driver_core::recording::set_element_bounds_fn(element_window_local_xy);
+    cua_driver_core::video::set_video_backend_factory(Box::new(LinuxVideoBackendFactory));
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxVideoBackendFactory;
+
+#[cfg(target_os = "linux")]
+impl VideoBackendFactory for LinuxVideoBackendFactory {
+    fn start(&self, output_path: &std::path::Path) -> anyhow::Result<Box<dyn VideoBackend>> {
+        if crate::wayland::is_wayland() {
+            crate::video_wayland::WaylandVideoBackendFactory.start(output_path)
+        } else {
+            cua_driver_core::video_ffmpeg::FfmpegVideoBackendFactory.start(output_path)
+        }
+    }
+}
 
 /// Per-turn application state for trajectory recording, walked under the
 /// shared `get_window_state` budget. The walk reports the shared walk fields so
@@ -220,7 +251,10 @@ fn resolve_window_for_recording(
     window_id: Option<u64>,
 ) -> Option<crate::x11::WindowInfo> {
     let windows = crate::wayland::list_windows_dispatch(Some(pid));
-    if crate::wayland::is_wayland() && crate::wayland::hyprland::is_session() {
+    // Hyprland addresses and niri window ids are stable compositor ids.
+    if crate::wayland::is_wayland()
+        && (crate::wayland::hyprland::is_session() || crate::wayland::niri::is_session())
+    {
         return match window_id {
             Some(id) => windows.into_iter().find(|window| window.xid == id),
             None if windows.len() == 1 => windows.into_iter().next(),

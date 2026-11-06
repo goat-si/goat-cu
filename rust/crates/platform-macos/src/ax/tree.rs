@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! AX tree walker: produces the treeMarkdown string and element cache.
 //!
 //! Format (matching libs/cua-driver exactly):
@@ -45,7 +48,7 @@ use std::time::Instant;
 ///
 /// Callers can override per-call via `walk_tree`'s `max_depth` parameter to
 /// trade fidelity for context-window budget on AX-heavy apps (Electron,
-/// Obsidian, large web apps — issue #22865).
+/// Obsidian and other large web apps).
 pub const DEFAULT_MAX_DEPTH: usize = 25;
 
 /// Default maximum total nodes visited during a single AX walk. Chromium-family
@@ -55,7 +58,7 @@ pub const DEFAULT_MAX_DEPTH: usize = 25;
 /// with a warning line appended (mirrors Swift reference implementation).
 ///
 /// Callers can override per-call via `walk_tree`'s `max_elements` parameter
-/// (issue #22865).
+/// for large accessibility trees.
 pub const DEFAULT_MAX_ELEMENTS: usize = 2_000;
 
 /// Bound each native AX request. Tokio cannot cancel a blocked
@@ -644,6 +647,10 @@ pub struct TreeWalkResult {
     /// read, omitted tabs, off-screen rows or menus left unwalked, or web
     /// content excluded from this walk.
     pub nodes_skipped: bool,
+    /// True when nodes past `max_depth` were omitted, independently of budget
+    /// `truncated`. A depth cut also sets `nodes_skipped`; this flag isolates
+    /// it for callers that report only depth truncation.
+    pub depth_truncated: bool,
     /// Why and where the walk stopped (see [`cua_driver_core::walk_budget`]).
     pub walk: WalkOutcome,
     /// Whether the requested `window_id` actually resolved to an AX surface,
@@ -669,6 +676,7 @@ impl TreeWalkResult {
             nodes,
             truncated: false,
             nodes_skipped: false,
+            depth_truncated: false,
             walk: cua_driver_core::walk_budget::WalkBudget::nodes_only(usize::MAX).outcome(),
             window_scope: None,
             offscreen_rows: Vec::new(),
@@ -736,7 +744,7 @@ pub fn walk_tree(pid: i32, window_id: Option<u32>, query: Option<&str>) -> TreeW
 /// the cap) and depth-wise (nodes whose markdown indent would exceed the cap
 /// are omitted). Markdown and the `nodes` vec are truncated identically.
 ///
-/// Issue #22865: caps protect against Electron / Obsidian / large web apps
+/// These caps protect against Electron / Obsidian / large web apps
 /// that produce 10k+ element trees and blow context windows.
 pub fn walk_tree_bounded(
     pid: i32,
@@ -1304,6 +1312,7 @@ where
                     nodes,
                     truncated: false,
                     nodes_skipped: true,
+                    depth_truncated: false,
                     walk: budget.outcome(),
                     // No application AX element at all, so a requested window
                     // certainly did not resolve.
@@ -1549,6 +1558,7 @@ fn finalize_with_deadline_sample(
         budget.assert_exhaustive();
     }
     let walk = budget.outcome();
+    let depth_truncated = ledger.depth_truncated();
     let nodes_skipped = ledger.finish();
     (
         finalize_walk(
@@ -1558,6 +1568,7 @@ fn finalize_with_deadline_sample(
             query,
             walk,
             nodes_skipped,
+            depth_truncated,
             window_scope,
         ),
         final_deadline_sample,
@@ -1832,6 +1843,7 @@ fn finalize_walk(
     query: Option<&str>,
     walk: WalkOutcome,
     nodes_skipped: bool,
+    depth_truncated: bool,
     window_scope: Option<WindowScope>,
 ) -> TreeWalkResult {
     nodes.retain(|n| n.role != "AXTabStripSummary");
@@ -1854,6 +1866,7 @@ fn finalize_walk(
         nodes,
         truncated: walk.truncated(),
         nodes_skipped,
+        depth_truncated,
         walk,
         window_scope,
     }
@@ -2307,7 +2320,7 @@ fn walk_element<S: AxTreeSource>(
     label_claims: &mut Vec<(usize, String)>,
 ) {
     if depth > max_depth {
-        note_skipped();
+        note_depth_cut();
         budget.record_cut(IncompleteReason {
             kind: IncompleteReasonKind::PolicyOmission,
             detail: IncompleteReasonDetail::DepthLimit,
@@ -3046,13 +3059,15 @@ fn walk_children<S: AxTreeSource>(
             Read::Absent => {}
             Read::Known(below) if below.is_empty() => {}
             Read::Known(_below) => {
-                note_skipped();
+                note_depth_cut();
                 budget.record_cut(IncompleteReason {
                     kind: IncompleteReasonKind::PolicyOmission,
                     detail: IncompleteReasonDetail::DepthLimit,
                 });
             }
-            Read::Unknown(_) => note_skipped(),
+            // Children that could not be read below the cap may exist: report
+            // the depth cut rather than claim the tree ended there.
+            Read::Unknown(_) => note_depth_cut(),
         }
         return;
     }
@@ -3804,6 +3819,7 @@ fn format_node_line_inner(node: &AXNode, bounded: bool) -> String {
 thread_local! {
     static MENUS_COLLAPSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static WALK_SKIPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static WALK_DEPTH_CUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static EXHAUSTIVE_NODES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static EXHAUSTIVE_ASSERTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -3863,17 +3879,32 @@ fn note_skipped() {
     WALK_SKIPPED.with(|flag| flag.set(true));
 }
 
+/// Record that the walk on this thread stopped at `max_depth` above a node
+/// that still had children (see [`TreeWalkResult::depth_truncated`]).
+/// Also counts as a skip.
+fn note_depth_cut() {
+    note_skipped();
+    WALK_DEPTH_CUT.with(|flag| flag.set(true));
+}
+
 /// The skip record of one walk. A nested walk on the same thread keeps its
 /// own record and hands the outer one back when it ends.
 struct SkipLedger {
     previous: bool,
+    previous_depth_cut: bool,
 }
 
 impl SkipLedger {
     fn start() -> Self {
         Self {
             previous: WALK_SKIPPED.with(|flag| flag.replace(false)),
+            previous_depth_cut: WALK_DEPTH_CUT.with(|flag| flag.replace(false)),
         }
+    }
+
+    /// Whether this walk so far stopped at the depth cap above children.
+    fn depth_truncated(&self) -> bool {
+        WALK_DEPTH_CUT.with(std::cell::Cell::get)
     }
 
     /// Whether this walk skipped anything.
@@ -3885,6 +3916,7 @@ impl SkipLedger {
 impl Drop for SkipLedger {
     fn drop(&mut self) {
         WALK_SKIPPED.with(|flag| flag.set(self.previous));
+        WALK_DEPTH_CUT.with(|flag| flag.set(self.previous_depth_cut));
     }
 }
 
@@ -4128,6 +4160,21 @@ mod tests {
         assert_eq!(filter_tree(md, "needle"), "- [0] AXWindow \"Example\"\n  - [1] AXTable \"History\"\n    - [2] AXRow \"Message\"\n      - AXStaticText = \"needle\"\n");
         assert_eq!(filter_tree(md, "scroll"), "");
         assert_eq!(filter_tree(md, "inactive tabs"), "");
+    }
+
+    #[test]
+    fn a_disabled_control_row_says_so() {
+        // Upstream's `enabled=false` row marker is GOAT's `disabled` marker,
+        // listed first in the metadata block.
+        let mut node = role_only_node("AXCheckBox".into(), 0, 2, None, false);
+        node.element_index = Some(7);
+        node.title = Some("Reset".into());
+        node.actions = vec!["AXPress".into()];
+        node.enabled = Some(false);
+        assert_eq!(
+            format_node_line(&node),
+            "- [7] AXCheckBox \"Reset\" [disabled actions=[press]]"
+        );
     }
 
     #[test]

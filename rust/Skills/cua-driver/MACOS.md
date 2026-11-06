@@ -164,6 +164,18 @@ keep their separate menu route and can refuse a disabled item. macOS asks
 the user once to allow Cua Driver to control the app (Automation) the first
 time a scripting route runs; when that is off, the call refuses and nothing is
 saved.
+
+For unattended use, start `cua-driver serve --no-automation-prompts` before
+connecting `cua-driver mcp --socket <path>`. MCP's auto-started daemon does not
+enable this protection, and the flag is serve-only. Only explicitly granted
+Automation targets may receive scripting actions: background Save (including
+hotkeys), Finder rename, browser Apple Events JavaScript and browser quit for
+JavaScript setup, and Safari select updates. Ungranted or unknown consent
+refuses immediately with `automation_consent_required`, naming the app and
+System Settings > Privacy & Security > Automation; no scripting action or
+keyboard fallback is sent. Grant consent with the user's authorization before
+retrying. This does not suppress Accessibility/Screen Recording onboarding or
+other unrelated OS prompts. Omit the flag to preserve prompt-on-first-use behavior.
 With the app already in front it resolves every AX level live. Prefer an in-window
 element action when the same command has an ordinary control, and prefer
 `set_window_frame` for exact geometry. Full rationale is in “Navigating native
@@ -1052,6 +1064,7 @@ starting point for new browser workflows.
 | `Screen Recording permission not granted`                     | TCC not granted for capture                                                                                       | Screenshots and pixel actions are unavailable. If the task is AX-completable, use `get_window_state({include_screenshot:false})` and `element_token` actions; otherwise stop and ask the user to run `cua-driver permissions grant` (see [Install and approve permissions](#install-and-approve-permissions)) |
 | `Sent AXPress ... but the app returned AX error -25200` (or -25204, -25205, -25206) | When no read-back resolves it, not an error result: `effect:"unverifiable"`. The app may have acted anyway; some AppKit controls return these after a press they performed | Re-read with `get_window_state` before retrying; a second press on a checkbox toggles it back. A radio button or checkbox whose AXValue settles on the pressed state is reported as performed, naming the error |
 | `AX action refused: refusing AXPress: the target reports AXEnabled=false` (`code` `background_unavailable`) | The press was not sent (`effect:"refused"`, `dispatched:false`). Apps such as Calendar disable toolbar controls while their window is in the background | Use the app's menu or key equivalent, or retry with `delivery_mode:"foreground"` only if the user allows it. In the foreground the same check is a plain `AX action failed` error (the window may have come forward): read the window again |
+| `automation_consent_required` | With `serve --no-automation-prompts`, Automation consent is not explicitly granted for the named app; no scripting action was sent | With the user's authorization, grant access in System Settings > Privacy & Security > Automation |
 | `set_value refused (file_name_needs_rename)`                  | A file's name in Finder's Get Info window (AXIdentifier `Name`): an AXValue write changes only the field          | `set_value` the full new name on the file's name cell in a Finder window that lists it (renamed through Finder in the background and read back from disk) |
 | `Background input refused (no_focused_text_input)`           | Untargeted background `type_text` while the window's focused element is not a text input or an editing surface (spreadsheet grid, document canvas: `AXLayoutArea`, `AXScrollArea`, `AXTable`, `AXCell`, `AXGroup`; not in Finder/Dock); keys would drive the view (Finder type-to-select) | pass the field's `element_token`, or `x,y` to pixel-focus it first; to rename a Finder file, `set_value` its name cell |
 

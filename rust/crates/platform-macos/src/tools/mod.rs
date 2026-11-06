@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! MCP tool implementations for macOS.
 
 use crate::goat::action_latency as latency;
@@ -347,7 +350,7 @@ impl Tool for ArgumentsFirst {
         &self,
         adapter_id: &str,
         args: &Value,
-    ) -> Result<Option<Value>, String> {
+    ) -> Result<Option<Value>, cua_driver_core::tool::ProtectedResourceScopeError> {
         self.inner.protected_resource_scope(adapter_id, args).await
     }
 
@@ -356,7 +359,7 @@ impl Tool for ArgumentsFirst {
         adapter_id: &str,
         args: &Value,
         approved_scope: &Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), cua_driver_core::tool::ProtectedResourceScopeError> {
         self.inner
             .validate_protected_resource_scope(adapter_id, args, approved_scope)
             .await
@@ -581,6 +584,84 @@ pub(crate) fn background_refusal_result(
         refusal.code, refusal.reason
     ))
     .with_structured(structured)
+}
+
+/// Structured `element_disabled` refusal: the control reported
+/// `AXEnabled=false` immediately before dispatch and nothing was sent.
+///
+/// Some controls (menu and toolbar items) are disabled only while their app is
+/// in the background, so a background call into an app that is not frontmost
+/// gets a foreground escalation. Otherwise fronting cannot help.
+pub(crate) fn element_disabled_result(
+    pid: i32,
+    window_id: u32,
+    disabled: &crate::input::ax_actions::ElementDisabled,
+    foreground: bool,
+) -> cua_driver_core::protocol::ToolResult {
+    let suggest_foreground = !foreground && crate::apps::frontmost_pid() != Some(pid);
+    disabled_refusal(pid, window_id, disabled, suggest_foreground)
+}
+
+fn disabled_refusal(
+    pid: i32,
+    window_id: u32,
+    disabled: &crate::input::ax_actions::ElementDisabled,
+    suggest_foreground: bool,
+) -> cua_driver_core::protocol::ToolResult {
+    let mut text = disabled.to_string();
+    let mut structured = serde_json::json!({
+        "code": crate::input::ax_actions::ElementDisabled::CODE,
+        "effect": "refused",
+        "pid": pid,
+        "window_id": window_id,
+        "action": disabled.action,
+    });
+    if suggest_foreground {
+        let reason = "the app is in the background, which disables some controls";
+        text.push_str(&format!(
+            ". If {reason}, retry with delivery_mode:\"foreground\""
+        ));
+        structured["escalation"] =
+            serde_json::json!({ "recommended": "foreground", "reason": reason });
+    }
+    cua_driver_core::protocol::ToolResult::error(text).with_structured(structured)
+}
+
+/// Re-read `AXEnabled` on a token target and refuse a disabled one before any
+/// cursor or input work. The snapshot's `enabled` can be stale. A foreground
+/// call into an app that is not frontmost skips the read: activation can
+/// enable the control, so a read before activation would refuse a live target.
+pub(crate) async fn refuse_if_disabled(
+    pid: i32,
+    window_id: u32,
+    element: &crate::ax::snapshot::RetainedElement,
+    action: &'static str,
+    foreground: bool,
+) -> Option<cua_driver_core::protocol::ToolResult> {
+    if foreground && crate::apps::frontmost_pid() != Some(pid) {
+        return None;
+    }
+    let element = element.clone();
+    // Read AXEnabled directly: the dispatch-time helper in ax_actions keeps
+    // GOAT's foreground-aware background refusal, while this pre-dispatch
+    // check always answers with the typed element_disabled refusal.
+    let enabled = tokio::task::spawn_blocking(move || unsafe {
+        crate::ax::bindings::copy_bool_attr(
+            element.as_ptr() as crate::ax::bindings::AXUIElementRef,
+            "AXEnabled",
+        )
+    })
+    .await
+    .ok()?;
+    if enabled != Some(false) {
+        return None;
+    }
+    let disabled = crate::input::ax_actions::ElementDisabled {
+        action: action.to_owned(),
+    };
+    Some(element_disabled_result(
+        pid, window_id, &disabled, foreground,
+    ))
 }
 
 /// Hint shown with every `windowserver_connection_invalid` refusal.
@@ -1735,7 +1816,11 @@ pub(super) fn target_pid(
         .get("element_token")
         .is_some_and(|token| !token.is_null())
     {
-        return Err(cua_driver_core::element_token::stale_token_without_pid());
+        // The token is gone, but a recently retired snapshot still says whose
+        // it was, so the refusal can name what is current for that process.
+        return Err(cua_driver_core::element_token::stale_token_without_pid(
+            state.snapshots.token_owner(args),
+        ));
     }
     Err(invalid_arguments(
         "Missing required integer field: pid. Pass pid, or pass an element_token from the \
@@ -1942,6 +2027,7 @@ pub fn register_all(
     // Share the element cache with the recording-hook layer so it can
     // resolve element_index → window-local screenshot coords for click.png.
     cua_driver_core::snapshot_store::register_runtime_store(&state.snapshots);
+    crate::recording_hooks::install();
 
     // Drop a disconnecting session's config overrides + owned cursor on
     // `session_end`. The daemon fans the session id out to this hook;
@@ -2051,14 +2137,10 @@ pub fn register_all(
         registry,
         Arc::new(clipboard::MacosClipboard::new()),
     );
-    // The standalone `screenshot` tool was removed (#1692). The pixel-grounding
-    // screenshot the Claude Code computer-use compat loop relies on now comes
-    // from `get_window_state` (which always returns BOTH the tree AND a
-    // screenshot — perception is mode-agnostic; `capture_mode` is deprecated/
-    // ignored) for a window, or `get_desktop_state` for the whole screen.
-    // `compat` no longer gates a tool swap here — the flag's live purpose is to
-    // register the MCP server under the `cua-computer-use` name, which is what
-    // triggers Claude Code's computer-use beta-tool injection (see cli.rs).
+    // The standalone `screenshot` tool was removed in #1692. Window capture
+    // now comes from `get_window_state` (tree plus screenshot by default), while
+    // `get_desktop_state` handles explicit full-display capture. `capture_mode`
+    // is deprecated and ignored. `compat` no longer gates a tool swap here.
     let _ = compat;
     registry.register(Box::new(get_screen_size::GetScreenSizeTool));
     registry.register(Box::new(get_desktop_state::GetDesktopStateTool::new(
@@ -2123,6 +2205,29 @@ pub fn register_all(
     // Recording / replay + session-lifecycle tools are platform-independent.
     registry.register_recording_tools();
     registry.register_session_tools();
+}
+
+#[cfg(test)]
+mod registry_surface_tests {
+    use super::*;
+
+    fn names(compat: bool) -> Vec<String> {
+        let mut registry = ToolRegistry::new();
+        register_all(&mut registry, compat, false, false, None);
+        registry.tool_names().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn default_and_legacy_compat_surfaces_have_no_screenshot_tool() {
+        let default = names(false);
+        let compat = names(true);
+        assert!(!default.iter().any(|name| name == "screenshot"));
+        assert!(!compat.iter().any(|name| name == "screenshot"));
+        assert_eq!(
+            default, compat,
+            "legacy compat flag must remain surface-neutral"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2606,5 +2711,38 @@ mod coordinate_scale_tests {
         .await;
         assert_eq!(sent.get(), 1);
         assert_ne!(result.is_error, Some(true));
+    }
+}
+
+#[cfg(test)]
+mod element_disabled_tests {
+    use super::*;
+    use crate::input::ax_actions::ElementDisabled;
+
+    fn disabled() -> ElementDisabled {
+        ElementDisabled {
+            action: "set_value".into(),
+        }
+    }
+
+    #[test]
+    fn background_app_refusal_is_coded_and_escalates_to_foreground() {
+        let result = disabled_refusal(42, 7, &disabled(), true);
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured");
+        assert_eq!(structured["code"], "element_disabled");
+        assert_eq!(structured["effect"], "refused");
+        assert_eq!(structured["action"], "set_value");
+        assert_eq!(structured["window_id"], 7);
+        // run_steps' foreground_fallback keys off this field.
+        assert_eq!(structured["escalation"]["recommended"], "foreground");
+    }
+
+    #[test]
+    fn frontmost_app_refusal_does_not_suggest_fronting() {
+        let result = disabled_refusal(42, 7, &disabled(), false);
+        let structured = result.structured_content.expect("structured");
+        assert_eq!(structured["code"], "element_disabled");
+        assert!(structured.get("escalation").is_none(), "{structured}");
     }
 }

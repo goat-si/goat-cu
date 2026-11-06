@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Response shaping for `get_window_state`, shared by every platform backend.
 //!
 //! A backend walks its accessibility API and builds the complete legacy
@@ -2578,6 +2581,66 @@ mod tests {
             assert_eq!(s["returned_element_count"], 4);
             cua_driver_contract::validate_success_output("get_window_state", s.clone())
                 .unwrap_or_else(|e| panic!("{format} since {base}: {e}"));
+        }
+    }
+
+    // Upstream asserted a diff-filtered `elements`; GOAT keeps every element of
+    // the new snapshot (see the `since` schema text), so this checks upstream's
+    // count guarantee against that contract: the count describes the array.
+    #[test]
+    fn an_elements_diff_counts_only_the_elements_it_returns() {
+        use cua_driver_contract::{ToolOutput, WindowStateOutput};
+        // A backend's read: every actionable row of OLD, counted as returned.
+        let read = |sid: &str, md: &str| {
+            let (content, mut s) = payload(sid, md);
+            s["elements"] = json!([
+                {"element_index": 1, "role": "AXTextField", "depth": 1},
+                {"element_index": 2, "role": "AXButton", "depth": 1},
+                {"element_index": 3, "role": "AXButton", "depth": 1}
+            ]);
+            s["total_element_count"] = json!(4);
+            s["returned_element_count"] = json!(3);
+            (content, s)
+        };
+        let edited = OLD.replace("\"a\"", "\"ab\"");
+        for (window, format, [id1, id2, id3]) in [
+            (7020, "elements", ["s000000g1", "s000000g2", "s000000g3"]),
+            (7021, "both", ["s000000h1", "s000000h2", "s000000h3"]),
+        ] {
+            let (mut c1, mut s1) = read(id1, OLD);
+            apply(
+                &opts(json!({ "tree_format": format })),
+                &ctx(window),
+                &mut c1,
+                &mut s1,
+            );
+            let (mut c2, mut s2) = read(id2, &edited);
+            apply(
+                &opts(json!({ "tree_format": format, "since": "latest" })),
+                &ctx(window),
+                &mut c2,
+                &mut s2,
+            );
+            let output: WindowStateOutput = serde_json::from_value(s2.clone()).unwrap();
+            assert_eq!(output.validate(), Ok(()), "{format}");
+            assert_eq!(s2["since_status"], "diff", "{format}");
+            assert_eq!(s2["elements"].as_array().unwrap().len(), 3, "{format}");
+            assert_eq!(s2["returned_element_count"], 3, "{format}");
+            assert_eq!(s2["total_element_count"], 4, "{format}");
+
+            // No change: still the whole snapshot, counted as returned.
+            let (mut c3, mut s3) = read(id3, &edited);
+            apply(
+                &opts(json!({ "tree_format": format, "since": "latest" })),
+                &ctx(window),
+                &mut c3,
+                &mut s3,
+            );
+            let output: WindowStateOutput = serde_json::from_value(s3.clone()).unwrap();
+            assert_eq!(output.validate(), Ok(()), "{format}");
+            assert_eq!(s3["since_status"], "no_change", "{format}");
+            assert_eq!(s3["elements"].as_array().unwrap().len(), 3, "{format}");
+            assert_eq!(s3["returned_element_count"], 3, "{format}");
         }
     }
 

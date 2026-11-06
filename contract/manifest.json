@@ -233,6 +233,9 @@
               "null"
             ]
           },
+          "fast_path": {
+            "type": "object"
+          },
           "focus_restoration": {
             "additionalProperties": false,
             "properties": {
@@ -937,6 +940,9 @@
               "array",
               "null"
             ]
+          },
+          "fast_path": {
+            "type": "object"
           },
           "focus_restoration": {
             "additionalProperties": false,
@@ -3123,6 +3129,9 @@
               "null"
             ]
           },
+          "fast_path": {
+            "type": "object"
+          },
           "focus_restoration": {
             "additionalProperties": false,
             "properties": {
@@ -3617,6 +3626,9 @@
               "array",
               "null"
             ]
+          },
+          "fast_path": {
+            "type": "object"
           },
           "focus_restoration": {
             "additionalProperties": false,
@@ -4523,6 +4535,9 @@
               "array",
               "null"
             ]
+          },
+          "fast_path": {
+            "type": "object"
           },
           "focus_restoration": {
             "additionalProperties": false,
@@ -5531,6 +5546,9 @@
               "null"
             ]
           },
+          "fast_path": {
+            "type": "object"
+          },
           "focus_restoration": {
             "additionalProperties": false,
             "properties": {
@@ -6069,6 +6087,9 @@
               "array",
               "null"
             ]
+          },
+          "fast_path": {
+            "type": "object"
           },
           "focus_restoration": {
             "additionalProperties": false,
@@ -6982,6 +7003,9 @@
               "null"
             ]
           },
+          "fast_path": {
+            "type": "object"
+          },
           "focus_restoration": {
             "additionalProperties": false,
             "properties": {
@@ -7891,6 +7915,9 @@
               "array",
               "null"
             ]
+          },
+          "fast_path": {
+            "type": "object"
           },
           "focus_restoration": {
             "additionalProperties": false,

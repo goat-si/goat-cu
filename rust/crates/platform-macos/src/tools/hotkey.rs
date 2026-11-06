@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 use crate::goat::action_latency as latency;
 
 use async_trait::async_trait;
@@ -289,7 +292,7 @@ impl Tool for HotkeyTool {
                     return delivery(&key, &modifier_refs, duration, &control);
                 }
                 crate::input::key_hold::deliver(
-                    crate::input::key_hold::KeyRoute::Global,
+                    crate::input::key_hold::KeyRoute::Global(None),
                     &key,
                     &modifier_refs,
                     duration,
@@ -699,9 +702,9 @@ impl Tool for HotkeyTool {
                                 wid,
                                 || {
                                     if screen_sharing_target {
-                                        crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal, &key, &m, duration, &control)
+                                        crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control)
                                     } else {
-                                        crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Global, &key, &m, duration, &control)
+                                        crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Global(Some(pid)), &key, &m, duration, &control)
                                     }
                                 },
                             )?;
@@ -717,7 +720,7 @@ impl Tool for HotkeyTool {
                                 wid,
                                 || {
                                     focus_hotkey_element(pid, ptr)?;
-                                    crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal, &key, &m, duration, &control)
+                                    crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control)
                                 },
                             )?;
                             Ok(())
@@ -727,7 +730,7 @@ impl Tool for HotkeyTool {
                                 pid as libc::pid_t,
                                 wid,
                                 || {
-                                    crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal, &key, &m, duration, &control)
+                                    crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control)
                                 },
                             )?;
                             Ok(())
@@ -784,15 +787,21 @@ fn lookup_native_menu<T>(native: bool, find: impl FnOnce() -> Option<T>) -> Opti
     }
 }
 
-/// Mark an unavailable background menu as a refusal without trying keys.
+/// Mark an unavailable background menu, or a scripted Save refused for
+/// missing Automation consent, as a refusal without trying keys. Only the
+/// background case suggests fronting: fronting does not grant consent.
 pub(super) fn menu_refusal_without_keys(mut result: ToolResult) -> ToolResult {
-    let unavailable = result.is_error == Some(true)
-        && result
-            .structured_content
-            .as_ref()
-            .and_then(|v| v["code"].as_str())
-            == Some("background_unavailable");
-    if !unavailable {
+    let code = result
+        .structured_content
+        .as_ref()
+        .and_then(|v| v["code"].as_str())
+        .map(str::to_owned);
+    let refused = result.is_error == Some(true)
+        && matches!(
+            code.as_deref(),
+            Some("background_unavailable" | "automation_consent_required")
+        );
+    if !refused {
         return result;
     }
     if let Some(serde_json::Value::Object(fields)) = result.structured_content.as_mut() {
@@ -801,9 +810,11 @@ pub(super) fn menu_refusal_without_keys(mut result: ToolResult) -> ToolResult {
         fields
             .entry("keys_sent")
             .or_insert(serde_json::json!(false));
-        fields.entry("escalation").or_insert(
-            serde_json::json!({ "recommended": "foreground", "requires": ["window_id"] }),
-        );
+        if code.as_deref() == Some("background_unavailable") {
+            fields.entry("escalation").or_insert(
+                serde_json::json!({ "recommended": "foreground", "requires": ["window_id"] }),
+            );
+        }
     }
     result
 }
@@ -977,6 +988,17 @@ mod tests {
         assert_eq!(structured["dispatched"], false);
         assert_eq!(structured["keys_sent"], false);
         assert_eq!(structured["escalation"]["recommended"], "foreground");
+        // Missing Automation consent is refused without keys; fronting the
+        // app would not grant consent, so no foreground escalation.
+        let consent = menu_refusal_without_keys(
+            ToolResult::error("consent")
+                .with_structured(serde_json::json!({ "code": "automation_consent_required" })),
+        );
+        let structured = consent.structured_content.expect("structured");
+        assert_eq!(structured["effect"], "refused");
+        assert_eq!(structured["dispatched"], false);
+        assert_eq!(structured["keys_sent"], false);
+        assert!(structured.get("escalation").is_none(), "{structured}");
         // Other menu answers pass through as they are.
         let other = menu_refusal_without_keys(
             ToolResult::error("refused")

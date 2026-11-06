@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! set_value tool — matches the Swift reference in SetValueTool.swift.
 //!
 //! Two modes, determined by the element's AXRole:
@@ -74,8 +77,9 @@ fn def() -> &'static ToolDef {
             readable option titles. Other elements: writes AXValue (sliders, \
             steppers, date pickers, native text fields). A Finder file name cell (list or icon view, not \
             being edited) is renamed through Finder's scripting interface in the background and read back \
-            from disk; `value` is the full new name with its extension (macOS asks once to allow controlling \
-            Finder). Refusals: Finder's Get Info `Name` field, `file_name_needs_rename`; Safari's address \
+            from disk; `value` is the full new name with its extension (macOS may ask to allow controlling \
+            Finder); with serve --no-automation-prompts, ungranted consent refuses with \
+            `automation_consent_required`. Refusals: Finder's Get Info `Name` field, `file_name_needs_rename`; Safari's address \
             field, `address_field_not_settable` (the refusal names the route that opens an address). WebKit \
             ignores AXValue writes to web inputs: use `type_text_chars`.".into(),
         input_schema: serde_json::json!({
@@ -161,6 +165,11 @@ impl Tool for SetValueTool {
             Ok(lease) => lease,
             Err(refusal_result) => return refusal_result,
         };
+        if let Some(refusal) =
+            super::refuse_if_disabled(pid, window_id, &element_guard, "set_value", false).await
+        {
+            return refusal;
+        }
 
         // Refuse non-writable rows and cells before rename or any other mutation.
         let editability_guard = element_guard.clone();
@@ -1119,20 +1128,27 @@ fn finder_rename_result(
             "renamed_to": new_path.display().to_string(),
         }))
         .with_action_record(rename_record()),
-        Ok(Err(refusal)) => ToolResult::error(format!(
-            "set_value refused ({FILE_NAME_NEEDS_RENAME}): renaming \"{old_name}\" through \
+        Ok(Err(refusal)) => {
+            let code = if refusal.code == "automation_consent_required" {
+                refusal.code
+            } else {
+                FILE_NAME_NEEDS_RENAME
+            };
+            ToolResult::error(format!(
+                "set_value refused ({code}): renaming \"{old_name}\" through \
              Finder did not complete ({}: {}). The file keeps its name; nothing else was sent.",
-            refusal.code, refusal.reason
-        ))
-        .with_structured(serde_json::json!({
-            "code": FILE_NAME_NEEDS_RENAME,
-            "effect": "refused",
-            "path": "apple_events",
-            "pid": pid,
-            "window_id": window_id,
-            "reason": refusal.reason,
-            "cause": refusal.code,
-        })),
+                refusal.code, refusal.reason
+            ))
+            .with_structured(serde_json::json!({
+                "code": code,
+                "effect": "refused",
+                "path": "apple_events",
+                "pid": pid,
+                "window_id": window_id,
+                "reason": refusal.reason,
+                "cause": refusal.code,
+            }))
+        }
         Err(error) => ToolResult::error(format!("set_value rename task failed: {error}")),
     }
 }
@@ -2610,6 +2626,8 @@ fn set_select_via_js(
     element_title: &str,
     value: &str,
 ) -> anyhow::Result<String> {
+    crate::apple_events::ensure_permitted("com.apple.Safari", "Safari")
+        .map_err(|r| anyhow::anyhow!("{}: {}", r.code, r.reason))?;
     // Percent-encode the lowercased value using only unreserved URL characters
     // as the allowed set, matching the Swift reference's percent-encoding approach.
     // This makes the string safe to embed in both a JS single-quoted string
@@ -2806,6 +2824,26 @@ mod tests {
         let data = refused.structured_content.unwrap();
         assert_eq!(data["code"], "file_name_needs_rename");
         assert_eq!(data["cause"], "automation_denied");
+        let refused = super::finder_rename_result(
+            7,
+            42,
+            path,
+            "b.txt",
+            Ok(Err(crate::apple_events::ScriptRefusal {
+                code: "automation_consent_required",
+                reason: "Grant Finder access in System Settings > Privacy & Security > Automation"
+                    .into(),
+            })),
+        );
+        assert_eq!(refused.is_error, Some(true));
+        let data = refused.structured_content.unwrap();
+        assert_eq!(data["code"], "automation_consent_required");
+        assert_eq!(data["cause"], "automation_consent_required");
+        assert_eq!(data["effect"], "refused");
+        assert_eq!(
+            data["reason"],
+            "Grant Finder access in System Settings > Privacy & Security > Automation"
+        );
     }
 
     #[test]

@@ -34,7 +34,11 @@ impl Tool for Probe {
     async fn protected_resource_ownership(&self, _: &str, _: &Value) -> ProtectedResourceOwnership {
         ProtectedResourceOwnership::DriverOwned
     }
-    async fn protected_resource_scope(&self, _: &str, _: &Value) -> Result<Option<Value>, String> {
+    async fn protected_resource_scope(
+        &self,
+        _: &str,
+        _: &Value,
+    ) -> Result<Option<Value>, cua_driver_core::tool::ProtectedResourceScopeError> {
         Ok(Some(json!({"test": 1})))
     }
     async fn validate_protected_resource_scope(
@@ -42,7 +46,7 @@ impl Tool for Probe {
         _: &str,
         _: &Value,
         _: &Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), cua_driver_core::tool::ProtectedResourceScopeError> {
         Err("test refusal".into())
     }
     async fn invoke(&self, args: Value) -> ToolResult {

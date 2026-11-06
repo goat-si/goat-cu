@@ -2529,7 +2529,7 @@ class _UniffiFfiConverterOptionalTypeActionHit(_UniffiConverterRustBuffer):
 
 @dataclass
 class ActionResult:
-    def __init__(self, *, effect:ActionEffect, route:ActionRoute, delivery:typing.Optional[ActionDelivery], evidence:typing.Optional[typing.List[ActionEvidence]], escalation:typing.Optional[ActionEscalation], summary:typing.Optional[str], note:typing.Optional[str], warning:typing.Optional[str], focus_restoration:typing.Optional[ActionFocusRestoration], error:typing.Optional[ActionError], hint:typing.Optional[str], next_call:typing.Optional[ActionNextCall], verified:typing.Optional[bool], selection_changed:typing.Optional[bool], selected_text_range:typing.Optional[ActionSelectedTextRange], selected_text:typing.Optional[str], menu_opened:typing.Optional[bool], menu_items:typing.Optional[typing.List[str]], opened_surfaces:typing.Optional[typing.List[OpenedSurface]], opened_surfaces_status:typing.Optional[OpenedSurfacesStatus], point:typing.Optional[ActionPoint], hit:typing.Optional[ActionHit]):
+    def __init__(self, *, effect:ActionEffect, route:ActionRoute, delivery:typing.Optional[ActionDelivery], evidence:typing.Optional[typing.List[ActionEvidence]], escalation:typing.Optional[ActionEscalation], summary:typing.Optional[str], note:typing.Optional[str], warning:typing.Optional[str], focus_restoration:typing.Optional[ActionFocusRestoration], error:typing.Optional[ActionError], hint:typing.Optional[str], next_call:typing.Optional[ActionNextCall], fast_path:typing.Optional[str], verified:typing.Optional[bool], selection_changed:typing.Optional[bool], selected_text_range:typing.Optional[ActionSelectedTextRange], selected_text:typing.Optional[str], menu_opened:typing.Optional[bool], menu_items:typing.Optional[typing.List[str]], opened_surfaces:typing.Optional[typing.List[OpenedSurface]], opened_surfaces_status:typing.Optional[OpenedSurfacesStatus], point:typing.Optional[ActionPoint], hit:typing.Optional[ActionHit]):
         self.effect = effect
         self.route = route
         self.delivery = delivery
@@ -2542,6 +2542,7 @@ class ActionResult:
         self.error = error
         self.hint = hint
         self.next_call = next_call
+        self.fast_path = fast_path
         self.verified = verified
         self.selection_changed = selection_changed
         self.selected_text_range = selected_text_range
@@ -2557,7 +2558,7 @@ class ActionResult:
 
 
     def __str__(self):
-        return "ActionResult(effect={}, route={}, delivery={}, evidence={}, escalation={}, summary={}, note={}, warning={}, focus_restoration={}, error={}, hint={}, next_call={}, verified={}, selection_changed={}, selected_text_range={}, selected_text={}, menu_opened={}, menu_items={}, opened_surfaces={}, opened_surfaces_status={}, point={}, hit={})".format(self.effect, self.route, self.delivery, self.evidence, self.escalation, self.summary, self.note, self.warning, self.focus_restoration, self.error, self.hint, self.next_call, self.verified, self.selection_changed, self.selected_text_range, self.selected_text, self.menu_opened, self.menu_items, self.opened_surfaces, self.opened_surfaces_status, self.point, self.hit)
+        return "ActionResult(effect={}, route={}, delivery={}, evidence={}, escalation={}, summary={}, note={}, warning={}, focus_restoration={}, error={}, hint={}, next_call={}, fast_path={}, verified={}, selection_changed={}, selected_text_range={}, selected_text={}, menu_opened={}, menu_items={}, opened_surfaces={}, opened_surfaces_status={}, point={}, hit={})".format(self.effect, self.route, self.delivery, self.evidence, self.escalation, self.summary, self.note, self.warning, self.focus_restoration, self.error, self.hint, self.next_call, self.fast_path, self.verified, self.selection_changed, self.selected_text_range, self.selected_text, self.menu_opened, self.menu_items, self.opened_surfaces, self.opened_surfaces_status, self.point, self.hit)
     def __eq__(self, other):
         if self.effect != other.effect:
             return False
@@ -2582,6 +2583,8 @@ class ActionResult:
         if self.hint != other.hint:
             return False
         if self.next_call != other.next_call:
+            return False
+        if self.fast_path != other.fast_path:
             return False
         if self.verified != other.verified:
             return False
@@ -2621,6 +2624,7 @@ class _UniffiFfiConverterTypeActionResult(_UniffiConverterRustBuffer):
             error=_UniffiFfiConverterOptionalTypeActionError.read(buf),
             hint=_UniffiFfiConverterOptionalString.read(buf),
             next_call=_UniffiFfiConverterOptionalTypeActionNextCall.read(buf),
+            fast_path=_UniffiFfiConverterOptionalString.read(buf),
             verified=_UniffiFfiConverterOptionalBoolean.read(buf),
             selection_changed=_UniffiFfiConverterOptionalBoolean.read(buf),
             selected_text_range=_UniffiFfiConverterOptionalTypeActionSelectedTextRange.read(buf),
@@ -2647,6 +2651,7 @@ class _UniffiFfiConverterTypeActionResult(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeActionError.check_lower(value.error)
         _UniffiFfiConverterOptionalString.check_lower(value.hint)
         _UniffiFfiConverterOptionalTypeActionNextCall.check_lower(value.next_call)
+        _UniffiFfiConverterOptionalString.check_lower(value.fast_path)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.verified)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.selection_changed)
         _UniffiFfiConverterOptionalTypeActionSelectedTextRange.check_lower(value.selected_text_range)
@@ -2672,6 +2677,7 @@ class _UniffiFfiConverterTypeActionResult(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeActionError.write(value.error, buf)
         _UniffiFfiConverterOptionalString.write(value.hint, buf)
         _UniffiFfiConverterOptionalTypeActionNextCall.write(value.next_call, buf)
+        _UniffiFfiConverterOptionalString.write(value.fast_path, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.verified, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.selection_changed, buf)
         _UniffiFfiConverterOptionalTypeActionSelectedTextRange.write(value.selected_text_range, buf)

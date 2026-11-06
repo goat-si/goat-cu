@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! SkyLight SPI bridge — Rust port of Swift's `SkyLightEventPost`.
 //!
 //! Two-layer story (matches Swift reference exactly):
@@ -2009,10 +2012,9 @@ pub fn prime_menu_validation(pid: pid_t, wid: u32) -> ValidationPost {
     )
 }
 
-/// Stamp the event's screen-space `(x, y)` point via
-/// `CGEventSetWindowLocation`. Both the SkyLight and public PID routes receive
-/// this screen-space value; WindowServer derives the receiving window's local
-/// point during routing. Returns `true` when the SPI resolved.
+/// Stamp `(x, y)` via `CGEventSetWindowLocation`. Background clicks use the
+/// window-local point on macOS 27+, or the screen point on earlier releases,
+/// for both SkyLight and public PID routes. Returns `true` when the SPI resolved.
 pub(super) fn set_window_location(event_ptr: *mut c_void, x: f64, y: f64) -> bool {
     match set_window_loc_fn() {
         Some(f) => {

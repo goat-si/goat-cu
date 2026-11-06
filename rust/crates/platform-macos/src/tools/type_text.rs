@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! type_text tool — matches the Swift reference TypeTextTool.swift.
 //!
 //! Inserts text via `AXSelectedText` attribute write — an atomic single-call
@@ -395,6 +398,19 @@ impl Tool for TypeTextTool {
             }
             _ => (None, BackgroundKeyboardPolicy::Allowed),
         };
+        if let (Some((element, _)), Some(wid)) = (element_guard.as_ref(), window_id) {
+            if let Some(refusal) = super::refuse_if_disabled(
+                pid,
+                wid,
+                element,
+                "type_text",
+                delivery_mode.is_foreground(),
+            )
+            .await
+            {
+                return refusal;
+            }
+        }
 
         // The exact-window keyboard route must refuse before the TOKEN guard
         // can write AX focus, even when focus-record SPIs are unavailable.

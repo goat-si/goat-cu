@@ -10,9 +10,11 @@ monorepo so its relative `include_str!` paths still resolve:
 | `cua/crates/cua-teleport/src/ux/targets.json` | `libs/cua/crates/cua-teleport/src/ux/targets.json` |
 | `images/sandbox-images.json` | `libs/images/sandbox-images.json` |
 
-Source commit: trycua/cua `f92b01906fc4f99be4c23cf7dc8282eef4a75b17` (main, 2026-10-28; the libs/cua-driver split is `0c3bebad`). Files are
+Source commit: trycua/cua `566a4ce655905c0d28065f4f534e221e92916e24` (main, 2026-11-06). Files are
 byte-identical to that commit except `cua-telemetry/Cargo.toml`, whose `*.workspace = true` fields are
-written out with the values from `libs/cua/Cargo.toml` at the same commit.
+written out with the values from `libs/cua/Cargo.toml` at the same commit, and whose
+dev-dependency on `cua-connections` (used by one `tests/privacy.rs` check) is left out: that crate is
+not vendored, and this repository does not build the vendored crate's tests.
 
 The driver links this crate with `default-features = false`, which leaves out its HTTP sender: events are
 built and logged locally and never leave the machine. GOAT also sets the driver's telemetry switches off.

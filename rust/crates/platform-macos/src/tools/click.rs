@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! click tool — matches the Swift reference ClickTool.swift.
 //!
 //! Two addressing modes:
@@ -1313,6 +1316,21 @@ impl ClickTool {
         space: super::window_points::PointSpace,
         simulated_target: Option<&crate::ax::snapshot::RetainedElement>,
     ) -> ToolResult {
+        let mut fast_path = None;
+        let mut result = self
+            .invoke_in_guarded(args, space, simulated_target, &mut fast_path)
+            .await;
+        crate::fast_path_guard::annotate(&mut result, fast_path);
+        result
+    }
+
+    async fn invoke_in_guarded(
+        &self,
+        args: Value,
+        space: super::window_points::PointSpace,
+        simulated_target: Option<&crate::ax::snapshot::RetainedElement>,
+        fast_path: &mut Option<Value>,
+    ) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
 
         let simulated = simulated_target.is_some();
@@ -1657,6 +1675,21 @@ impl ClickTool {
                 None
             };
 
+            // Fast path: check the cached element against what the agent saw.
+            match crate::fast_path_guard::guard_element(
+                "click",
+                pid,
+                wid,
+                &args,
+                element_ptr,
+                button_str == "middle",
+            )
+            .await
+            {
+                crate::fast_path_guard::Outcome::Refuse(refusal) => return *refusal,
+                crate::fast_path_guard::Outcome::Proceed { summary, .. } => *fast_path = summary,
+            }
+
             // Surface 5: button=right on the AX path → AXShowMenu (the same surface
             // the dedicated `right_click` tool dispatches). Threads through the
             // identical perform_ax_click code path with the action remapped.
@@ -1741,6 +1774,17 @@ impl ClickTool {
             // close, autoscroll, etc.). If we can't resolve a center, error rather
             // than silently degrade to AXPress.
             if button_str == "middle" {
+                if let Some(refusal) = super::refuse_if_disabled(
+                    pid,
+                    wid,
+                    &element_guard,
+                    "middle_click",
+                    delivery_mode.is_foreground(),
+                )
+                .await
+                {
+                    return refusal;
+                }
                 let (cx, cy) = match center {
                     Some(c) => c,
                     None => {
@@ -2143,7 +2187,15 @@ impl ClickTool {
                     delivery_mode.is_foreground(),
                     &changes.result_suffix(),
                 ),
-                Ok(Err(e)) => element_click_failure(&e),
+                Ok(Err(e)) => match e.downcast_ref::<crate::input::ax_actions::ElementDisabled>() {
+                    Some(disabled) => super::element_disabled_result(
+                        pid,
+                        wid,
+                        disabled,
+                        delivery_mode.is_foreground(),
+                    ),
+                    None => element_click_failure(&e),
+                },
                 Err(e) => click_task_failure(format!(
                     "The accessibility click task failed ({e}); the action may have run. Read \
                      fresh state before clicking again."
@@ -2343,6 +2395,37 @@ impl ClickTool {
                 }
             } else {
                 None
+            };
+
+            // Fast path: window guards, then the AX or pixel check at the
+            // point, before the cursor moves (so hover cannot change the crop).
+            let (screen_x, screen_y, win_local_x, win_local_y) = if let Some(wid) = window_id {
+                match crate::fast_path_guard::guard_pixel(
+                    "click",
+                    pid,
+                    wid,
+                    (win_local_x, win_local_y),
+                    (screen_x, screen_y),
+                    delivery_mode.is_foreground(),
+                )
+                .await
+                {
+                    crate::fast_path_guard::Outcome::Refuse(refusal) => return *refusal,
+                    crate::fast_path_guard::Outcome::Proceed { summary, relocate } => {
+                        *fast_path = summary;
+                        match relocate {
+                            Some((dx, dy)) => (
+                                screen_x + dx,
+                                screen_y + dy,
+                                win_local_x + dx,
+                                win_local_y + dy,
+                            ),
+                            None => (screen_x, screen_y, win_local_x, win_local_y),
+                        }
+                    }
+                }
+            } else {
+                (screen_x, screen_y, win_local_x, win_local_y)
             };
 
             // Pin the overlay above the target window BEFORE animating so
@@ -6388,8 +6471,9 @@ fn perform_ax_click(
         );
     }
 
-    // Show focus-rect highlight around the element (matches Swift showFocusRect).
-    // Also move the cursor to the element center so the glide animation plays.
+    // Offer the focus-rect highlight around the element (matches Swift
+    // showFocusRect); the overlay paints it only with `cursor.marks` on. Also
+    // move the cursor to the element center so the glide animation plays.
     if let Some(rect) = unsafe { element_screen_rect(element) } {
         // Drive THIS session's cursor (threaded in via `cursor_key`), matching
         // the keyed glide already played in the invoke body above. The keyed
