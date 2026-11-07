@@ -689,17 +689,25 @@ fn note_unresolved_folders(targets: &[FolderTarget], found: &[crate::windows::Wi
 /// Whether the launch asks for Finder: by bundle id, or by a name that
 /// resolves to Finder (its display name, app path or bundle id).
 fn is_finder_request(bundle_id: Option<&str>, name: Option<&str>) -> bool {
+    is_finder_request_with_locator(bundle_id, name, |name| {
+        crate::apps::locate_by_name(name)
+            .ok()
+            .and_then(|app| app.bundle_id())
+    })
+}
+
+fn is_finder_request_with_locator(
+    bundle_id: Option<&str>,
+    name: Option<&str>,
+    locate_bundle_id: impl FnOnce(&str) -> Option<String>,
+) -> bool {
     const FINDER: &str = "com.apple.finder";
     match (bundle_id, name) {
         (Some(bundle_id), _) => bundle_id == FINDER,
         (None, Some(name)) => {
             name.eq_ignore_ascii_case("finder")
                 || name == FINDER
-                || crate::apps::locate_by_name(name)
-                    .ok()
-                    .and_then(|app| app.bundle_id())
-                    .as_deref()
-                    == Some(FINDER)
+                || locate_bundle_id(name).as_deref() == Some(FINDER)
         }
         (None, None) => false,
     }
@@ -940,10 +948,11 @@ fn hex_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        finder_folder_targets, is_cua_driver_bundle_id, is_finder_request, local_file_target,
-        match_folder_windows, missing_folder_titles, name_miss_refusal, normalize_launch_url,
-        preflight_file_urls, rank_launch_windows, remember_unresolved, response_identity,
-        structured_launch_failure, LaunchAppTool, UNRESOLVED_FOLDER_CAP,
+        finder_folder_targets, is_cua_driver_bundle_id, is_finder_request,
+        is_finder_request_with_locator, local_file_target, match_folder_windows,
+        missing_folder_titles, name_miss_refusal, normalize_launch_url, preflight_file_urls,
+        rank_launch_windows, remember_unresolved, response_identity, structured_launch_failure,
+        LaunchAppTool, UNRESOLVED_FOLDER_CAP,
     };
     use cua_driver_core::app_names::NameMiss;
     use cua_driver_core::tool::Tool;
@@ -1017,13 +1026,24 @@ mod tests {
         assert!(is_finder_request(Some("com.apple.finder"), None));
         assert!(is_finder_request(None, Some("Finder")));
         // Finder by its app path or its bundle id given as the name.
-        assert!(is_finder_request(
+        assert!(is_finder_request_with_locator(
             None,
-            Some("/System/Library/CoreServices/Finder.app")
+            Some("/System/Library/CoreServices/Finder.app"),
+            |name| {
+                assert_eq!(name, "/System/Library/CoreServices/Finder.app");
+                Some("com.apple.finder".to_owned())
+            }
         ));
         assert!(is_finder_request(None, Some("com.apple.finder")));
         assert!(!is_finder_request(Some("com.apple.Safari"), None));
-        assert!(!is_finder_request(None, Some("TextEdit")));
+        assert!(!is_finder_request_with_locator(
+            None,
+            Some("TextEdit"),
+            |name| {
+                assert_eq!(name, "TextEdit");
+                Some("com.apple.TextEdit".to_owned())
+            }
+        ));
         // Not Finder, or not a folder: the app's windows are reported as before.
         assert!(finder_folder_targets(Some("com.apple.TextEdit"), &[url(&b)]).is_empty());
         assert!(finder_folder_targets(
