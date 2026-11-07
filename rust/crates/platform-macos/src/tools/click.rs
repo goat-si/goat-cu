@@ -36,7 +36,7 @@ use crate::ax::bindings::{
     AXUIElementRef,
 };
 use crate::focus_guard;
-use crate::window_change_detector::WindowChangeDetector;
+use crate::window_change_detector::{Changes, WindowChangeDetector};
 use core_foundation::base::{CFEqual, CFRelease, CFTypeRef, TCFType};
 
 use super::pixel_route::PixelClickRoute;
@@ -545,10 +545,13 @@ impl ClickEvidence {
         transport: cua_driver_core::action_record::ActionTransport,
         requested: cua_driver_core::action_record::RequestedDelivery,
         actual: cua_driver_core::action_record::ActualDelivery,
+        changes: Option<&Changes>,
     ) -> cua_driver_core::action_record::ActionExecutionRecord {
         use cua_driver_core::action_record::{ActionEffect, ActionEvidence, ActionExecutionRecord};
+        let (status, surfaces) = changes.map_or((None, None), Changes::opened_surfaces);
         ActionExecutionRecord::builder(ActionEffect::Confirmed, transport, requested)
             .actual_delivery(actual)
+            .opened_surfaces(status, surfaces)
             .evidence(ActionEvidence {
                 kind: self.kind(),
                 detail: self.detail().to_owned(),
@@ -574,12 +577,44 @@ fn unverifiable_click_record(
     transport: cua_driver_core::action_record::ActionTransport,
     requested: cua_driver_core::action_record::RequestedDelivery,
     actual: cua_driver_core::action_record::ActualDelivery,
+    changes: Option<&Changes>,
 ) -> cua_driver_core::action_record::ActionExecutionRecord {
     use cua_driver_core::action_record::{ActionEffect, ActionExecutionRecord};
+    let (status, surfaces) = changes.map_or((None, None), Changes::opened_surfaces);
     ActionExecutionRecord::builder(ActionEffect::Unverifiable, transport, requested)
         .actual_delivery(actual)
+        .opened_surfaces(status, surfaces)
         .build()
         .expect("an unverifiable click record is valid")
+}
+
+fn pixel_click_action_record(
+    route: PixelClickRoute,
+    foreground: bool,
+    evidence: Option<ClickEvidence>,
+    changes: &Changes,
+) -> cua_driver_core::action_record::ActionExecutionRecord {
+    use cua_driver_core::action_record::{ActionTransport, ActualDelivery, RequestedDelivery};
+    let foreground_hid = route == PixelClickRoute::ForegroundHid;
+    let transport = if foreground_hid {
+        ActionTransport::MacosCgEventHid
+    } else {
+        ActionTransport::MacosCgEventPid
+    };
+    let requested = if foreground {
+        RequestedDelivery::Foreground
+    } else {
+        RequestedDelivery::Background
+    };
+    let actual = if foreground_hid {
+        ActualDelivery::Foreground
+    } else {
+        ActualDelivery::Background
+    };
+    match evidence {
+        Some(evidence) => evidence.record(transport, requested, actual, Some(changes)),
+        None => unverifiable_click_record(transport, requested, actual, Some(changes)),
+    }
 }
 
 /// No physical input happened between dispatch and the last read, so the
@@ -1915,7 +1950,7 @@ impl ClickTool {
                                 outcome,
                                 fronted,
                                 foreground,
-                                &changes.result_suffix(),
+                                &changes,
                             ),
                             Err(refusal) => refusal,
                         };
@@ -2185,7 +2220,7 @@ impl ClickTool {
                     outcome,
                     fronted,
                     delivery_mode.is_foreground(),
-                    &changes.result_suffix(),
+                    &changes,
                 ),
                 Ok(Err(e)) => match e.downcast_ref::<crate::input::ax_actions::ElementDisabled>() {
                     Some(disabled) => super::element_disabled_result(
@@ -3147,26 +3182,17 @@ impl ClickTool {
                         super::pixel_route::delivery_note(route),
                         changes.result_suffix()
                     ));
-                    match evidence {
-                        Some(evidence) => {
-                            use cua_driver_core::action_record::{
-                                ActionTransport, ActualDelivery, RequestedDelivery,
-                            };
-                            structured["evidence"] = serde_json::json!([evidence.structured()]);
-                            result
-                                .with_structured(structured)
-                                .with_action_record(evidence.record(
-                                    ActionTransport::MacosCgEventPid,
-                                    if delivery_mode.is_foreground() {
-                                        RequestedDelivery::Foreground
-                                    } else {
-                                        RequestedDelivery::Background
-                                    },
-                                    ActualDelivery::Background,
-                                ))
-                        }
-                        None => result.with_structured(structured),
+                    if let Some(evidence) = evidence {
+                        structured["evidence"] = serde_json::json!([evidence.structured()]);
                     }
+                    result.with_structured(structured).with_action_record(
+                        pixel_click_action_record(
+                            route,
+                            delivery_mode.is_foreground(),
+                            evidence,
+                            &changes,
+                        ),
+                    )
                 }
                 Ok(Err(e)) if route == PixelClickRoute::ForegroundHid => {
                     super::pixel_route::foreground_unavailable(
@@ -4469,7 +4495,7 @@ async fn run_live_native_focus_stage(
         .await;
     let result = match outcome {
         Ok((outcome, fronted)) => {
-            finish_ax_click(outcome, fronted, foreground, &changes.result_suffix())
+            finish_ax_click(outcome, fronted, foreground, &changes)
         }
         Err(refusal) => refusal,
     };
@@ -4696,7 +4722,7 @@ mod u32_stage_tests {
             false,
         );
         let (outcome, actual_fronted) = post_press_delivery(outcome, true, false);
-        let result = finish_ax_click(outcome, actual_fronted, true, "");
+        let result = finish_ax_click(outcome, actual_fronted, true, &Changes::not_polled());
         assert_eq!(result.structured_content.as_ref().unwrap()["path"], "ax");
         assert_eq!(
             result.action_record.unwrap().actual_delivery,
@@ -5176,37 +5202,46 @@ fn finish_ax_click(
     (mut msg, suspected_noop, evidence, selection_via_pixel): AxClickOutcome,
     fronted: bool,
     foreground: bool,
-    suffix: &str,
+    changes: &Changes,
 ) -> ToolResult {
-    msg.push_str(suffix);
+    msg.push_str(&changes.result_suffix());
+    let has_opened_surfaces =
+        !changes.earlier_new_windows.is_empty() || !changes.new_windows.is_empty();
+    // Opened-window evidence cannot be attached to suspected_noop. The
+    // unadvertised AX press remains unconfirmed.
+    let suspected_noop = suspected_noop && !has_opened_surfaces;
     let result = ToolResult::text(msg).with_structured(ax_click_structured(
         selection_via_pixel,
         fronted,
         evidence,
         suspected_noop,
     ));
+    use cua_driver_core::action_record::{ActionTransport, ActualDelivery, RequestedDelivery};
+    let transport = match (selection_via_pixel, fronted) {
+        (false, _) => ActionTransport::MacosAxAction,
+        (true, false) => ActionTransport::MacosCgEventPid,
+        (true, true) => ActionTransport::MacosCgEventHid,
+    };
+    let requested = if foreground {
+        RequestedDelivery::Foreground
+    } else {
+        RequestedDelivery::Background
+    };
+    let actual = if fronted {
+        ActualDelivery::Foreground
+    } else {
+        ActualDelivery::Background
+    };
     match evidence {
         Some(evidence) => {
-            use cua_driver_core::action_record::{
-                ActionTransport, ActualDelivery, RequestedDelivery,
-            };
-            let transport = match (selection_via_pixel, fronted) {
-                (false, _) => ActionTransport::MacosAxAction,
-                (true, false) => ActionTransport::MacosCgEventPid,
-                (true, true) => ActionTransport::MacosCgEventHid,
-            };
-            let requested = if foreground {
-                RequestedDelivery::Foreground
-            } else {
-                RequestedDelivery::Background
-            };
-            let actual = if fronted {
-                ActualDelivery::Foreground
-            } else {
-                ActualDelivery::Background
-            };
-            result.with_action_record(evidence.record(transport, requested, actual))
+            result.with_action_record(evidence.record(transport, requested, actual, Some(changes)))
         }
+        None if has_opened_surfaces => result.with_action_record(unverifiable_click_record(
+            transport,
+            requested,
+            actual,
+            Some(changes),
+        )),
         None => result,
     }
 }
@@ -6573,7 +6608,7 @@ fn px_ax_press_result(
             "effect": "confirmed",
             "evidence": [evidence.structured()],
         }))
-        .with_action_record(evidence.record(transport, requested, actual)),
+        .with_action_record(evidence.record(transport, requested, actual, None)),
         None => ToolResult::text(format!(
             "✅ PX hit-test {label} the background element via AX. No change the driver can \
              read followed it: check the window before repeating it."
@@ -6583,7 +6618,7 @@ fn px_ax_press_result(
             "verified": false,
             "effect": "unverifiable"
         }))
-        .with_action_record(unverifiable_click_record(transport, requested, actual)),
+        .with_action_record(unverifiable_click_record(transport, requested, actual, None)),
     };
     if let (Some(hit), Some(structured)) = (hit, result.structured_content.as_mut()) {
         structured["hit"] = hit;
@@ -7289,6 +7324,159 @@ mod tests {
             "click",
             serde_json::to_value(result).expect("a tool result serializes"),
         )
+    }
+
+    struct OpenedWindowResultProbe {
+        result: std::sync::Mutex<Option<ToolResult>>,
+    }
+
+    #[async_trait]
+    impl Tool for OpenedWindowResultProbe {
+        fn def(&self) -> &ToolDef {
+            def()
+        }
+
+        async fn invoke(&self, _args: Value) -> ToolResult {
+            self.result.lock().unwrap().take().expect("one probe result")
+        }
+    }
+
+    async fn dispatch_click_wire(result: ToolResult) -> serde_json::Value {
+        use cua_driver_core::{
+            authorization::PermissionMode,
+            session_authorization::{SessionAuthorizationRegistry, SessionModeCeiling},
+            tool::ToolRegistry,
+        };
+        let ceiling = SessionModeCeiling::for_trusted_sessions(
+            [PermissionMode::Unrestricted],
+            true,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+        let context = SessionAuthorizationRegistry::with_ceiling(ceiling)
+            .compatibility_context(PermissionMode::Unrestricted, None)
+            .unwrap();
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(OpenedWindowResultProbe {
+            result: std::sync::Mutex::new(Some(result)),
+        }));
+        let result = registry
+            .invoke_with_context(
+                "click",
+                serde_json::json!({"pid": 42, "window_id": 7, "x": 10, "y": 20}),
+                context,
+            )
+            .await;
+        click_wire(result)
+    }
+
+    fn changes_with_opened_windows() -> Changes {
+        use crate::window_change_detector::WindowEvent;
+        Changes {
+            earlier_new_windows: vec![WindowEvent {
+                window_id: 101,
+                pid: 1001,
+                app_name: "Earlier".into(),
+                title: "Detached tail".into(),
+            }],
+            new_windows: vec![WindowEvent {
+                window_id: 202,
+                pid: 1002,
+                app_name: "Immediate".into(),
+                title: "Immediate window".into(),
+            }],
+            ..Changes::no_change()
+        }
+    }
+
+    fn assert_opened_window_wire(wire: &serde_json::Value) {
+        let structured = &wire["structuredContent"];
+        assert_eq!(structured["opened_surfaces_status"], "partial", "{wire}");
+        assert_eq!(
+            structured["opened_surfaces"],
+            serde_json::json!([
+                {
+                    "kind": "unknown",
+                    "owner_pid": 1001,
+                    "window_id": 101,
+                    "target": {"pid": 1001, "window_id": 101},
+                    "title": "Detached tail"
+                },
+                {
+                    "kind": "unknown",
+                    "owner_pid": 1002,
+                    "window_id": 202,
+                    "target": {"pid": 1002, "window_id": 202},
+                    "title": "Immediate window"
+                }
+            ]),
+            "{wire}"
+        );
+        let summary = structured["summary"].as_str().unwrap_or_default();
+        assert!(summary.contains("After the previous action returned"), "{wire}");
+        assert!(summary.contains("Action opened new window(s)"), "{wire}");
+    }
+
+    #[tokio::test]
+    async fn ax_click_opened_windows_reach_the_conforming_registry_result() {
+        for (suspected_noop, evidence, expected_effect) in [
+            (false, Some(ClickEvidence::Selected), "confirmed"),
+            (false, None, "unverifiable"),
+            (true, None, "unverifiable"),
+        ] {
+            let result = finish_ax_click(
+                ("clicked".into(), suspected_noop, evidence, false),
+                false,
+                false,
+                &changes_with_opened_windows(),
+            );
+            let wire = dispatch_click_wire(result).await;
+            assert_ne!(wire["isError"], true, "{wire}");
+            assert_eq!(wire["structuredContent"]["effect"], expected_effect, "{wire}");
+            assert_opened_window_wire(&wire);
+        }
+    }
+
+    #[tokio::test]
+    async fn pixel_click_opened_windows_reach_the_conforming_registry_result() {
+        for evidence in [None, Some(ClickEvidence::Selected)] {
+            let changes = changes_with_opened_windows();
+            let record = pixel_click_action_record(
+                PixelClickRoute::BackgroundPid,
+                false,
+                evidence,
+                &changes,
+            );
+            let result = ToolResult::text(format!("pixel click{}", changes.result_suffix()))
+                .with_structured(serde_json::json!({
+                    "path": "cgevent",
+                    "verified": evidence.is_some(),
+                    "effect": if evidence.is_some() { "confirmed" } else { "unverifiable" },
+                    "hit": {"role": "AXButton"}
+                }))
+                .with_action_record(record);
+            let wire = dispatch_click_wire(result).await;
+            assert_ne!(wire["isError"], true, "{wire}");
+            assert_eq!(wire["structuredContent"]["hit"]["role"], "AXButton");
+            assert_opened_window_wire(&wire);
+        }
+    }
+
+    #[tokio::test]
+    async fn quiet_suspected_noop_keeps_its_escalation_and_omits_window_observation() {
+        let result = finish_ax_click(
+            ("clicked".into(), true, None, false),
+            false,
+            false,
+            &Changes::not_polled(),
+        );
+        let wire = dispatch_click_wire(result).await;
+        assert_ne!(wire["isError"], true, "{wire}");
+        assert_eq!(wire["structuredContent"]["effect"], "suspected_noop");
+        assert_eq!(wire["structuredContent"]["escalation"]["target"], "pixel");
+        assert!(wire["structuredContent"].get("opened_surfaces").is_none());
+        assert!(wire["structuredContent"].get("opened_surfaces_status").is_none());
     }
 
     /// What the default click path no longer reads, timed on the Dock's
@@ -7999,6 +8187,7 @@ mod click_evidence_tests {
                 ActionTransport::MacosAxAction,
                 RequestedDelivery::Background,
                 ActualDelivery::Background,
+                None,
             );
             assert_eq!(record.effect, ActionEffect::Confirmed);
             assert_eq!(record.evidence[0].detail, evidence.detail());

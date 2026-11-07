@@ -139,6 +139,44 @@ impl Changes {
         }
     }
 
+    /// Window identity from the sampled result and the previous action's
+    /// detached tail. The layer-0 diff cannot prove that nothing else opened.
+    pub fn opened_surfaces(
+        &self,
+    ) -> (
+        Option<cua_driver_contract::OpenedSurfacesStatus>,
+        Option<Vec<cua_driver_contract::OpenedSurface>>,
+    ) {
+        let surfaces: Vec<_> = self
+            .earlier_new_windows
+            .iter()
+            .chain(&self.new_windows)
+            .map(|window| {
+                let owner_pid = u32::try_from(window.pid).ok().filter(|pid| *pid > 0);
+                let window_id = (window.window_id > 0).then_some(u64::from(window.window_id));
+                let target = owner_pid.zip(window_id).map(|(pid, window_id)| {
+                    cua_driver_contract::OpenedSurfaceTarget { pid, window_id }
+                });
+                cua_driver_contract::OpenedSurface {
+                    kind: cua_driver_contract::OpenedSurfaceKind::Unknown,
+                    owner_pid,
+                    window_id,
+                    target,
+                    bounds: None,
+                    title: Some(window.title.clone()),
+                }
+            })
+            .collect();
+        if surfaces.is_empty() {
+            (None, None)
+        } else {
+            (
+                Some(cua_driver_contract::OpenedSurfacesStatus::Partial),
+                Some(surfaces),
+            )
+        }
+    }
+
     /// True when we found evidence that the action triggered a cross-app
     /// side-effect that required (or would have required) a foreground
     /// restore. Matches Swift's `Changes.needsRestore`.
@@ -860,6 +898,62 @@ mod tests {
         let c = Changes::no_change();
         assert_eq!(c.result_suffix(), "");
         assert!(!c.needs_restore());
+    }
+
+    #[test]
+    fn opened_surfaces_maps_detached_and_immediate_window_identity() {
+        let changes = Changes {
+            earlier_new_windows: vec![WindowEvent {
+                window_id: 101,
+                pid: 1001,
+                app_name: "Earlier".into(),
+                title: "Detached tail".into(),
+            }],
+            new_windows: vec![WindowEvent {
+                window_id: 202,
+                pid: 1002,
+                app_name: "Immediate".into(),
+                title: "Immediate window".into(),
+            }],
+            ..Changes::no_change()
+        };
+        let (status, surfaces) = changes.opened_surfaces();
+        assert_eq!(status, Some(cua_driver_contract::OpenedSurfacesStatus::Partial));
+        assert_eq!(
+            serde_json::to_value(surfaces).unwrap(),
+            serde_json::json!([
+                {
+                    "kind": "unknown",
+                    "owner_pid": 1001,
+                    "window_id": 101,
+                    "target": {"pid": 1001, "window_id": 101},
+                    "title": "Detached tail"
+                },
+                {
+                    "kind": "unknown",
+                    "owner_pid": 1002,
+                    "window_id": 202,
+                    "target": {"pid": 1002, "window_id": 202},
+                    "title": "Immediate window"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn opened_surfaces_omits_empty_or_incomplete_observations() {
+        let foreground_only = Changes {
+            foreground_changed: true,
+            ..Changes::no_change()
+        };
+        for changes in [
+            Changes::no_change(),
+            Changes::not_polled(),
+            Changes::deferred(),
+            foreground_only,
+        ] {
+            assert_eq!(changes.opened_surfaces(), (None, None));
+        }
     }
 
     #[test]
