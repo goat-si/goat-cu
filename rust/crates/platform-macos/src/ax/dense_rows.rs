@@ -452,6 +452,8 @@ mod tests {
             title: Some(title.into()),
             value: None,
             description: None,
+            placeholder: None,
+            subrole: None,
             identifier: None,
             help: None,
             actions: vec![],

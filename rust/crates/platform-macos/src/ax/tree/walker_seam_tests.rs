@@ -2424,16 +2424,27 @@ pub(crate) fn canonical_walk_fixture(case: &str) -> (TreeWalkResult, Vec<String>
         "role_unknown" => Some("AXUnknown"),
         "secure" | "classification_failure" | "display" => Some("AXTextField"),
         "u25" => Some("AXTextArea"),
+        "search_identity" => Some("AXTextField"),
         "placeholder" | "copied" => Some("AXCheckBox"),
         _ => Some("AXButton"),
     };
-    let mut attrs = content(Some("Example"));
+    let mut attrs = content(if case == "search_identity" {
+        None
+    } else {
+        Some("Example")
+    });
     match case {
         "secure" => attrs.0[5] = Slot::Text(AttrStatus::Known("AXSecureTextField".into())),
         "classification_failure" => {
             attrs.0[5] = Slot::Text(super::super::content_attrs::FAILED_TEST)
         }
         "placeholder" => attrs.0[1] = Slot::Text(AttrStatus::Known("1".into())),
+        "search_identity" => {
+            attrs.0[1] = Slot::Text(AttrStatus::Known(
+                "  Search chatrooms, participants\n".into(),
+            ));
+            attrs.0[5] = Slot::Text(AttrStatus::Known("\tAXSearchField  ".into()));
+        }
         "u25" => {
             for i in [2, 3] {
                 attrs.0[i] = Slot::Text(AttrStatus::Failed {
@@ -2475,6 +2486,8 @@ pub(crate) fn canonical_walk_fixture(case: &str) -> (TreeWalkResult, Vec<String>
             "value 1",
             if case == "copied" {
                 str_value("1")
+            } else if case == "search_identity" {
+                str_value("Search-like AXValue")
             } else {
                 Reply::Value(Ok(None))
             },
