@@ -201,6 +201,10 @@ pub struct AXNode {
     /// Kept separate from `title` so `_find_calc_button("2")` can find
     /// Calculator buttons where AXTitle="" but AXDescription="2".
     pub description: Option<String>,
+    /// Raw AXPlaceholderValue, kept separate from the value it may also label.
+    pub placeholder: Option<String>,
+    /// Raw AXSubrole, kept separate from canonical role evidence.
+    pub subrole: Option<String>,
     pub identifier: Option<String>,
     pub help: Option<String>,
     pub actions: Vec<String>,
@@ -696,6 +700,8 @@ impl AXNode {
             title: None,
             value: None,
             description: None,
+            placeholder: None,
+            subrole: None,
             identifier: None,
             help: None,
             actions: vec![],
@@ -2420,6 +2426,8 @@ fn walk_element<S: AxTreeSource>(
                 states: Default::default(),
             };
             let value_unknown = attrs.value_unknown;
+            let placeholder = attrs.placeholder.clone();
+            let subrole = attrs.subrole.clone();
             let ((title, description, own_value, identifier), exhaustive) = if exhaustive_nodes() {
                 (scroll_area_labels(attrs).0, true)
             } else {
@@ -2496,6 +2504,8 @@ fn walk_element<S: AxTreeSource>(
                     vertical.or(horizontal).map(|v| format!("{v:.3}"))
                 },
                 value_description: None,
+                placeholder,
+                subrole,
                 min_value: Some(0.0),
                 max_value: Some(1.0),
                 enabled: None,
@@ -2606,7 +2616,7 @@ fn walk_element<S: AxTreeSource>(
         title,
         copied_value,
         value,
-        placeholder: _,
+        placeholder,
         description,
         identifier,
         help,
@@ -2773,6 +2783,8 @@ fn walk_element<S: AxTreeSource>(
                     value_settable_observed_at: None,
                     states: Default::default(),
                 },
+                placeholder: placeholder.clone(),
+                subrole: subrole.clone(),
                 identifier: identifier.clone(),
                 help: help.clone(),
                 ..role_only_node(
@@ -2910,6 +2922,8 @@ fn walk_element<S: AxTreeSource>(
             } else {
                 Some(visible_description.clone())
             },
+            placeholder: placeholder.clone(),
+            subrole: subrole.clone(),
             identifier: identifier.clone(),
             help: help.clone(),
             actions: actions.clone(),
@@ -2942,6 +2956,8 @@ fn walk_element<S: AxTreeSource>(
             } else {
                 Some(visible_description.clone())
             },
+            placeholder,
+            subrole,
             identifier: identifier.clone(),
             help: help.clone(),
             actions: vec![],
@@ -3562,6 +3578,8 @@ fn role_only_node(
         title: None,
         value: None,
         description: None,
+        placeholder: None,
+        subrole: None,
         identifier: None,
         help: None,
         actions: Vec::new(),
@@ -3620,6 +3638,8 @@ fn display_node(
         title,
         description,
         value,
+        placeholder: attrs.placeholder,
+        subrole: attrs.subrole,
         identifier: attrs.identifier,
         help: attrs.help,
         ..role_only_node(
@@ -4814,6 +4834,8 @@ mod lean_row_tests {
                 title: Some("Messages".into()),
                 value: None,
                 description: None,
+                placeholder: None,
+                subrole: None,
                 identifier: None,
                 help: None,
                 actions: vec!["AXRaise".into()],
@@ -4837,6 +4859,8 @@ mod lean_row_tests {
                 title: None,
                 value: None,
                 description: None,
+                placeholder: None,
+                subrole: None,
                 identifier: None,
                 help: None,
                 actions: vec![],
@@ -4860,6 +4884,8 @@ mod lean_row_tests {
                 title: None,
                 value: Some("Sender".into()),
                 description: None,
+                placeholder: None,
+                subrole: None,
                 identifier: None,
                 help: None,
                 actions: vec![],
@@ -4883,6 +4909,8 @@ mod lean_row_tests {
                 title: None,
                 value: Some("Message preview".into()),
                 description: None,
+                placeholder: None,
+                subrole: None,
                 identifier: None,
                 help: None,
                 actions: vec![],
@@ -4906,6 +4934,8 @@ mod lean_row_tests {
                 title: Some("Compose".into()),
                 value: Some("[redacted]".into()),
                 description: None,
+                placeholder: None,
+                subrole: None,
                 identifier: None,
                 help: None,
                 actions: vec!["AXConfirm".into()],
@@ -5302,6 +5332,23 @@ mod canonical_evidence_tests {
             .unwrap()
             .iter()
             .any(|state| state == "checked"));
+    }
+    #[test]
+    fn raw_search_identity_survives_the_production_walker() {
+        let (tree, _) = canonical_walk_fixture("search_identity");
+        let node = &tree.nodes[0];
+        assert_eq!(
+            node.placeholder.as_deref(),
+            Some("  Search chatrooms, participants\n")
+        );
+        assert_eq!(node.subrole.as_deref(), Some("\tAXSearchField  "));
+        assert_eq!(node.value.as_deref(), Some("Search-like AXValue"));
+        let entry = crate::tools::test_element_entry(node, None, None);
+        assert_eq!(entry["placeholder"], "Search chatrooms, participants");
+        assert_eq!(entry["subrole"], "AXSearchField");
+        assert_eq!(entry["value"], "Search-like AXValue");
+        assert!(entry.get("title").is_none());
+        assert!(entry.get("description").is_none());
     }
     #[test]
     fn folded_row_text_is_not_toggle_evidence() {
