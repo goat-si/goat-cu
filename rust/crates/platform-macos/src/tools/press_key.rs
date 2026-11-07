@@ -22,7 +22,7 @@ use std::sync::Arc;
 use crate::apps;
 use crate::ax::bindings::{copy_bool_attr, copy_string_attr, AXUIElementRef};
 use crate::focus_guard;
-use crate::window_change_detector::WindowChangeDetector;
+use crate::window_change_detector::{Changes, WindowChangeDetector};
 
 use super::ToolState;
 
@@ -112,13 +112,16 @@ fn sheet_closed_result(
     path: &str,
     sheet_window_id: u32,
     transport: ActionTransport,
+    changes: Option<&Changes>,
 ) -> ToolResult {
+    let (status, surfaces) = changes.map_or((None, None), Changes::opened_surfaces);
     let record = ActionExecutionRecord::builder(
         ActionEffect::Confirmed,
         transport,
         RequestedDelivery::Background,
     )
     .actual_delivery(ActualDelivery::Background)
+    .opened_surfaces(status, surfaces)
     .evidence(ActionEvidence {
         kind: EvidenceKind::WindowChange,
         detail: format!(
@@ -172,7 +175,11 @@ fn dispatch_with_ax_oracle(
     Ok(false)
 }
 
-fn action_record(confirmed: bool, foreground: bool) -> ActionExecutionRecord {
+fn action_record(
+    confirmed: bool,
+    foreground: bool,
+    changes: Option<&Changes>,
+) -> ActionExecutionRecord {
     let effect = if confirmed {
         ActionEffect::Confirmed
     } else {
@@ -211,7 +218,11 @@ fn action_record(confirmed: bool, foreground: bool) -> ActionExecutionRecord {
             },
         });
     }
-    record.build().expect("press_key record is valid")
+    let (status, surfaces) = changes.map_or((None, None), Changes::opened_surfaces);
+    record
+        .opened_surfaces(status, surfaces)
+        .build()
+        .expect("press_key record is valid")
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -838,6 +849,7 @@ impl Tool for PressKeyTool {
                                 "ax_semantic",
                                 sheet,
                                 ActionTransport::MacosAxAction,
+                                None,
                             ),
                             Ok(Ok((confirmed, None))) => {
                                 semantic_press_result(&display_key, action, pid, confirmed)
@@ -1275,6 +1287,7 @@ impl Tool for PressKeyTool {
                 "key_events",
                 sheet_closed.expect("checked above"),
                 ActionTransport::MacosCgEventPid,
+                Some(&changes),
             ),
             outcome @ (PressKeyDeliveryOutcome::Confirmed
             | PressKeyDeliveryOutcome::Unverifiable) => {
@@ -1294,7 +1307,7 @@ impl Tool for PressKeyTool {
                     changes.result_suffix()
                 ))
                 .with_structured(structured)
-                .with_action_record(action_record(confirmed, fg))
+                .with_action_record(action_record(confirmed, fg, Some(&changes)))
             }
             PressKeyDeliveryOutcome::Failed(error) => delivery_failed(error),
         };
@@ -3583,7 +3596,7 @@ pub(super) mod tests {
 
     #[test]
     fn accepted_without_oracle_has_no_escalation_but_ax_change_confirms() {
-        let unverifiable = action_record(false, false).public_result().unwrap();
+        let unverifiable = action_record(false, false, None).public_result().unwrap();
         assert_eq!(
             unverifiable.effect,
             cua_driver_contract::ActionEffect::Unverifiable
@@ -3594,13 +3607,146 @@ pub(super) mod tests {
         );
         assert!(unverifiable.escalation.is_none());
 
-        let confirmed = action_record(true, false).public_result().unwrap();
+        let confirmed = action_record(true, false, None).public_result().unwrap();
         assert_eq!(
             confirmed.effect,
             cua_driver_contract::ActionEffect::Confirmed
         );
         assert_eq!(confirmed.evidence.unwrap().len(), 1);
         assert!(confirmed.escalation.is_none());
+    }
+
+    struct OpenedWindowResultProbe {
+        result: std::sync::Mutex<Option<ToolResult>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for OpenedWindowResultProbe {
+        fn def(&self) -> &ToolDef {
+            def()
+        }
+
+        async fn invoke(&self, _args: Value) -> ToolResult {
+            self.result.lock().unwrap().take().expect("one probe result")
+        }
+    }
+
+    fn changes_with_opened_windows() -> Changes {
+        use crate::window_change_detector::WindowEvent;
+        Changes {
+            earlier_new_windows: vec![WindowEvent {
+                window_id: 101,
+                pid: 1001,
+                app_name: "Earlier".into(),
+                title: "Detached tail".into(),
+            }],
+            new_windows: vec![WindowEvent {
+                window_id: 202,
+                pid: 1002,
+                app_name: "Immediate".into(),
+                title: "Immediate window".into(),
+            }],
+            ..Changes::no_change()
+        }
+    }
+
+    async fn dispatch_press_key_wire(result: ToolResult) -> Value {
+        use cua_driver_core::{
+            authorization::PermissionMode,
+            session_authorization::{SessionAuthorizationRegistry, SessionModeCeiling},
+            tool::ToolRegistry,
+        };
+        let ceiling = SessionModeCeiling::for_trusted_sessions(
+            [PermissionMode::Unrestricted],
+            true,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+        let context = SessionAuthorizationRegistry::with_ceiling(ceiling)
+            .compatibility_context(PermissionMode::Unrestricted, None)
+            .unwrap();
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(OpenedWindowResultProbe {
+            result: std::sync::Mutex::new(Some(result)),
+        }));
+        let result = registry
+            .invoke_with_context(
+                "press_key",
+                serde_json::json!({"pid": 42, "window_id": 7, "key": "return"}),
+                context,
+            )
+            .await;
+        cua_driver_core::mcp_result::conforming_tool_result(
+            "press_key",
+            serde_json::to_value(result).unwrap(),
+        )
+    }
+
+    fn assert_opened_window_wire(wire: &Value) {
+        let structured = &wire["structuredContent"];
+        assert_eq!(structured["opened_surfaces_status"], "partial", "{wire}");
+        assert_eq!(
+            structured["opened_surfaces"],
+            serde_json::json!([
+                {
+                    "kind": "unknown",
+                    "owner_pid": 1001,
+                    "window_id": 101,
+                    "target": {"pid": 1001, "window_id": 101},
+                    "title": "Detached tail"
+                },
+                {
+                    "kind": "unknown",
+                    "owner_pid": 1002,
+                    "window_id": 202,
+                    "target": {"pid": 1002, "window_id": 202},
+                    "title": "Immediate window"
+                }
+            ]),
+            "{wire}"
+        );
+        let summary = structured["summary"].as_str().unwrap_or_default();
+        assert!(summary.contains("After the previous action returned"), "{wire}");
+        assert!(summary.contains("Action opened new window(s)"), "{wire}");
+    }
+
+    #[tokio::test]
+    async fn press_key_opened_windows_reach_the_conforming_registry_result() {
+        for confirmed in [false, true] {
+            let changes = changes_with_opened_windows();
+            let result = ToolResult::text(format!("pressed{}", changes.result_suffix()))
+                .with_structured(serde_json::json!({
+                    "path": "key_events",
+                    "verified": confirmed,
+                    "effect": if confirmed { "confirmed" } else { "unverifiable" }
+                }))
+                .with_action_record(action_record(confirmed, false, Some(&changes)));
+            let wire = dispatch_press_key_wire(result).await;
+            assert_ne!(wire["isError"], true, "{wire}");
+            assert_eq!(
+                wire["structuredContent"]["effect"],
+                if confirmed { "confirmed" } else { "unverifiable" }
+            );
+            assert_opened_window_wire(&wire);
+        }
+    }
+
+    #[tokio::test]
+    async fn sheet_closed_result_carries_opened_windows_through_the_registry() {
+        let changes = changes_with_opened_windows();
+        let result = sheet_closed_result(
+            format!("pressed{}", changes.result_suffix()),
+            "key_events",
+            77,
+            ActionTransport::MacosCgEventPid,
+            Some(&changes),
+        );
+        let wire = dispatch_press_key_wire(result).await;
+        assert_ne!(wire["isError"], true, "{wire}");
+        assert_eq!(wire["structuredContent"]["effect"], "confirmed");
+        assert_eq!(wire["structuredContent"]["evidence"][0]["kind"], "window_change");
+        assert_opened_window_wire(&wire);
     }
 
     #[test]
