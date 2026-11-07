@@ -3870,7 +3870,7 @@ mod canonical_output_tests {
         entry.as_object_mut().unwrap().remove("states");
         assert_eq!(
             entry,
-            serde_json::json!({"role":"AXButton", "depth":0, "element_index":0, "label":"Example", "actions":["AXPress"]})
+            serde_json::json!({"role":"AXButton", "depth":0, "element_index":0, "label":"Example", "title":"Example", "actions":["AXPress"]})
         );
         node.canonical = Default::default();
         let entry = element_entry(&node, None, None);
