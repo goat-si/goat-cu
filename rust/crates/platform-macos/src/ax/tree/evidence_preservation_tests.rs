@@ -934,13 +934,17 @@ fn scrollbar_role_preserves_unknown_and_absent() {
             ),
         ];
         if matches!(case, Case::Known) {
-            steps.push(step("number 2 AXValue", Reply::Number(Read::Known(0.5))));
+            steps.extend([
+                step("number 2 AXValue", Reply::Number(Read::Known(0.5))),
+                step("number 2 AXMinValue", Reply::Number(Read::Absent)),
+                step("number 2 AXMaxValue", Reply::Number(Read::Absent)),
+            ]);
         }
         let fake = Fake::new(&[(1, 1, 1, &[]), (2, 2, 2, &[])], steps);
         let root = fake.handle(1);
         let observed = crate::ax::scroll_area::bar_position_observed_with(&fake, &root, "down");
         assert_eq!(
-            observed.legacy,
+            observed.legacy.and_then(|bar| bar.fraction),
             if matches!(case, Case::Known) {
                 Some(0.5)
             } else {
@@ -967,24 +971,28 @@ fn scrollbar_role_preserves_unknown_and_absent() {
 #[test]
 fn scrollbar_value_preserves_unknown_and_absent() {
     for case in CASES {
-        let fake = Fake::new(
-            &[(1, 1, 1, &[]), (2, 2, 2, &[])],
-            vec![
-                step(
-                    "element 1 AXVerticalScrollBar",
-                    Reply::Element(Read::Known(2)),
-                ),
-                step(
-                    "text 2 AXRole",
-                    Reply::Text(Read::Known("AXScrollBar".into())),
-                ),
-                step("number 2 AXValue", Reply::Number(case.read(0.5))),
-            ],
-        );
+        let mut steps = vec![
+            step(
+                "element 1 AXVerticalScrollBar",
+                Reply::Element(Read::Known(2)),
+            ),
+            step(
+                "text 2 AXRole",
+                Reply::Text(Read::Known("AXScrollBar".into())),
+            ),
+            step("number 2 AXValue", Reply::Number(case.read(0.5))),
+        ];
+        if matches!(case, Case::Known) {
+            steps.extend([
+                step("number 2 AXMinValue", Reply::Number(Read::Absent)),
+                step("number 2 AXMaxValue", Reply::Number(Read::Absent)),
+            ]);
+        }
+        let fake = Fake::new(&[(1, 1, 1, &[]), (2, 2, 2, &[])], steps);
         let root = fake.handle(1);
         let observed = crate::ax::scroll_area::bar_position_observed_with(&fake, &root, "down");
         assert_eq!(
-            observed.legacy,
+            observed.legacy.and_then(|bar| bar.fraction),
             if matches!(case, Case::Known) {
                 Some(0.5)
             } else {
@@ -1048,6 +1056,8 @@ fn scroll_extra_labels_preserve_unknown_and_absent() {
                         Reply::Text(Read::Known("AXScrollBar".into())),
                     ),
                     step("number 2 AXValue", Reply::Number(Read::Known(0.25))),
+                    step("number 2 AXMinValue", Reply::Number(Read::Absent)),
+                    step("number 2 AXMaxValue", Reply::Number(Read::Absent)),
                     step(
                         "element 1 AXHorizontalScrollBar",
                         Reply::Element(Read::Absent),
@@ -1837,4 +1847,107 @@ fn value_settable_preserves_failure_and_false() {
         ReadSite::ValueSettable,
         EvidenceStatus::Known,
     );
+}
+
+#[test]
+fn scrollbar_range_preserves_unknown_and_absent() {
+    for name in ["AXMinValue", "AXMaxValue"] {
+        for case in CASES {
+            let min = if name == "AXMinValue" {
+                case
+            } else {
+                Case::Known
+            };
+            let max = if name == "AXMaxValue" {
+                case
+            } else {
+                Case::Known
+            };
+            let mut steps = vec![
+                step(
+                    "element 1 AXVerticalScrollBar",
+                    Reply::Element(Read::Known(2)),
+                ),
+                step(
+                    "text 2 AXRole",
+                    Reply::Text(Read::Known("AXScrollBar".into())),
+                ),
+                step("number 2 AXValue", Reply::Number(Read::Known(50.0))),
+                step("number 2 AXMinValue", Reply::Number(min.read(0.0))),
+            ];
+            // A failed AXMinValue settles the position: AXMaxValue is not read.
+            let max_read = matches!(min, Case::Known | Case::Absent);
+            if max_read {
+                steps.push(step("number 2 AXMaxValue", Reply::Number(max.read(100.0))));
+            }
+            let fake = Fake::new(&[(1, 1, 1, &[]), (2, 2, 2, &[])], steps);
+            let root = fake.handle(1);
+            let observed = crate::ax::scroll_area::bar_position_observed_with(&fake, &root, "down");
+            // The value was readable, so the bar is there; only both bounds
+            // place 50 at half way.
+            let reading = observed.legacy.expect("a bar with a readable value");
+            let placed = matches!(case, Case::Known);
+            assert_eq!(reading.fraction, placed.then_some(0.5));
+            assert_eq!(reading.range, placed.then_some((0.0, 100.0)));
+            fake.assert_consumed();
+            drop(root);
+            fake.assert_lifetimes(&[]);
+            if name == "AXMinValue" || max_read {
+                assert_evidence(&observed.evidence, ReadSite::Scrollbar(name), case.status());
+                assert_owned(
+                    &observed.evidence,
+                    ReadSite::Scrollbar(name),
+                    case.status(),
+                    2,
+                );
+            }
+        }
+    }
+}
+
+// The tree reads a bar through its source and ScrollArea's live reader
+// reads it by attribute name; both feed the same placement.
+#[test]
+fn tree_rows_and_the_live_reader_share_one_placement() {
+    let reply = |bound: Option<f64>| bound.map_or(Read::Absent, Read::Known);
+    for (value, min, max) in [
+        (50.0, Some(0.0), Some(100.0)),
+        (1.0, Some(0.0), Some(100.0)),
+        (30.0, Some(20.0), Some(40.0)),
+        (50.0, None, None),
+        (0.5, None, None),
+        (5.0, Some(5.0), Some(5.0)),
+        (50.0, Some(100.0), Some(0.0)),
+    ] {
+        let fake = Fake::new(
+            &[(1, 1, 1, &[]), (2, 2, 2, &[])],
+            vec![
+                step(
+                    "element 1 AXVerticalScrollBar",
+                    Reply::Element(Read::Known(2)),
+                ),
+                step(
+                    "text 2 AXRole",
+                    Reply::Text(Read::Known("AXScrollBar".into())),
+                ),
+                step("number 2 AXValue", Reply::Number(Read::Known(value))),
+                step("number 2 AXMinValue", Reply::Number(reply(min))),
+                step("number 2 AXMaxValue", Reply::Number(reply(max))),
+            ],
+        );
+        let root = fake.handle(1);
+        let tree = crate::ax::scroll_area::bar_position_observed_with(&fake, &root, "down").legacy;
+        fake.assert_consumed();
+        drop(root);
+        let live = crate::ax::scroll_area::bar_reading_by(
+            |name| match name {
+                "AXValue" => Read::Known(value),
+                "AXMinValue" => reply(min),
+                "AXMaxValue" => reply(max),
+                other => panic!("unexpected read {other}"),
+            },
+            || false,
+        );
+        assert_eq!(tree, live, "{value} in {min:?}..{max:?}");
+    }
 }

@@ -2408,7 +2408,22 @@ fn walk_element<S: AxTreeSource>(
         }
         let vertical = super::scroll_area::bar_position_with(source, element, "down");
         let horizontal = super::scroll_area::bar_position_with(source, element, "right");
-        if let Some(label) = super::scroll_area::position_label(vertical, horizontal) {
+        // A bar with a readable value makes the area a row even when its
+        // range does not place that value; the row then claims no position.
+        if vertical.is_some() || horizontal.is_some() {
+            let label = super::scroll_area::position_label(
+                vertical.and_then(|bar| bar.fraction),
+                horizontal.and_then(|bar| bar.fraction),
+            );
+            // value_state and the range describe one bar: the vertical one
+            // when its position is known, else the horizontal one. value_state
+            // is that bar's own AXValue, so it reads against the published
+            // range; only the label carries the fraction. A bar with no
+            // range reports a value that already is the fraction.
+            let shown = [vertical, horizontal]
+                .into_iter()
+                .flatten()
+                .find(|bar| bar.fraction.is_some());
             let idx = *counter;
             *counter += 1;
             let snapshot_key = source.retain_for_snapshot(element);
@@ -2471,7 +2486,7 @@ fn walk_element<S: AxTreeSource>(
                 } else if exhaustive {
                     own_value
                 } else {
-                    Some(label)
+                    label
                 },
                 description,
                 identifier,
@@ -2501,13 +2516,14 @@ fn walk_element<S: AxTreeSource>(
                 } else if value_unknown {
                     None
                 } else {
-                    vertical.or(horizontal).map(|v| format!("{v:.3}"))
+                    shown.map(|bar| format!("{:.3}", bar.value))
                 },
                 value_description: None,
                 placeholder,
                 subrole,
-                min_value: Some(0.0),
-                max_value: Some(1.0),
+                // Only a range the bar reported; none is assumed.
+                min_value: shown.and_then(|bar| bar.range).map(|(min, _)| min),
+                max_value: shown.and_then(|bar| bar.range).map(|(_, max)| max),
                 enabled: None,
                 selected: None,
                 in_web_content,

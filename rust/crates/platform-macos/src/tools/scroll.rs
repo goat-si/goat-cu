@@ -63,6 +63,20 @@ fn clamp_amount(requested: u64) -> usize {
     requested.clamp(AMOUNT_MIN, AMOUNT_MAX) as usize
 }
 
+/// The window-scoped `amount`: three when the field is missing, otherwise an
+/// unsigned integer clamped to the advertised range. Any other value (null, a
+/// string, an object, a negative or fractional number) is refused before
+/// anything is read or sent.
+fn window_scroll_amount(args: &Value) -> Result<usize, ToolResult> {
+    match args.get("amount") {
+        None => Ok(clamp_amount(3)),
+        Some(raw) => raw
+            .as_u64()
+            .map(clamp_amount)
+            .ok_or_else(|| super::invalid_arguments("scroll amount must be an integer")),
+    }
+}
+
 const ELECTRON_BACKGROUND_SCROLL_UNAVAILABLE: &str = "Background scroll is unavailable for \
      this Electron/Chromium window on macOS: it drops background wheel events and keystrokes, \
      and background scroll movement could not be established through accessibility. \
@@ -192,6 +206,12 @@ impl ScrollTool {
             })
             .await;
         }
+        // A malformed amount is not a missing one: refuse it before the
+        // target is resolved or anything is read or sent.
+        let amount = match window_scroll_amount(&args) {
+            Ok(amount) => amount,
+            Err(refusal) => return refusal,
+        };
         let pid = match super::target_pid(&self.state, &args) {
             Ok(v) => v,
             Err(e) => return e,
@@ -206,7 +226,6 @@ impl ScrollTool {
             Err(e) => return e,
         };
         let by = args.str_or("by", "line");
-        let amount = clamp_amount(args.u64_or("amount", 3));
         let window_id_arg = args.opt_u64("window_id");
         let resolved = match latency::resolve(|| self.state.snapshots.resolve(pid, &args)) {
             Ok(r) => r,
@@ -2110,5 +2129,124 @@ mod tests {
         assert_eq!(structured["code"], "invalid_arguments");
         assert_eq!(structured["effect"], "refused");
         assert_eq!(structured["dispatched"], false);
+    }
+
+    fn malformed_amounts() -> [Value; 6] {
+        [
+            serde_json::json!({"amount": 5}),
+            serde_json::json!("5"),
+            Value::Null,
+            serde_json::json!([5]),
+            serde_json::json!(-1),
+            serde_json::json!(2.5),
+        ]
+    }
+
+    fn text_of(result: &ToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                cua_driver_core::protocol::Content::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_amount_refused(result: &ToolResult, amount: &Value) {
+        assert_eq!(result.is_error, Some(true), "{amount}");
+        let structured = result
+            .structured_content
+            .as_ref()
+            .expect("structured refusal");
+        assert_eq!(
+            structured["code"], "invalid_arguments",
+            "{amount}: {structured}"
+        );
+        assert_eq!(structured["effect"], "refused", "{amount}: {structured}");
+        assert_eq!(structured["dispatched"], false, "{amount}: {structured}");
+        assert_eq!(
+            text_of(result),
+            "scroll amount must be an integer",
+            "{amount}"
+        );
+    }
+
+    /// Without a window_id these window-local x,y are refused before any
+    /// live read, so only an earlier check can answer instead: a malformed
+    /// amount must be that check, not be read as the default of three.
+    #[tokio::test]
+    async fn a_malformed_amount_is_refused_before_anything_is_read() {
+        let tool = ScrollTool::new(Arc::new(ToolState::new(false, false, None)));
+        for amount in malformed_amounts() {
+            let result = tool
+                .invoke(serde_json::json!({
+                    "pid": 123, "direction": "up", "amount": amount, "x": 1, "y": 1
+                }))
+                .await;
+            assert_amount_refused(&result, &amount);
+        }
+    }
+
+    /// An element token that names no snapshot is refused when the snapshot
+    /// is resolved, from memory; a malformed amount is refused before that.
+    /// The x,y without a window_id are a second stop before any input.
+    #[tokio::test]
+    async fn a_malformed_amount_is_refused_before_the_element_token_resolves() {
+        let tool = ScrollTool::new(Arc::new(ToolState::new(false, false, None)));
+        let amount = serde_json::json!({"amount": 5});
+        let result = tool
+            .invoke(serde_json::json!({
+                "pid": 123, "direction": "up", "amount": amount,
+                "element_token": "s0000002a:3", "x": 1, "y": 1
+            }))
+            .await;
+        assert_amount_refused(&result, &amount);
+    }
+
+    #[test]
+    fn window_amount_defaults_only_when_absent() {
+        let amount =
+            |args: Value| window_scroll_amount(&args).map_err(|refusal| refusal.structured_content);
+        assert_eq!(
+            amount(serde_json::json!({"pid": 123, "direction": "up"})),
+            Ok(3)
+        );
+        assert_eq!(amount(serde_json::json!({"amount": 0})), Ok(1));
+        assert_eq!(amount(serde_json::json!({"amount": 7})), Ok(7));
+        assert_eq!(
+            amount(serde_json::json!({"amount": 1100})),
+            Ok(AMOUNT_MAX as usize)
+        );
+        let refused = window_scroll_amount(
+            &serde_json::json!({"pid": 123, "direction": "up", "amount": {"amount": 5}}),
+        )
+        .unwrap_err();
+        assert_amount_refused(&refused, &serde_json::json!({"amount": 5}));
+        for malformed in malformed_amounts() {
+            let refused =
+                window_scroll_amount(&serde_json::json!({"amount": malformed})).unwrap_err();
+            assert_amount_refused(&refused, &malformed);
+        }
+    }
+
+    /// The desktop scope keeps its own typed refusal for a malformed amount.
+    #[tokio::test]
+    async fn a_malformed_desktop_amount_keeps_its_typed_refusal() {
+        let tool = ScrollTool::new(Arc::new(ToolState::new(false, false, None)));
+        let result = tool
+            .invoke(serde_json::json!({
+                "scope": "desktop", "x": 1, "y": 1, "direction": "down", "amount": {"amount": 5}
+            }))
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.as_ref().expect("typed refusal");
+        assert_eq!(structured["code"], "invalid_arguments", "{structured}");
+        assert_eq!(structured["tool"], "scroll", "{structured}");
+        assert!(
+            text_of(&result).starts_with("scroll: invalid arguments:"),
+            "{}",
+            text_of(&result)
+        );
     }
 }
