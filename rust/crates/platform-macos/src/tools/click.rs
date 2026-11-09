@@ -2081,7 +2081,7 @@ impl ClickTool {
                         )
                         .await;
                     }
-                    PressFallbackStep::Refuse(refusal) => return refusal,
+                    PressFallbackStep::Refuse(refusal) => return *refusal,
                     PressFallbackStep::Continue => {}
                 }
             }
@@ -3778,7 +3778,7 @@ enum PressFallbackStep {
     /// One checked pointer click.
     Pointer,
     /// The deferred first-selection refusal, unsent.
-    Refuse(ToolResult),
+    Refuse(Box<ToolResult>),
     /// The existing semantic route.
     Continue,
 }
@@ -3791,7 +3791,9 @@ fn press_fallback_step(
 ) -> PressFallbackStep {
     match (route, deferred) {
         (UnadvertisedPressRoute::CheckedPointer, _) => PressFallbackStep::Pointer,
-        (UnadvertisedPressRoute::Existing, Some(refusal)) => PressFallbackStep::Refuse(refusal),
+        (UnadvertisedPressRoute::Existing, Some(refusal)) => {
+            PressFallbackStep::Refuse(Box::new(refusal))
+        }
         (UnadvertisedPressRoute::Existing, None) => PressFallbackStep::Continue,
     }
 }

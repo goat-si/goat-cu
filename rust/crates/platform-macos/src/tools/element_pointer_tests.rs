@@ -1069,7 +1069,7 @@ fn checked_pointer_press_refuses_unproven_points_before_any_event() {
 
 #[test]
 fn checked_pointer_press_change_after_the_primer_is_not_resent() {
-    let changes: Vec<(&str, Box<dyn Fn(&mut Fake)>)> = vec![
+    let changes: Vec<Case> = vec![
         (
             "element_not_at_point",
             Box::new(|f| f.hit_later = Some(Hit::Elsewhere("a hover button".into()))),
