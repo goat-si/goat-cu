@@ -2416,7 +2416,10 @@ fn walk_element<S: AxTreeSource>(
                 horizontal.and_then(|bar| bar.fraction),
             );
             // value_state and the range describe one bar: the vertical one
-            // when its position is known, else the horizontal one.
+            // when its position is known, else the horizontal one. value_state
+            // is that bar's own AXValue, so it reads against the published
+            // range; only the label carries the fraction. A bar with no
+            // range reports a value that already is the fraction.
             let shown = [vertical, horizontal]
                 .into_iter()
                 .flatten()
@@ -2513,9 +2516,7 @@ fn walk_element<S: AxTreeSource>(
                 } else if value_unknown {
                     None
                 } else {
-                    shown
-                        .and_then(|bar| bar.fraction)
-                        .map(|v| format!("{v:.3}"))
+                    shown.map(|bar| format!("{:.3}", bar.value))
                 },
                 value_description: None,
                 placeholder,

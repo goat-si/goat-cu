@@ -69,6 +69,8 @@ pub fn moved(before: f64, after: f64) -> bool {
 /// A scroll bar that answered with a finite AXValue.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BarReading {
+    /// AXValue as the bar reported it, in the units of its own range.
+    pub value: f64,
     /// Where the value puts the bar, 0 at the start of its range and 1 at
     /// the end; None when the bar's range does not allow saying.
     pub fraction: Option<f64>,
@@ -97,6 +99,7 @@ pub(crate) fn read_bar(
         _ => return None,
     };
     let unknown = Some(BarReading {
+        value,
         fraction: None,
         range: None,
     });
@@ -117,6 +120,7 @@ pub(crate) fn read_bar(
             let fraction = ((value - min) / (max - min)).clamp(0.0, 1.0);
             if fraction.is_finite() {
                 Some(BarReading {
+                    value,
                     fraction: Some(fraction),
                     range: Some((min, max)),
                 })
@@ -126,6 +130,7 @@ pub(crate) fn read_bar(
         }
         (Some(_), Some(_)) => unknown,
         _ if (0.0..=1.0).contains(&value) => Some(BarReading {
+            value,
             fraction: Some(value),
             range: None,
         }),
@@ -1277,16 +1282,20 @@ mod tests {
         read_bar(|| value, || min, || max)
     }
 
-    const UNPLACED: Option<BarReading> = Some(BarReading {
-        fraction: None,
-        range: None,
-    });
+    fn unplaced(value: f64) -> Option<BarReading> {
+        Some(BarReading {
+            value,
+            fraction: None,
+            range: None,
+        })
+    }
 
     #[test]
     fn a_bar_value_is_placed_within_its_range() {
         assert_eq!(
             placed(known(50.0), known(0.0), known(100.0)),
             Some(BarReading {
+                value: 50.0,
                 fraction: Some(0.5),
                 range: Some((0.0, 100.0)),
             })
@@ -1294,6 +1303,7 @@ mod tests {
         assert_eq!(
             placed(known(1.0), known(0.0), known(100.0)),
             Some(BarReading {
+                value: 1.0,
                 fraction: Some(0.01),
                 range: Some((0.0, 100.0)),
             })
@@ -1311,22 +1321,33 @@ mod tests {
             assert_eq!(
                 placed(known(value), Read::Absent, Read::Absent),
                 Some(BarReading {
+                    value,
                     fraction: Some(value),
                     range: None,
                 })
             );
         }
-        assert_eq!(placed(known(50.0), Read::Absent, Read::Absent), UNPLACED);
-        assert_eq!(placed(known(-0.5), Read::Absent, Read::Absent), UNPLACED);
+        assert_eq!(
+            placed(known(50.0), Read::Absent, Read::Absent),
+            unplaced(50.0)
+        );
+        assert_eq!(
+            placed(known(-0.5), Read::Absent, Read::Absent),
+            unplaced(-0.5)
+        );
         // One bound alone is no range.
         assert_eq!(
             placed(known(0.5), known(0.0), Read::Absent),
             Some(BarReading {
+                value: 0.5,
                 fraction: Some(0.5),
                 range: None,
             })
         );
-        assert_eq!(placed(known(50.0), Read::Absent, known(100.0)), UNPLACED);
+        assert_eq!(
+            placed(known(50.0), Read::Absent, known(100.0)),
+            unplaced(50.0)
+        );
     }
 
     #[test]
@@ -1340,31 +1361,31 @@ mod tests {
         ] {
             assert_eq!(
                 placed(known(50.0), known(min), known(max)),
-                UNPLACED,
+                unplaced(50.0),
                 "{min}..{max}"
             );
             // Not rescued as a legacy fraction either.
             assert_eq!(
                 placed(known(0.5), known(min), known(max)),
-                UNPLACED,
+                unplaced(0.5),
                 "{min}..{max}"
             );
         }
         // A failed or wrong-typed bound is not an absent one.
-        assert_eq!(placed(known(0.5), failed(), known(1.0)), UNPLACED);
-        assert_eq!(placed(known(0.5), known(0.0), failed()), UNPLACED);
+        assert_eq!(placed(known(0.5), failed(), known(1.0)), unplaced(0.5));
+        assert_eq!(placed(known(0.5), known(0.0), failed()), unplaced(0.5));
         assert_eq!(
             placed(
                 known(0.5),
                 Read::Unknown(ReadFailure::WrongType),
                 Read::Absent
             ),
-            UNPLACED
+            unplaced(0.5)
         );
         // A range too wide to divide.
         assert_eq!(
             placed(known(f64::MAX), known(-f64::MAX), known(f64::MAX)),
-            UNPLACED
+            unplaced(f64::MAX)
         );
         // No usable value: no reading, and its range is never read.
         for value in [
@@ -1385,7 +1406,7 @@ mod tests {
         // A failed AXMinValue settles it without reading AXMaxValue.
         assert_eq!(
             read_bar(|| known(0.5), failed, || panic!("no AXMaxValue read")),
-            UNPLACED
+            unplaced(0.5)
         );
     }
 
@@ -1442,7 +1463,7 @@ mod tests {
         let reply = replies(known(0.5), failed(), known(1.0));
         assert_eq!(
             bar_reading_by(|name| traced(&reply, name), || false),
-            UNPLACED
+            unplaced(0.5)
         );
         assert_eq!(*reads.borrow(), ["AXValue", "AXMinValue"]);
 
@@ -1482,6 +1503,7 @@ mod tests {
             (mutation, written.get())
         };
         let ranged = Some(BarReading {
+            value: 50.0,
             fraction: Some(0.5),
             range: Some((0.0, 100.0)),
         });
@@ -1495,13 +1517,14 @@ mod tests {
         let (_, written) = write(
             "down",
             Some(BarReading {
+                value: 0.5,
                 fraction: Some(0.5),
                 range: None,
             }),
         );
         assert!((written.expect("written") - 0.55).abs() < 1e-9);
         // An unknown position is never written.
-        for reading in [UNPLACED, None] {
+        for reading in [unplaced(0.5), None] {
             assert_eq!(write("down", reading), (Mutation::NotSent, None));
         }
         // Past the deadline the bar is not even read.

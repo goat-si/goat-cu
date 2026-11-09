@@ -2625,17 +2625,31 @@ fn bar_range(min: Read<f64>, max: Read<f64>) -> Vec<Step> {
 
 #[test]
 fn a_ranged_scroll_bar_is_placed_within_its_range() {
-    for (value, label, state) in [
-        (50.0, "scrolled 50% down", "0.500"),
-        (1.0, "scrolled 1% down", "0.010"),
+    for (value, (min, max), label, state) in [
+        (50.0, (0.0, 100.0), "scrolled 50% down", "50.000"),
+        (1.0, (0.0, 100.0), "scrolled 1% down", "1.000"),
+        (30.0, (20.0, 40.0), "scrolled 50% down", "30.000"),
     ] {
         let (result, trace) =
-            vertical_bar_walk(value, bar_range(Read::Known(0.0), Read::Known(100.0)));
+            vertical_bar_walk(value, bar_range(Read::Known(min), Read::Known(max)));
         let node = &result.nodes[0];
         assert_eq!(node.role, "AXScrollArea");
         assert_eq!(node.value.as_deref(), Some(label), "{value}");
+        // value_state is the bar's own AXValue, in the units of the range
+        // published beside it; only the label carries the fraction.
         assert_eq!(node.value_state.as_deref(), Some(state), "{value}");
-        assert_eq!((node.min_value, node.max_value), (Some(0.0), Some(100.0)));
+        assert_eq!((node.min_value, node.max_value), (Some(min), Some(max)));
+        let published: f64 = node.value_state.as_deref().unwrap().parse().unwrap();
+        let label_fraction = label
+            .strip_prefix("scrolled ")
+            .and_then(|rest| rest.strip_suffix("% down"))
+            .and_then(|percent| percent.parse::<f64>().ok())
+            .expect("a percentage label")
+            / 100.0;
+        assert!(
+            ((published - min) / (max - min) - label_fraction).abs() < 1e-9,
+            "{value}: value_state {published} in {min}..{max} is not the label's {label_fraction}"
+        );
         assert!(
             result.tree_markdown.contains(label),
             "{}",
