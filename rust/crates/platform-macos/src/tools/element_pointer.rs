@@ -611,11 +611,18 @@ pub(super) fn performed_result(
             } else {
                 ""
             };
+            let (clicks_sent, effect) = if count == 1 {
+                ("one left click".to_owned(), "it did")
+            } else {
+                (
+                    format!("{count} left clicks (clickCount 1→{count})"),
+                    "they opened",
+                )
+            };
             ToolResult::text(format!(
-                "✅ Handed {count} left clicks (clickCount 1→{count}) to the event transport at \
-                 element [{idx}]'s center ({x:.1}, {y:.1}) in window {window_id}{primer}, after \
-                 checking that point is on the element. Nothing reads back what they opened; \
-                 check the window.{suffix}"
+                "✅ Handed {clicks_sent} to the event transport at element [{idx}]'s center \
+                 ({x:.1}, {y:.1}) in window {window_id}{primer}, after checking that point is on \
+                 the element. Nothing reads back what {effect}; check the window.{suffix}"
             ))
             .with_structured(json!({
                 "path": "cgevent",
@@ -717,7 +724,8 @@ fn error_result(count: usize, error: anyhow::Error) -> ToolResult {
     }))
 }
 
-/// An element click with count 2 or 3.
+/// An element click with count 2 or 3, or the single checked pointer click
+/// for a press an ordinary button does not advertise.
 pub(super) struct ElementClick {
     pub(super) pid: i32,
     pub(super) window_id: u32,
@@ -726,6 +734,25 @@ pub(super) struct ElementClick {
     pub(super) count: usize,
     pub(super) foreground: bool,
     pub(super) cursor_key: String,
+    /// A per-pid lease the caller already holds and has gated for this
+    /// click's route on the exact window. The lease is not reentrant: the
+    /// click runs under it instead of gating (acquiring) its own.
+    pub(super) lease: Option<BackgroundMutationLease>,
+}
+
+/// The lease a click runs under: the caller's held lease, none in the
+/// foreground, otherwise a fresh gate for `action` on the exact window.
+pub(super) async fn admit_lease(
+    target: &dyn ElementTarget,
+    held: Option<BackgroundMutationLease>,
+    foreground: bool,
+    action: BackgroundAction,
+) -> Result<Option<BackgroundMutationLease>, ToolResult> {
+    match held {
+        Some(lease) => Ok(Some(lease)),
+        None if foreground => Ok(None),
+        None => target.gate(action).await.map(Some),
+    }
 }
 
 async fn dispatch_element_open<A, F, T>(
@@ -771,6 +798,7 @@ pub(super) async fn click_element(state: &ToolState, request: ElementClick) -> T
         count,
         foreground,
         cursor_key,
+        lease: held,
     } = request;
     let target = target_for(pid, window_id, idx, element);
 
@@ -795,16 +823,16 @@ pub(super) async fn click_element(state: &ToolState, request: ElementClick) -> T
         cua_driver_core::actionability::Evidence::Known(false)
     };
     let use_ax_open = super::actionability::may_use_semantic_route(&advertised);
-    let lease = if foreground {
-        None
-    } else {
-        match target
-            .gate(background_action_for_element(use_ax_open))
-            .await
-        {
-            Ok(lease) => Some(lease),
-            Err(refusal) => return refusal,
-        }
+    let lease = match admit_lease(
+        &*target,
+        held,
+        foreground,
+        background_action_for_element(use_ax_open),
+    )
+    .await
+    {
+        Ok(lease) => lease,
+        Err(refusal) => return refusal,
     };
 
     // The action runs on its own task: a cancelled caller drops only the

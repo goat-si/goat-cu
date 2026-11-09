@@ -82,6 +82,11 @@ struct Fake {
     /// Rect read on the second and later reads (an element that moved).
     rect_later: Option<Option<[f64; 4]>>,
     bounds: Option<[f64; 4]>,
+    /// Window bounds read from the `bounds_change_at`-th read on (a window
+    /// that moved while the point was checked or the clicks were prepared).
+    bounds_later: Option<Option<[f64; 4]>>,
+    bounds_change_at: usize,
+    bounds_reads: AtomicUsize,
     hit: Hit,
     /// Hit returned from the second hit test on (what the pointer move or
     /// primer changed under the point).
@@ -112,6 +117,9 @@ impl Fake {
             rect: Some(RECT),
             rect_later: None,
             bounds: Some(BOUNDS),
+            bounds_later: None,
+            bounds_change_at: 1,
+            bounds_reads: AtomicUsize::new(0),
             hit: Hit::Target,
             hit_later: None,
             hit_change_at: 1,
@@ -230,7 +238,11 @@ impl ElementTarget for Fake {
         }
     }
     fn window_bounds(&self) -> Option<[f64; 4]> {
-        self.bounds
+        let read = self.bounds_reads.fetch_add(1, Ordering::SeqCst);
+        match self.bounds_later {
+            Some(later) if read >= self.bounds_change_at => later,
+            _ => self.bounds,
+        }
     }
     fn hit_at(&self, point: (f64, f64)) -> Hit {
         assert_eq!(point, CENTER);
@@ -917,6 +929,267 @@ async fn a_point_that_fails_after_activation_is_unverifiable() {
     assert!(fake.posts().is_empty());
     let text = format!("{result:?}");
     assert!(!text.contains("nothing was sent"), "{text}");
+}
+
+// ── A single checked pointer click: a press the element does not advertise ──
+
+/// The summary line a result opens with.
+fn summary(result: &ToolResult) -> String {
+    result
+        .content
+        .iter()
+        .find_map(|content| match content {
+            cua_driver_core::protocol::Content::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn checked_pointer_press_hands_over_one_pair_and_reports_unverifiable() {
+    let fake = Fake::new(1);
+    let performed = run_blocking(&fake, 3, 1, false, false).unwrap();
+    let posts = fake.posts();
+    assert_eq!(posts.len(), 1);
+    let (point, count, foreground, events) = &posts[0];
+    assert_eq!((point.screen, point.window_local), (CENTER, CENTER));
+    assert_eq!((*count, *foreground), (1, false));
+    assert_eq!(target_pairs(events), pairs(1));
+    let primer = events.iter().filter(|event| event.location == (-1.0, -1.0));
+    assert_eq!(primer.count(), 2, "one off-screen primer pair");
+    assert!(!fake.calls().contains(&"ax_open"));
+
+    let result = performed_result(3, WINDOW, 1, false, &performed, "");
+    let text = summary(&result);
+    assert!(
+        text.starts_with(
+            "✅ Handed one left click to the event transport at element [3]'s center \
+             (125.0, 110.0) in window 7"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("Nothing reads back what it did"), "{text}");
+    let record = result.action_record.clone().expect("action record");
+    assert_eq!(
+        record.effect,
+        cua_driver_core::action_record::ActionEffect::Unverifiable
+    );
+    assert_eq!(record.delivered_count, Some(1));
+    let structured = result.structured_content.unwrap();
+    assert_eq!(structured["effect"], "unverifiable");
+    assert_eq!(structured["verified"], false);
+    assert_eq!(structured["performed"], "coordinate_clicks");
+    assert_eq!(structured["count"], 1);
+    assert_eq!(structured["clicks_posted"], 1);
+    assert_eq!(structured["primer_clicks"], 1);
+
+    // A double click keeps its wording byte for byte.
+    let two = Performed::Clicks(PointerClicks {
+        point: *point,
+        primer: true,
+    });
+    assert_eq!(
+        summary(&performed_result(3, WINDOW, 2, false, &two, "")),
+        "✅ Handed 2 left clicks (clickCount 1→2) to the event transport at element [3]'s \
+         center (125.0, 110.0) in window 7, after one off-screen primer click, after checking \
+         that point is on the element. Nothing reads back what they opened; check the window."
+    );
+}
+
+#[test]
+fn checked_pointer_press_refuses_unproven_points_before_any_event() {
+    let cases: Vec<Case> = vec![
+        ("element_point_unresolved", Box::new(|f| f.rect = None)),
+        (
+            "element_point_unresolved",
+            Box::new(|f| f.rect = Some([100.0, 100.0, 0.0, 20.0])),
+        ),
+        ("window_bounds_unavailable", Box::new(|f| f.bounds = None)),
+        (
+            "element_outside_window",
+            Box::new(|f| f.bounds = Some([0.0, 0.0, 120.0, 600.0])),
+        ),
+        (
+            "element_not_at_point",
+            Box::new(|f| f.hit = Hit::Elsewhere("AXButton in another window".into())),
+        ),
+        (
+            "element_not_at_point",
+            Box::new(|f| f.hit = Hit::Elsewhere("AXGroup".into())),
+        ),
+        ("element_not_at_point", Box::new(|f| f.hit = Hit::Nothing)),
+        (
+            "element_moved",
+            Box::new(|f| f.rect_later = Some(Some([100.0, 140.0, 50.0, 20.0]))),
+        ),
+        (
+            "element_moved",
+            Box::new(|f| f.bounds_later = Some(Some([10.0, 0.0, 800.0, 600.0]))),
+        ),
+        ("pointer_not_permitted", Box::new(|f| f.permitted = false)),
+    ];
+    for (code, setup) in cases {
+        let mut fake = Fake::new(1);
+        setup(&mut fake);
+        let error = run_blocking(&fake, 3, 1, false, false).unwrap_err();
+        assert_eq!(
+            inner(&error)
+                .downcast_ref::<NotDispatched>()
+                .expect("a refusal")
+                .code,
+            code
+        );
+        assert!(fake.posts().is_empty(), "{code}");
+        let structured = error_result(1, error).structured_content.unwrap();
+        assert_eq!(structured["code"], code);
+        assert_eq!(structured["effect"], "refused", "{code}");
+        assert_eq!(structured["dispatched"], false, "{code}");
+        assert_eq!(structured["clicks_posted"], 0, "{code}");
+    }
+
+    // The same refusal after the background prologue made the window active
+    // is not a clean refusal.
+    let after = AfterActivation {
+        activation: Activation::Background,
+        source: refuse(
+            "element_not_at_point",
+            "The element's center (125.0, 110.0) hits a sheet, not the element; nothing was sent.",
+        )
+        .into(),
+    };
+    let result = error_result(1, after.into());
+    let structured = result.structured_content.clone().unwrap();
+    assert_eq!(structured["code"], "element_not_at_point");
+    assert_eq!(structured["effect"], "unverifiable");
+    assert_eq!(structured["dispatched"], true);
+    assert_eq!(structured["activation"], "background");
+    let text = format!("{result:?}");
+    assert!(!text.contains("nothing was sent"), "{text}");
+}
+
+#[test]
+fn checked_pointer_press_change_after_the_primer_is_not_resent() {
+    let changes: Vec<(&str, Box<dyn Fn(&mut Fake)>)> = vec![
+        (
+            "element_not_at_point",
+            Box::new(|f| f.hit_later = Some(Hit::Elsewhere("a hover button".into()))),
+        ),
+        (
+            "element_moved",
+            Box::new(|f| {
+                f.bounds_later = Some(Some([10.0, 0.0, 800.0, 600.0]));
+                // The first check reads the bounds twice; the recheck
+                // before the target click reads the moved window.
+                f.bounds_change_at = 2;
+            }),
+        ),
+    ];
+    for (reason, setup) in changes {
+        let mut fake = Fake::new(1);
+        setup(&mut fake);
+        let error = run_blocking(&fake, 3, 1, false, false).unwrap_err();
+        let changed = inner(&error)
+            .downcast_ref::<TargetChanged>()
+            .expect("target changed");
+        assert_eq!(
+            changed,
+            &TargetChanged {
+                code: reason,
+                events_sent: 3,
+                primer: true,
+            }
+        );
+        let posts = fake.posts();
+        assert_eq!(posts.len(), 1, "{reason}: one hand-over and no resend");
+        assert!(target_pairs(&posts[0].3).is_empty(), "{reason}");
+        let structured = error_result(1, error).structured_content.unwrap();
+        assert_eq!(structured["code"], "element_changed_before_click");
+        assert_eq!(structured["reason"], reason);
+        assert_eq!(structured["dispatched"], true);
+        assert_eq!(structured["clicks_posted"], 0);
+        assert_eq!(structured["effect"], "unverifiable");
+    }
+}
+
+#[tokio::test]
+async fn checked_pointer_press_admits_the_held_lease_without_a_gate() {
+    let pid = 1_100_130;
+    let fake = Fake::new(pid);
+    let held = crate::tools::acquire_background_mutation(pid).await;
+    let admitted = admit_lease(&fake, Some(held), false, BackgroundAction::WindowPointer)
+        .await
+        .unwrap();
+    assert!(admitted.is_some());
+    assert!(
+        !fake.calls().contains(&"gate"),
+        "a held lease is never gated (acquired) again"
+    );
+    assert!(
+        crate::background_mutation::try_acquire(pid).is_none(),
+        "the held lease stays held"
+    );
+    drop(admitted);
+    assert!(crate::background_mutation::try_acquire(pid).is_some());
+
+    let pid = 1_100_131;
+    let fake = Fake::new(pid);
+    let gated = admit_lease(&fake, None, false, BackgroundAction::WindowPointer)
+        .await
+        .unwrap();
+    assert!(gated.is_some());
+    assert_eq!(fake.calls(), ["gate"]);
+    drop(gated);
+    let foreground = admit_lease(&fake, None, true, BackgroundAction::WindowPointer)
+        .await
+        .unwrap();
+    assert!(foreground.is_none());
+    assert_eq!(fake.calls(), ["gate"]);
+}
+
+#[tokio::test]
+#[ignore = "live: reads NSWorkspace and the window list; runs alone in the macOS live lane"]
+async fn checked_pointer_press_runs_under_the_held_lease() {
+    let pid = 1_000_120;
+    let fake = Arc::new(Fake::new(pid));
+    let _registered = test_targets::register(pid, fake.clone());
+    let state = ToolState::new(false, false, None);
+    let held = crate::tools::acquire_background_mutation(pid).await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        click_element(
+            &state,
+            ElementClick {
+                pid,
+                window_id: WINDOW,
+                idx: 0,
+                element: unsafe { RetainedElement::retain(0) },
+                count: 1,
+                foreground: false,
+                cursor_key: "default".into(),
+                lease: Some(held),
+            },
+        ),
+    )
+    .await
+    .expect("the click runs under the held lease instead of waiting on it");
+    let structured = result
+        .structured_content
+        .clone()
+        .expect("structured result");
+    assert_eq!(structured["performed"], "coordinate_clicks", "{result:?}");
+    assert_eq!(structured["clicks_posted"], 1);
+    assert_eq!(structured["effect"], "unverifiable");
+    let calls = fake.calls();
+    assert!(!calls.contains(&"gate"), "{calls:?}");
+    assert!(position(&calls, "prologue") < position(&calls, "post"));
+    assert!(position(&calls, "post") < position(&calls, "restore"));
+    let posts = fake.posts();
+    assert_eq!(posts.len(), 1);
+    assert_eq!(target_pairs(&posts[0].3), pairs(1));
+    assert!(
+        crate::background_mutation::try_acquire(pid).is_some(),
+        "the lease is released once input finishes"
+    );
 }
 
 #[test]
