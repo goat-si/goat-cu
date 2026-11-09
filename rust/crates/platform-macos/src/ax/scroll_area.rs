@@ -11,11 +11,12 @@ use core_foundation::base::{CFRelease, CFRetain, CFTypeRef};
 
 use super::bindings::{
     ax_get_window_id, copy_action_names, copy_ax_windows, copy_children, copy_element_attr,
-    copy_number_attr, copy_string_attr, element_at_screen_position, element_screen_rect,
-    is_attribute_settable, kAXErrorSuccess, perform_action, set_number_attr,
-    AXUIElementCopyElementAtPosition, AXUIElementCreateApplication, AXUIElementRef,
-    AXUIElementSetMessagingTimeout,
+    copy_string_attr, element_at_screen_position, element_screen_rect, is_attribute_settable,
+    kAXErrorCannotComplete, kAXErrorSuccess, number_from_cf, perform_action, set_number_attr,
+    AXUIElementCopyAttributeValue, AXUIElementCopyElementAtPosition, AXUIElementCreateApplication,
+    AXUIElementRef, AXUIElementSetMessagingTimeout,
 };
+use super::tree_source::{Read, ReadFailure};
 use std::time::{Duration, Instant};
 
 const MAX_ASCENT: usize = 40;
@@ -65,27 +66,153 @@ pub fn moved(before: f64, after: f64) -> bool {
     (after - before).abs() > EPSILON
 }
 
-/// The value, 0 to 1, of `area`'s scroll bar along `direction`'s axis, or
-/// None when it has no bar there.
+/// A scroll bar that answered with a finite AXValue.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BarReading {
+    /// Where the value puts the bar, 0 at the start of its range and 1 at
+    /// the end; None when the bar's range does not allow saying.
+    pub fraction: Option<f64>,
+    /// AXMinValue and AXMaxValue as the bar reported them, when it reported
+    /// both and they placed the value.
+    pub range: Option<(f64, f64)>,
+}
+
+/// Reads a scroll bar's value against its range. `value`, `min` and `max`
+/// read AXValue, AXMinValue and AXMaxValue, each only when it is needed.
+///
+/// None when AXValue is unreadable or not finite. With both bounds finite and
+/// the maximum above the minimum, the value is placed between them. Without
+/// a range, only a value already within 0 to 1 is taken: that is the
+/// fraction AppKit scroll bars report, and the range stays unobserved.
+/// Anything else (a failed or non-finite bound, an empty or reversed range,
+/// a value outside 0 to 1 with no range) leaves the fraction unknown rather
+/// than guessing a percentage.
+pub(crate) fn read_bar(
+    value: impl FnOnce() -> Read<f64>,
+    min: impl FnOnce() -> Read<f64>,
+    max: impl FnOnce() -> Read<f64>,
+) -> Option<BarReading> {
+    let value = match value() {
+        Read::Known(value) if value.is_finite() => value,
+        _ => return None,
+    };
+    let unknown = Some(BarReading {
+        fraction: None,
+        range: None,
+    });
+    // A failed read is not an absent attribute: it settles nothing.
+    let bound = |read: Read<f64>| match read {
+        Read::Known(bound) if bound.is_finite() => Some(Some(bound)),
+        Read::Absent => Some(None),
+        Read::Known(_) | Read::Unknown(_) => None,
+    };
+    let Some(min) = bound(min()) else {
+        return unknown;
+    };
+    let Some(max) = bound(max()) else {
+        return unknown;
+    };
+    match (min, max) {
+        (Some(min), Some(max)) if max > min => {
+            let fraction = ((value - min) / (max - min)).clamp(0.0, 1.0);
+            if fraction.is_finite() {
+                Some(BarReading {
+                    fraction: Some(fraction),
+                    range: Some((min, max)),
+                })
+            } else {
+                unknown
+            }
+        }
+        (Some(_), Some(_)) => unknown,
+        _ if (0.0..=1.0).contains(&value) => Some(BarReading {
+            fraction: Some(value),
+            range: None,
+        }),
+        _ => unknown,
+    }
+}
+
+/// [`read_bar`] over a bar read one attribute at a time by `read`. No read
+/// starts once `expired` is true; one it stopped counts as failed.
+pub(crate) fn bar_reading_by(
+    read: impl Fn(&str) -> Read<f64>,
+    expired: impl Fn() -> bool,
+) -> Option<BarReading> {
+    let bounded = |name: &str| {
+        if expired() {
+            Read::Unknown(ReadFailure::Ax(kAXErrorCannotComplete))
+        } else {
+            read(name)
+        }
+    };
+    read_bar(
+        || bounded("AXValue"),
+        || bounded("AXMinValue"),
+        || bounded("AXMaxValue"),
+    )
+}
+
+/// The AXValue that puts a bar at `fraction` of its range: the fraction
+/// itself for a bar that reported no range.
+pub fn bar_value_at(fraction: f64, range: Option<(f64, f64)>) -> f64 {
+    range.map_or(fraction, |(min, max)| min + fraction * (max - min))
+}
+
+/// One numeric attribute of a live element, telling an attribute the
+/// element does not have apart from a read that failed.
+///
+/// # Safety
+///
+/// `element` must be a live AX element. Call from a blocking context.
+unsafe fn number_read(element: AXUIElementRef, name: &str) -> Read<f64> {
+    use core_foundation::{base::TCFType, string::CFString};
+    let attr = CFString::new(name);
+    let mut value: CFTypeRef = std::ptr::null();
+    let error = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
+    let read = super::tree_source::native::scalar_outcome(error, value.is_null(), || {
+        number_from_cf(value)
+    });
+    if error == kAXErrorSuccess && !value.is_null() {
+        CFRelease(value);
+    }
+    read
+}
+
+/// [`bar_reading_by`] on a live scroll bar, within `budget` when given.
+///
+/// # Safety
+///
+/// `bar` must be a live AX element. Call from a blocking context.
+unsafe fn live_bar_reading(bar: AXUIElementRef, budget: Option<&Budget>) -> Option<BarReading> {
+    bar_reading_by(
+        |name| number_read(bar, name),
+        || budget.is_some_and(|budget| budget.expired()),
+    )
+}
+
+/// Where `area`'s scroll bar along `direction`'s axis sits in its range,
+/// 0 to 1, or None when it has no bar there or its position is unknown
+/// ([`read_bar`]).
 ///
 /// # Safety
 ///
 /// `area` must be a live AX element. Call from a blocking context.
 pub unsafe fn bar_position(area: AXUIElementRef, direction: &str) -> Option<f64> {
     let bar = copy_element_attr(area, bar_attribute(direction))?;
-    let value = scrollbar_value(
+    let reading = scrollbar_value(
         || copy_string_attr(bar, "AXRole"),
-        || copy_number_attr(bar, "AXValue"),
+        || live_bar_reading(bar, None),
     );
     CFRelease(bar as CFTypeRef);
-    value.filter(|value| value.is_finite())
+    reading.and_then(|reading| reading.fraction)
 }
 
 pub(crate) fn bar_position_with<S: super::tree_source::AxTreeSource>(
     source: &S,
     area: &S::Element,
     direction: &str,
-) -> Option<f64> {
+) -> Option<BarReading> {
     bar_position_observed_with(source, area, direction).into_walk_legacy()
 }
 
@@ -93,7 +220,7 @@ pub(crate) fn bar_position_observed_with<S: super::tree_source::AxTreeSource>(
     source: &S,
     area: &S::Element,
     direction: &str,
-) -> super::evidence::Observed<Option<f64>> {
+) -> super::evidence::Observed<Option<BarReading>> {
     let source = super::evidence_source::EvidenceSource::new(
         source,
         super::evidence_source::Domain::Scrollbar,
@@ -107,30 +234,26 @@ fn bar_position_legacy_with<S: super::tree_source::AxTreeSource>(
     source: &S,
     area: &S::Element,
     direction: &str,
-) -> Option<f64> {
-    use super::tree_source::Read;
+) -> Option<BarReading> {
     let bar = match source.element_attribute(area, bar_attribute(direction)) {
         Read::Known(bar) => bar,
         Read::Absent | Read::Unknown(_) => return None,
     };
-    let value = scrollbar_value(
+    let reading = scrollbar_value(
         || match source.text(&bar, "AXRole") {
             Read::Known(value) => Some(value),
             Read::Absent | Read::Unknown(_) => None,
         },
-        || match source.number(&bar, "AXValue") {
-            Read::Known(value) => Some(value),
-            Read::Absent | Read::Unknown(_) => None,
-        },
+        || bar_reading_by(|name| source.number(&bar, name), || false),
     );
     drop(bar);
-    value.filter(|value| value.is_finite())
+    reading
 }
 
-pub(super) fn scrollbar_value(
+pub(super) fn scrollbar_value<T>(
     role: impl FnOnce() -> Option<String>,
-    value: impl FnOnce() -> Option<f64>,
-) -> Option<f64> {
+    value: impl FnOnce() -> Option<T>,
+) -> Option<T> {
     (role().as_deref() == Some("AXScrollBar"))
         .then(value)
         .flatten()
@@ -247,16 +370,18 @@ impl ScrollArea {
         first_found(|| budget.is_some_and(|budget| budget.expired()), steps)
     }
 
-    /// The scroll bar's value along `direction`'s axis, from 0 to 1.
+    /// Where the scroll bar along `direction`'s axis sits in its range, from
+    /// 0 to 1; None without a bar or when its position is unknown
+    /// ([`read_bar`]).
     ///
     /// # Safety
     ///
     /// Call from a blocking context.
     pub unsafe fn position(&self, direction: &str) -> Option<f64> {
         let bar = copy_element_attr(self.element, bar_attribute(direction))?;
-        let value = copy_number_attr(bar, "AXValue");
+        let reading = live_bar_reading(bar, None);
         CFRelease(bar as CFTypeRef);
-        value.filter(|value| value.is_finite())
+        reading.and_then(|reading| reading.fraction)
     }
 
     /// The visible extent along `direction`'s axis, in points.
@@ -524,7 +649,8 @@ pub enum Mutation {
 /// checks `budget` before each accessibility call and gives up (`None`,
 /// `false`, [`Mutation::NotSent`]) when it has run out.
 pub trait WheelArea {
-    /// The bar's value along `direction`'s axis, 0 to 1.
+    /// Where the bar along `direction`'s axis sits in its range, 0 to 1;
+    /// None when that is unknown.
     fn position(&self, direction: &str, budget: &Budget) -> Option<f64>;
     /// The bar along `direction`'s axis takes an AXValue write.
     fn bar_settable(&self, direction: &str, budget: &Budget) -> bool;
@@ -627,6 +753,35 @@ pub fn write_bar(
     }
 }
 
+/// [`write_bar`] for a bar read through [`read_bar`]: the reading is taken
+/// at `write_bar`'s position step, the target is worked out as a fraction of
+/// the bar's range, and `write` gets it back in the bar's own units
+/// ([`bar_value_at`]). An unknown position is never written.
+pub fn write_bar_in_range(
+    expired: &dyn Fn() -> bool,
+    reading: impl FnOnce() -> Option<BarReading>,
+    viewport: impl FnOnce() -> Option<f64>,
+    content: impl FnOnce() -> Option<f64>,
+    target: impl FnOnce(f64, f64, f64) -> Option<f64>,
+    settable: impl FnOnce() -> bool,
+    write: impl FnOnce(f64) -> bool,
+) -> Mutation {
+    let range = std::cell::Cell::new(None);
+    write_bar(
+        expired,
+        || {
+            let reading = reading()?;
+            range.set(reading.range);
+            reading.fraction
+        },
+        viewport,
+        content,
+        target,
+        settable,
+        |next| write(bar_value_at(next, range.get())),
+    )
+}
+
 /// Up to pages page actions, each only with budget left; an action the app
 /// answers with an error ends the ladder as Failed (it may still apply).
 pub fn page_ladder(
@@ -679,18 +834,16 @@ impl ScrollArea {
         (!budget.expired()).then_some(area)
     }
 
-    /// The bar's value, bounded by `budget`.
+    /// Where the bar sits in its range, bounded by `budget`.
     unsafe fn position_within(&self, direction: &str, budget: &Budget) -> Option<f64> {
         if budget.expired() {
             return None;
         }
         let bar = copy_element_attr(self.element, bar_attribute(direction))?;
         bound(bar);
-        let value = (!budget.expired())
-            .then(|| copy_number_attr(bar, "AXValue"))
-            .flatten();
+        let reading = live_bar_reading(bar, Some(budget));
         CFRelease(bar as CFTypeRef);
-        value.filter(|value| value.is_finite())
+        reading.and_then(|reading| reading.fraction)
     }
 
     unsafe fn content_length_within(&self, horizontal: bool, budget: &Budget) -> Option<f64> {
@@ -748,9 +901,9 @@ impl WheelArea for ScrollArea {
                 return Mutation::NotSent;
             };
             bound(bar);
-            let mutation = write_bar(
+            let mutation = write_bar_in_range(
                 &|| budget.expired(),
-                || copy_number_attr(bar, "AXValue").filter(|value| value.is_finite()),
+                || live_bar_reading(bar, Some(budget)),
                 || WheelArea::extent(self, direction, budget),
                 || self.content_length_within(horizontal, budget),
                 |position, viewport, content| {
@@ -1110,5 +1263,262 @@ mod tests {
         assert_eq!(pages_for(1200.0, 560.0, 50), 3);
         assert_eq!(pages_for(30_000.0, 560.0, 50), 50);
         assert_eq!(pages_for(120.0, 0.0, 50), 1);
+    }
+
+    fn known(value: f64) -> Read<f64> {
+        Read::Known(value)
+    }
+
+    fn failed() -> Read<f64> {
+        Read::Unknown(ReadFailure::Ax(kAXErrorCannotComplete))
+    }
+
+    fn placed(value: Read<f64>, min: Read<f64>, max: Read<f64>) -> Option<BarReading> {
+        read_bar(|| value, || min, || max)
+    }
+
+    const UNPLACED: Option<BarReading> = Some(BarReading {
+        fraction: None,
+        range: None,
+    });
+
+    #[test]
+    fn a_bar_value_is_placed_within_its_range() {
+        assert_eq!(
+            placed(known(50.0), known(0.0), known(100.0)),
+            Some(BarReading {
+                fraction: Some(0.5),
+                range: Some((0.0, 100.0)),
+            })
+        );
+        assert_eq!(
+            placed(known(1.0), known(0.0), known(100.0)),
+            Some(BarReading {
+                fraction: Some(0.01),
+                range: Some((0.0, 100.0)),
+            })
+        );
+        let fraction = |value, min, max| placed(known(value), known(min), known(max))?.fraction;
+        assert_eq!(fraction(30.0, 20.0, 40.0), Some(0.5));
+        // Past either end of its own range: at the end it passed.
+        assert_eq!(fraction(150.0, 0.0, 100.0), Some(1.0));
+        assert_eq!(fraction(-5.0, 0.0, 100.0), Some(0.0));
+    }
+
+    #[test]
+    fn a_bar_without_a_range_is_only_a_legacy_fraction() {
+        for value in [0.0, 0.5, 1.0] {
+            assert_eq!(
+                placed(known(value), Read::Absent, Read::Absent),
+                Some(BarReading {
+                    fraction: Some(value),
+                    range: None,
+                })
+            );
+        }
+        assert_eq!(placed(known(50.0), Read::Absent, Read::Absent), UNPLACED);
+        assert_eq!(placed(known(-0.5), Read::Absent, Read::Absent), UNPLACED);
+        // One bound alone is no range.
+        assert_eq!(
+            placed(known(0.5), known(0.0), Read::Absent),
+            Some(BarReading {
+                fraction: Some(0.5),
+                range: None,
+            })
+        );
+        assert_eq!(placed(known(50.0), Read::Absent, known(100.0)), UNPLACED);
+    }
+
+    #[test]
+    fn an_unusable_bar_range_or_value_is_unknown() {
+        for (min, max) in [
+            (5.0, 5.0),
+            (100.0, 0.0),
+            (f64::NAN, 100.0),
+            (0.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 0.0),
+        ] {
+            assert_eq!(
+                placed(known(50.0), known(min), known(max)),
+                UNPLACED,
+                "{min}..{max}"
+            );
+            // Not rescued as a legacy fraction either.
+            assert_eq!(
+                placed(known(0.5), known(min), known(max)),
+                UNPLACED,
+                "{min}..{max}"
+            );
+        }
+        // A failed or wrong-typed bound is not an absent one.
+        assert_eq!(placed(known(0.5), failed(), known(1.0)), UNPLACED);
+        assert_eq!(placed(known(0.5), known(0.0), failed()), UNPLACED);
+        assert_eq!(
+            placed(
+                known(0.5),
+                Read::Unknown(ReadFailure::WrongType),
+                Read::Absent
+            ),
+            UNPLACED
+        );
+        // A range too wide to divide.
+        assert_eq!(
+            placed(known(f64::MAX), known(-f64::MAX), known(f64::MAX)),
+            UNPLACED
+        );
+        // No usable value: no reading, and its range is never read.
+        for value in [
+            Read::Absent,
+            failed(),
+            known(f64::NAN),
+            known(f64::INFINITY),
+        ] {
+            assert_eq!(
+                read_bar(
+                    || value,
+                    || panic!("no AXMinValue read"),
+                    || panic!("no AXMaxValue read")
+                ),
+                None
+            );
+        }
+        // A failed AXMinValue settles it without reading AXMaxValue.
+        assert_eq!(
+            read_bar(|| known(0.5), failed, || panic!("no AXMaxValue read")),
+            UNPLACED
+        );
+    }
+
+    #[test]
+    fn one_percent_of_a_ranged_bar_is_not_its_end() {
+        let reading = placed(known(1.0), known(0.0), known(100.0)).unwrap();
+        let fraction = reading.fraction.unwrap();
+        assert!(!at_end("down", fraction));
+        assert!(!at_end("up", fraction));
+        assert_eq!(
+            position_label(Some(fraction), None).as_deref(),
+            Some("scrolled 1% down")
+        );
+        // The raw value the bar reported would have claimed the end.
+        assert!(at_end("down", 1.0));
+    }
+
+    #[test]
+    fn bar_reading_by_reads_in_order_and_stops_at_the_budget() {
+        let reads = std::cell::RefCell::new(Vec::new());
+        let replies = |value: Read<f64>, min: Read<f64>, max: Read<f64>| {
+            let slots = std::cell::RefCell::new([Some(value), Some(min), Some(max)]);
+            move |name: &str| {
+                let slot = match name {
+                    "AXValue" => 0,
+                    "AXMinValue" => 1,
+                    "AXMaxValue" => 2,
+                    other => panic!("unexpected read {other}"),
+                };
+                slots.borrow_mut()[slot]
+                    .take()
+                    .expect("each attribute read once")
+            }
+        };
+        let traced = |reply: &dyn Fn(&str) -> Read<f64>, name: &str| {
+            reads.borrow_mut().push(name.to_owned());
+            reply(name)
+        };
+
+        let reply = replies(known(50.0), known(0.0), known(100.0));
+        let got = bar_reading_by(|name| traced(&reply, name), || false);
+        assert_eq!(got.and_then(|bar| bar.fraction), Some(0.5));
+        assert_eq!(*reads.borrow(), ["AXValue", "AXMinValue", "AXMaxValue"]);
+
+        // An absent AXMinValue still leaves AXMaxValue to read.
+        reads.borrow_mut().clear();
+        let reply = replies(known(0.5), Read::Absent, Read::Absent);
+        let got = bar_reading_by(|name| traced(&reply, name), || false);
+        assert_eq!(got.and_then(|bar| bar.fraction), Some(0.5));
+        assert_eq!(*reads.borrow(), ["AXValue", "AXMinValue", "AXMaxValue"]);
+
+        // A failed AXMinValue does not.
+        reads.borrow_mut().clear();
+        let reply = replies(known(0.5), failed(), known(1.0));
+        assert_eq!(
+            bar_reading_by(|name| traced(&reply, name), || false),
+            UNPLACED
+        );
+        assert_eq!(*reads.borrow(), ["AXValue", "AXMinValue"]);
+
+        // The budget runs out after each read in turn: no later read starts,
+        // and what was not read leaves the position unknown.
+        for allowed in 0..3 {
+            reads.borrow_mut().clear();
+            let reply = replies(known(50.0), known(0.0), known(100.0));
+            let got = bar_reading_by(
+                |name| traced(&reply, name),
+                || reads.borrow().len() >= allowed,
+            );
+            assert_eq!(reads.borrow().len(), allowed);
+            assert_eq!(got.and_then(|bar| bar.fraction), None, "{allowed}");
+            assert_eq!(got.is_some(), allowed > 0, "{allowed}");
+        }
+    }
+
+    #[test]
+    fn a_ranged_bar_is_written_in_its_own_units() {
+        let write = |direction: &'static str, reading: Option<BarReading>| {
+            let written = std::cell::Cell::new(None);
+            let mutation = write_bar_in_range(
+                &|| false,
+                || reading,
+                || Some(500.0),
+                || Some(2500.0),
+                |position, viewport, content| {
+                    position_after(direction, position, 100.0, content, viewport)
+                },
+                || true,
+                |value| {
+                    written.set(Some(value));
+                    true
+                },
+            );
+            (mutation, written.get())
+        };
+        let ranged = Some(BarReading {
+            fraction: Some(0.5),
+            range: Some((0.0, 100.0)),
+        });
+        // 100 points of 2000 scrollable is 5% of the range either way.
+        for (direction, expected) in [("down", 55.0), ("up", 45.0)] {
+            let (mutation, written) = write(direction, ranged);
+            assert_eq!(mutation, Mutation::Sent { count: 1 });
+            let written = written.expect("written");
+            assert!((written - expected).abs() < 1e-9, "{direction}: {written}");
+        }
+        let (_, written) = write(
+            "down",
+            Some(BarReading {
+                fraction: Some(0.5),
+                range: None,
+            }),
+        );
+        assert!((written.expect("written") - 0.55).abs() < 1e-9);
+        // An unknown position is never written.
+        for reading in [UNPLACED, None] {
+            assert_eq!(write("down", reading), (Mutation::NotSent, None));
+        }
+        // Past the deadline the bar is not even read.
+        assert_eq!(
+            write_bar_in_range(
+                &|| true,
+                || panic!("no read after the deadline"),
+                || Some(500.0),
+                || Some(2500.0),
+                |_, _, _| Some(1.0),
+                || true,
+                |_| panic!("no write"),
+            ),
+            Mutation::NotSent
+        );
+        assert_eq!(bar_value_at(0.25, Some((0.0, 100.0))), 25.0);
+        assert_eq!(bar_value_at(0.5, Some((20.0, 40.0))), 30.0);
+        assert_eq!(bar_value_at(0.25, None), 0.25);
     }
 }

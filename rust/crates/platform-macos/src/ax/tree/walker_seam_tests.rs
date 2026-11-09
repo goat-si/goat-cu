@@ -2033,6 +2033,8 @@ fn large_container_reads_surface_clip_lazily_once() {
 
 // Baseline 36279fdc: vertical then horizontal element/role/value reads are
 // released immediately; an invalid scrollbar role suppresses its value read.
+// Each readable value is followed by its range reads; with no range a 0..1
+// value stands and no range is published.
 #[test]
 pub(crate) fn scroll_area_preserves_position_labels_and_read_order() {
     for exhaustive in [false, true] {
@@ -2056,6 +2058,8 @@ pub(crate) fn scroll_area_preserves_position_labels_and_read_order() {
                 Reply::Text(Read::Known("AXScrollBar".into())),
             ),
             step("number 2 AXValue", Reply::Number(Read::Known(0.25))),
+            step("number 2 AXMinValue", Reply::Number(Read::Absent)),
+            step("number 2 AXMaxValue", Reply::Number(Read::Absent)),
             step(
                 "element 1 AXHorizontalScrollBar",
                 Reply::Element(Read::Known(3)),
@@ -2073,7 +2077,11 @@ pub(crate) fn scroll_area_preserves_position_labels_and_read_order() {
             ),
         ];
         if !exhaustive {
-            script.push(step("number 3 AXValue", Reply::Number(Read::Known(0.75))));
+            script.extend([
+                step("number 3 AXValue", Reply::Number(Read::Known(0.75))),
+                step("number 3 AXMinValue", Reply::Number(Read::Absent)),
+                step("number 3 AXMaxValue", Reply::Number(Read::Absent)),
+            ]);
         }
         script.push(step("snapshot 1", Reply::Unit));
         if !exhaustive {
@@ -2112,12 +2120,12 @@ pub(crate) fn scroll_area_preserves_position_labels_and_read_order() {
                 result.tree_markdown,
                 "- [0] AXScrollArea \"Scroll\" = \"own\" (Pane) [id=main actions=[press]]\n"
             );
-            assert_eq!(result.nodes.iter().map(|node| format!("{node:?}")).collect::<Vec<_>>(), ["AXNode { owned_row_label: None, element_index: Some(0), role: \"AXScrollArea\", title: Some(\"Scroll\"), value: Some(\"own\"), description: Some(\"Pane\"), identifier: Some(\"main\"), help: None, actions: [\"AXPress\"], element_ptr: 1, depth: 0, parent_element_index: None, frame: None, value_state: Some(\"0.250\"), value_description: None, min_value: Some(0.0), max_value: Some(1.0), enabled: None, selected: None, in_web_content: false }"]);
-            assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "element 1 AXVerticalScrollBar", "adopt 2", "text 2 AXRole", "number 2 AXValue", "release 2", "element 1 AXHorizontalScrollBar", "adopt 3", "text 3 AXRole", "release 3", "snapshot 1", "actions 1", "position 1", "children 1", "release 1"]);
+            assert_eq!(result.nodes.iter().map(|node| format!("{node:?}")).collect::<Vec<_>>(), ["AXNode { owned_row_label: None, element_index: Some(0), role: \"AXScrollArea\", title: Some(\"Scroll\"), value: Some(\"own\"), description: Some(\"Pane\"), identifier: Some(\"main\"), help: None, actions: [\"AXPress\"], element_ptr: 1, depth: 0, parent_element_index: None, frame: None, value_state: Some(\"0.250\"), value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }"]);
+            assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "element 1 AXVerticalScrollBar", "adopt 2", "text 2 AXRole", "number 2 AXValue", "number 2 AXMinValue", "number 2 AXMaxValue", "release 2", "element 1 AXHorizontalScrollBar", "adopt 3", "text 3 AXRole", "release 3", "snapshot 1", "actions 1", "position 1", "children 1", "release 1"]);
         } else {
             assert_eq!(result.tree_markdown, "- [0] AXScrollArea = \"scrolled 25% down, 75% right\" (Pane) [id=main actions=[press]]\n");
-            assert_eq!(result.nodes.iter().map(|node| format!("{node:?}")).collect::<Vec<_>>(), ["AXNode { owned_row_label: None, element_index: Some(0), role: \"AXScrollArea\", title: None, value: Some(\"scrolled 25% down, 75% right\"), description: Some(\"Pane\"), identifier: Some(\"main\"), help: None, actions: [\"AXPress\"], element_ptr: 1, depth: 0, parent_element_index: None, frame: None, value_state: Some(\"0.250\"), value_description: None, min_value: Some(0.0), max_value: Some(1.0), enabled: None, selected: None, in_web_content: false }"]);
-            assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "element 1 AXVerticalScrollBar", "adopt 2", "text 2 AXRole", "number 2 AXValue", "release 2", "element 1 AXHorizontalScrollBar", "adopt 3", "text 3 AXRole", "number 3 AXValue", "release 3", "snapshot 1", "text 1 AXDescription", "text 1 AXIdentifier", "actions 1", "position 1", "children 1", "release 1"]);
+            assert_eq!(result.nodes.iter().map(|node| format!("{node:?}")).collect::<Vec<_>>(), ["AXNode { owned_row_label: None, element_index: Some(0), role: \"AXScrollArea\", title: None, value: Some(\"scrolled 25% down, 75% right\"), description: Some(\"Pane\"), identifier: Some(\"main\"), help: None, actions: [\"AXPress\"], element_ptr: 1, depth: 0, parent_element_index: None, frame: None, value_state: Some(\"0.250\"), value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }"]);
+            assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "element 1 AXVerticalScrollBar", "adopt 2", "text 2 AXRole", "number 2 AXValue", "number 2 AXMinValue", "number 2 AXMaxValue", "release 2", "element 1 AXHorizontalScrollBar", "adopt 3", "text 3 AXRole", "number 3 AXValue", "number 3 AXMinValue", "number 3 AXMaxValue", "release 3", "snapshot 1", "text 1 AXDescription", "text 1 AXIdentifier", "actions 1", "position 1", "children 1", "release 1"]);
         }
     }
 }
@@ -2558,4 +2566,165 @@ pub(crate) fn canonical_walk_and_collect() -> (AXNode, Vec<String>) {
     drop(root);
     source.assert_consumed();
     (node, source.trace())
+}
+
+/// A walk of one scroll area with only a vertical bar. The bar answers
+/// AXValue with `value`; `range` scripts the range reads that must follow.
+fn vertical_bar_walk(value: f64, range: Vec<Step>) -> (TreeWalkResult, Vec<String>) {
+    let mut script = vec![
+        step("timeout 1", Reply::Unit),
+        step(
+            "text 1 AXRole",
+            Reply::Text(Read::Known("AXScrollArea".into())),
+        ),
+        step(
+            &format!("batch 1 {CONTENT}"),
+            Reply::Batch(Ok(content(None))),
+        ),
+        step("value 1", Reply::Value(Ok(None))),
+        step(
+            "element 1 AXVerticalScrollBar",
+            Reply::Element(Read::Known(2)),
+        ),
+        step(
+            "text 2 AXRole",
+            Reply::Text(Read::Known("AXScrollBar".into())),
+        ),
+        step("number 2 AXValue", Reply::Number(Read::Known(value))),
+    ];
+    script.extend(range);
+    script.extend([
+        step(
+            "element 1 AXHorizontalScrollBar",
+            Reply::Element(Read::Absent),
+        ),
+        step("snapshot 1", Reply::Unit),
+        step("text 1 AXDescription", Reply::Text(Read::Absent)),
+        step("text 1 AXIdentifier", Reply::Text(Read::Absent)),
+        step("actions 1", Reply::Actions(Read::Known(vec![]))),
+        step("position 1", Reply::Point(Read::Absent)),
+        step("children 1", Reply::Children(Read::Absent)),
+    ]);
+    let source = Fake::new(&[(1, 1, 1, &[]), (2, 2, 2, &[])], script);
+    let root = source.handle(1);
+    let result = with_exhaustive_nodes(false, || {
+        run_fake(&source, &root, None, 10, WalkBudget::nodes_only(10), true)
+    });
+    drop(root);
+    source.assert_consumed();
+    source.assert_lifetimes(&[(1, 1)]);
+    (result, source.trace())
+}
+
+fn bar_range(min: Read<f64>, max: Read<f64>) -> Vec<Step> {
+    vec![
+        step("number 2 AXMinValue", Reply::Number(min)),
+        step("number 2 AXMaxValue", Reply::Number(max)),
+    ]
+}
+
+#[test]
+fn a_ranged_scroll_bar_is_placed_within_its_range() {
+    for (value, label, state) in [
+        (50.0, "scrolled 50% down", "0.500"),
+        (1.0, "scrolled 1% down", "0.010"),
+    ] {
+        let (result, trace) =
+            vertical_bar_walk(value, bar_range(Read::Known(0.0), Read::Known(100.0)));
+        let node = &result.nodes[0];
+        assert_eq!(node.role, "AXScrollArea");
+        assert_eq!(node.value.as_deref(), Some(label), "{value}");
+        assert_eq!(node.value_state.as_deref(), Some(state), "{value}");
+        assert_eq!((node.min_value, node.max_value), (Some(0.0), Some(100.0)));
+        assert!(
+            result.tree_markdown.contains(label),
+            "{}",
+            result.tree_markdown
+        );
+        assert!(trace.windows(3).any(|reads| reads
+            == [
+                "number 2 AXValue",
+                "number 2 AXMinValue",
+                "number 2 AXMaxValue"
+            ]));
+    }
+}
+
+#[test]
+fn a_scroll_bar_without_a_range_claims_only_a_legacy_fraction() {
+    // 50 with no range cannot be placed: the area stays a row, so indices
+    // hold, but it claims no position and no range.
+    let (result, _) = vertical_bar_walk(50.0, bar_range(Read::Absent, Read::Absent));
+    let node = &result.nodes[0];
+    assert_eq!(node.role, "AXScrollArea");
+    assert_eq!(node.element_index, Some(0));
+    assert_eq!(
+        (node.value.as_deref(), node.value_state.as_deref()),
+        (None, None)
+    );
+    assert_eq!((node.min_value, node.max_value), (None, None));
+    assert!(
+        !result.tree_markdown.contains('%'),
+        "{}",
+        result.tree_markdown
+    );
+    // AppKit's convention: a value within 0 to 1 is already the fraction.
+    // The range was not observed, so none is published.
+    let (result, _) = vertical_bar_walk(0.5, bar_range(Read::Absent, Read::Absent));
+    let node = &result.nodes[0];
+    assert_eq!(node.value.as_deref(), Some("scrolled 50% down"));
+    assert_eq!(node.value_state.as_deref(), Some("0.500"));
+    assert_eq!((node.min_value, node.max_value), (None, None));
+}
+
+#[test]
+fn an_unusable_range_leaves_the_position_unknown() {
+    let failed = || {
+        Read::Unknown(crate::ax::tree_source::ReadFailure::Ax(
+            kAXErrorCannotComplete,
+        ))
+    };
+    let cases = [
+        (5.0, bar_range(Read::Known(5.0), Read::Known(5.0))),
+        (50.0, bar_range(Read::Known(100.0), Read::Known(0.0))),
+        // A non-finite AXMinValue settles it: AXMaxValue is not read.
+        (
+            0.5,
+            vec![step(
+                "number 2 AXMinValue",
+                Reply::Number(Read::Known(f64::NAN)),
+            )],
+        ),
+        (0.5, bar_range(Read::Known(0.0), Read::Known(f64::INFINITY))),
+        (0.5, bar_range(Read::Known(0.0), failed())),
+        // A failed AXMinValue settles it: AXMaxValue is not read.
+        (
+            0.5,
+            vec![step("number 2 AXMinValue", Reply::Number(failed()))],
+        ),
+    ];
+    for (index, (value, range)) in cases.into_iter().enumerate() {
+        // The last two cases are failed reads; the others read bounds that
+        // simply cannot place the value.
+        let read_failed = index >= 4;
+        let (result, _) = vertical_bar_walk(value, range);
+        let node = &result.nodes[0];
+        assert_eq!(node.role, "AXScrollArea");
+        assert_eq!(
+            (node.value.as_deref(), node.value_state.as_deref()),
+            (None, None),
+            "{value}"
+        );
+        assert_eq!((node.min_value, node.max_value), (None, None), "{value}");
+        let mut output = serde_json::json!({});
+        result.walk.apply(&mut output);
+        let attribute_failed = output["observation_incomplete_reasons"]
+            .as_array()
+            .is_some_and(|reasons| {
+                reasons.contains(
+                    &serde_json::json!({"kind":"provider_failure", "detail":"attribute_read_failed"}),
+                )
+            });
+        assert_eq!(attribute_failed, read_failed, "{index}: {output}");
+    }
 }
