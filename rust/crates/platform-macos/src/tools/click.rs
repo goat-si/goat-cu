@@ -1207,7 +1207,8 @@ fn def() -> &'static ToolDef {
         name: "click".into(),
         description: "Click a target pid. Prefer `element_token` (from get_window_state): it addresses one snapshot \
             element, works on backgrounded, minimized or off-Space windows, and with count 1 moves no cursor or focus \
-            (count 2-3 may click the element's center; see `count`); \
+            (count 2-3, and a press on a button that lists no AXPress, may click the element's center and report \
+            unverifiable; see `count`); \
             tokens are scoped to (pid, window_id) and go stale when that window is snapshotted again. `x, y` \
             are window-local pixels of the get_window_state screenshot, sent as CGEvent mouse events to a \
             visible window, for surfaces missing from the tree; `modifier` takes cmd/shift/option/ctrl, and \
@@ -1682,6 +1683,7 @@ impl ClickTool {
                         count,
                         foreground: delivery_mode.is_foreground(),
                         cursor_key,
+                        lease: None,
                     },
                 )
                 .await;
@@ -1899,6 +1901,9 @@ impl ClickTool {
 
             // The unadvertised-press selection route discovers without writing;
             // a retained candidate is gated before any selection worker runs.
+            // A search that only ran out of ancestors defers its refusal for an
+            // ordinary button, which may still take the checked pointer route.
+            let mut deferred_selection_refusal: Option<ToolResult> = None;
             if resolved_action == "AXPress" && modifiers.is_empty() {
                 let held = _mutation_lease.take();
                 let leaf = element_guard.clone();
@@ -1921,10 +1926,42 @@ impl ClickTool {
                 match route {
                     FirstSelectionRoute::Next => {}
                     FirstSelectionRoute::Stop(reason) => {
-                        return super::pre_dispatch_refusal(
+                        let refusal = super::pre_dispatch_refusal(
                             "action_unavailable",
                             format!("selection target is unknown: {reason}"),
-                        )
+                        );
+                        let request = PressRequest {
+                            effective_action: effective_action.clone(),
+                            resolved_action: resolved_action.clone(),
+                            button: button_str.clone(),
+                            modifiers: modifiers.clone(),
+                            foreground,
+                            selection_container: false,
+                        };
+                        // Only a search that ran out of ancestors reads the
+                        // element again; every other reason refuses as before.
+                        let allows = if reason == SELECTION_ANCESTOR_LIMIT
+                            && press_request_eligible(&request)
+                        {
+                            let facts_guard = element_guard.clone();
+                            latency::spawn_action_blocking(move || {
+                                let _span = latency::span(latency::Stage::Preflight);
+                                selection_limit_allows_pointer(
+                                    &reason,
+                                    &request,
+                                    &mut NativePressFacts,
+                                    facts_guard.as_ptr() as AXUIElementRef,
+                                )
+                            })
+                            .await
+                            .unwrap_or(false)
+                        } else {
+                            false
+                        };
+                        if !allows {
+                            return refusal;
+                        }
+                        deferred_selection_refusal = Some(refusal);
                     }
                     FirstSelectionRoute::Select((candidate, history)) => {
                         let prior_front = apps::frontmost_pid();
@@ -1958,7 +1995,13 @@ impl ClickTool {
                 }
             }
 
-            if effective_action == "press" && resolved_action == "AXPress" && modifiers.is_empty() {
+            // A deferred refusal already proved an AXButton: the text-input
+            // focus stage has nothing to do and must not act on the element.
+            if deferred_selection_refusal.is_none()
+                && effective_action == "press"
+                && resolved_action == "AXPress"
+                && modifiers.is_empty()
+            {
                 let foreground = delivery_mode.is_foreground();
                 let (held, result) = run_live_native_focus_stage(
                     _mutation_lease.take(),
@@ -1994,6 +2037,54 @@ impl ClickTool {
             } else {
                 None
             };
+
+            // A plain background press on an ordinary button that does not
+            // advertise AXPress: the semantic battery would refuse it, so take
+            // one checked pointer click through the element pointer route. A
+            // deferred selection refusal stands for every other outcome.
+            if deferred_selection_refusal.is_some()
+                || (effective_action == "press" && resolved_action == "AXPress")
+            {
+                let request = PressRequest {
+                    effective_action: effective_action.clone(),
+                    resolved_action: resolved_action.clone(),
+                    button: button_str.clone(),
+                    modifiers: modifiers.clone(),
+                    foreground: delivery_mode.is_foreground(),
+                    selection_container: selection_center.is_some(),
+                };
+                // The request alone settles most presses: read the element
+                // only when it may still take the pointer route.
+                let route = if press_request_eligible(&request) {
+                    let facts_guard = element_guard.clone();
+                    latency::spawn_action_blocking(move || {
+                        let _span = latency::span(latency::Stage::Preflight);
+                        unadvertised_press_route(
+                            &request,
+                            &mut NativePressFacts,
+                            facts_guard.as_ptr() as AXUIElementRef,
+                        )
+                    })
+                    .await
+                    .unwrap_or(UnadvertisedPressRoute::Existing)
+                } else {
+                    UnadvertisedPressRoute::Existing
+                };
+                match press_fallback_step(route, deferred_selection_refusal.take()) {
+                    PressFallbackStep::Pointer => {
+                        return run_checked_pointer_press(
+                            &self.state,
+                            _mutation_lease.take(),
+                            element_guard,
+                            (pid, wid, idx),
+                            cursor_key,
+                        )
+                        .await;
+                    }
+                    PressFallbackStep::Refuse(refusal) => return *refusal,
+                    PressFallbackStep::Continue => {}
+                }
+            }
             let mut selection_pixel = if let Some(screen_center) = selection_center {
                 super::px_frame::resolve_or_refuse(wid)
                     .await
@@ -3504,6 +3595,388 @@ fn prepare_native_focus(
         idx,
         read_back,
     })
+}
+
+/// Which route a plain press takes on an element that does not advertise
+/// AXPress once the selection routes have declined it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnadvertisedPressRoute {
+    /// The existing route: the semantic battery and its refusal.
+    Existing,
+    /// One checked window-local pointer click at the element's center.
+    CheckedPointer,
+}
+
+/// The request as the element branch resolved it.
+#[derive(Clone)]
+struct PressRequest {
+    effective_action: String,
+    resolved_action: String,
+    button: String,
+    modifiers: Vec<String>,
+    foreground: bool,
+    /// A selectable container answers for the element: the selection
+    /// fallback owns the press.
+    selection_container: bool,
+}
+
+/// The three reads the route makes. The actionability reader reads AXRole
+/// only, so the subrole has its own native read.
+trait PressFactsReader {
+    type Element: Copy;
+    fn actions(
+        &mut self,
+        element: Self::Element,
+    ) -> cua_driver_core::actionability::Evidence<Vec<String>>;
+    fn role(&mut self, element: Self::Element) -> cua_driver_core::actionability::Evidence<String>;
+    fn subrole(
+        &mut self,
+        element: Self::Element,
+    ) -> cua_driver_core::actionability::Evidence<String>;
+}
+
+struct NativePressFacts;
+
+impl PressFactsReader for NativePressFacts {
+    type Element = AXUIElementRef;
+    fn actions(
+        &mut self,
+        element: AXUIElementRef,
+    ) -> cua_driver_core::actionability::Evidence<Vec<String>> {
+        use crate::ax::actionability::Reader;
+        crate::ax::actionability::NativeReader.actions(element)
+    }
+    fn role(
+        &mut self,
+        element: AXUIElementRef,
+    ) -> cua_driver_core::actionability::Evidence<String> {
+        use crate::ax::actionability::Reader;
+        crate::ax::actionability::NativeReader.string(element, "AXRole")
+    }
+    fn subrole(
+        &mut self,
+        element: AXUIElementRef,
+    ) -> cua_driver_core::actionability::Evidence<String> {
+        unsafe { native_subrole(element) }
+    }
+}
+
+/// AXSubrole, keeping an absent attribute apart from a failed read.
+///
+/// # Safety
+///
+/// `element` must be a valid, live `AXUIElementRef`.
+unsafe fn native_subrole(
+    element: AXUIElementRef,
+) -> cua_driver_core::actionability::Evidence<String> {
+    if cfg!(test) {
+        panic!("live AX access is forbidden in tests");
+    }
+    let attribute = core_foundation::string::CFString::new("AXSubrole");
+    let mut value: CFTypeRef = std::ptr::null();
+    let code = crate::ax::bindings::AXUIElementCopyAttributeValue(
+        element,
+        attribute.as_concrete_TypeRef(),
+        &mut value,
+    );
+    let decoded = if code == crate::ax::bindings::kAXErrorSuccess {
+        crate::ax::bindings::string_from_cf(value)
+    } else {
+        None
+    };
+    let evidence =
+        crate::ax::actionability::classify_attribute(code, !value.is_null(), decoded, "AXSubrole");
+    if !value.is_null() {
+        CFRelease(value);
+    }
+    evidence
+}
+
+/// Window controls keep their semantic press: a pointer click there closes,
+/// minimizes or resizes the window.
+const WINDOW_CONTROL_SUBROLES: [&str; 4] = [
+    "AXCloseButton",
+    "AXMinimizeButton",
+    "AXZoomButton",
+    "AXFullScreenButton",
+];
+
+/// Whether the request alone still allows the checked pointer route: an
+/// unmodified background left press resolved to AXPress, with no selectable
+/// container. Decided before anything is read from the app.
+fn press_request_eligible(request: &PressRequest) -> bool {
+    request.effective_action == "press"
+        && request.resolved_action == "AXPress"
+        && request.button == "left"
+        && request.modifiers.is_empty()
+        && !request.foreground
+        && !request.selection_container
+}
+
+/// Only an eligible request on an ordinary AXButton whose decoded action
+/// list lacks AXPress takes the checked pointer route. Text inputs, secure
+/// fields and file-name cells (an AXTextField) fail the role check; anything
+/// unproven keeps the existing route. Each read happens only when the
+/// decision still needs it.
+fn unadvertised_press_route<R: PressFactsReader>(
+    request: &PressRequest,
+    reader: &mut R,
+    element: R::Element,
+) -> UnadvertisedPressRoute {
+    use cua_driver_core::actionability::Evidence;
+    use UnadvertisedPressRoute::{CheckedPointer, Existing};
+    if !press_request_eligible(request) {
+        return Existing;
+    }
+    match reader.actions(element) {
+        Evidence::Known(actions) if !actions.iter().any(|action| action == "AXPress") => {}
+        _ => return Existing,
+    }
+    match reader.role(element) {
+        Evidence::Known(role) if role == "AXButton" => {}
+        _ => return Existing,
+    }
+    match reader.subrole(element) {
+        Evidence::Absent => CheckedPointer,
+        Evidence::Known(subrole)
+            if subrole != "AXSecureTextField"
+                && !WINDOW_CONTROL_SUBROLES.contains(&subrole.as_str()) =>
+        {
+            CheckedPointer
+        }
+        _ => Existing,
+    }
+}
+
+/// The reason `discover_selection` gives when it read its 8 roles without
+/// reaching a row or cell (input/ax_actions.rs). A test pins it there.
+const SELECTION_ANCESTOR_LIMIT: &str = "selection ancestor limit reached";
+
+/// Whether a first-selection stop may continue toward the checked pointer
+/// route: only a search that ran out of ancestors, and only for a request
+/// and element the route would take with no selectable container. Any other
+/// reason reads nothing.
+fn selection_limit_allows_pointer<R: PressFactsReader>(
+    reason: &str,
+    request: &PressRequest,
+    reader: &mut R,
+    element: R::Element,
+) -> bool {
+    reason == SELECTION_ANCESTOR_LIMIT
+        && unadvertised_press_route(
+            &PressRequest {
+                selection_container: false,
+                ..request.clone()
+            },
+            reader,
+            element,
+        ) == UnadvertisedPressRoute::CheckedPointer
+}
+
+/// What the element branch does once the route is known.
+enum PressFallbackStep {
+    /// One checked pointer click.
+    Pointer,
+    /// The deferred first-selection refusal, unsent.
+    Refuse(Box<ToolResult>),
+    /// The existing semantic route.
+    Continue,
+}
+
+/// A deferred selection refusal stands for every route except the checked
+/// pointer one, so such a request never reaches the semantic press.
+fn press_fallback_step(
+    route: UnadvertisedPressRoute,
+    deferred: Option<ToolResult>,
+) -> PressFallbackStep {
+    match (route, deferred) {
+        (UnadvertisedPressRoute::CheckedPointer, _) => PressFallbackStep::Pointer,
+        (UnadvertisedPressRoute::Existing, Some(refusal)) => {
+            PressFallbackStep::Refuse(Box::new(refusal))
+        }
+        (UnadvertisedPressRoute::Existing, None) => PressFallbackStep::Continue,
+    }
+}
+
+/// One sample of the actionability battery for a single background pointer
+/// click: every fact, with the window's own hit evidence, evaluated for a
+/// Click under the background-window policy. `stability` persists across
+/// the samples of one wait, which a fresh adapter cannot do. Read-only.
+fn sample_background_click<E, R, H, C>(
+    target: E,
+    window: E,
+    reader: &mut R,
+    scope: &mut H,
+    clock: &C,
+    stability: &mut cua_driver_core::actionability::StabilitySampler,
+) -> cua_driver_core::actionability::ActionabilityReport
+where
+    E: Copy,
+    R: crate::ax::actionability::Reader<Element = E>,
+    H: super::actionability::ScopeReader<E>,
+    C: cua_driver_core::actionability::Clock,
+{
+    let mut facts = super::actionability::Adapter::new(
+        target,
+        window,
+        super::actionability::Scope::WindowInternal,
+    )
+    .facts(reader, scope, clock);
+    facts.stable = stability.observe(clock, facts.bounds.clone());
+    super::actionability::evaluate(
+        cua_driver_core::actionability::Intent::Click,
+        cua_driver_core::actionability::Policy::background_window(),
+        &facts,
+    )
+}
+
+/// One live sample: bind the retained element to the admitted pid and exact
+/// window again, then sample it. An unproven binding is unknown, never a pass.
+fn background_click_sample<C: cua_driver_core::actionability::Clock>(
+    element: &crate::ax::snapshot::RetainedElement,
+    pid: i32,
+    window_id: u32,
+    stability: &mut cua_driver_core::actionability::StabilitySampler,
+    clock: &C,
+) -> cua_driver_core::actionability::ActionabilityReport {
+    use super::actionability::semantic;
+    use cua_driver_core::actionability::Evidence;
+    let (target, window) = match semantic::bind_exact_with(
+        &mut semantic::NativeWindowReader,
+        element.clone(),
+        pid,
+        window_id,
+    ) {
+        Evidence::Known(bound) => bound,
+        Evidence::Unknown(reason) => return semantic::unavailable(reason),
+        Evidence::Absent => return semantic::unavailable("target binding absent".into()),
+    };
+    sample_background_click(
+        target.as_ptr() as AXUIElementRef,
+        window.as_ptr() as AXUIElementRef,
+        &mut crate::ax::actionability::NativeReader,
+        &mut super::actionability::scope::NativeScope::new(pid),
+        clock,
+        stability,
+    )
+}
+
+/// The checked pointer press: the background pointer battery first, then
+/// `deliver` exactly once. A battery that does not pass, including one that
+/// stays transient until `budget`, refuses with nothing sent. Every result
+/// states that the element click used the pointer route.
+async fn checked_pointer_press<L, C, S, A, F>(
+    clock: std::sync::Arc<C>,
+    budget: std::time::Duration,
+    lease: L,
+    sample: S,
+    deliver: A,
+) -> ToolResult
+where
+    L: Sync,
+    C: cua_driver_core::actionability::Clock + Send + Sync + 'static,
+    S: Fn(
+            &mut cua_driver_core::actionability::StabilitySampler,
+            &C,
+        ) -> cua_driver_core::actionability::ActionabilityReport
+        + Send
+        + Sync
+        + 'static,
+    A: FnOnce(L) -> F,
+    F: std::future::Future<Output = ToolResult>,
+{
+    let sample = std::sync::Arc::new(sample);
+    let stability = std::sync::Arc::new(std::sync::Mutex::new(
+        cua_driver_core::actionability::StabilitySampler::default(),
+    ));
+    let probe_clock = clock.clone();
+    let result = super::actionability::dispatch_semantic(
+        &*clock,
+        budget,
+        lease,
+        move |_, _| {
+            let sample = sample.clone();
+            let stability = stability.clone();
+            let clock = probe_clock.clone();
+            Box::pin(async move {
+                let sampled = latency::spawn_blocking(move || {
+                    let Ok(mut stability) = stability.lock() else {
+                        return super::actionability::semantic::unavailable(
+                            "pointer sample state is unavailable".into(),
+                        );
+                    };
+                    sample(&mut stability, &clock)
+                })
+                .await;
+                sampled.unwrap_or_else(|error| {
+                    super::actionability::semantic::unavailable(format!(
+                        "pointer sample worker failed: {error}"
+                    ))
+                })
+            })
+        },
+        deliver,
+    )
+    .await;
+    super::element_simulate::note(match result {
+        Ok(result) | Err(result) => result,
+    })
+}
+
+/// A plain background press on an ordinary button that does not advertise
+/// AXPress, under the lease the element branch already holds: the stricter
+/// WindowPointer gate, the background pointer battery, then one checked
+/// click through the element pointer route.
+async fn run_checked_pointer_press(
+    state: &ToolState,
+    lease: Option<super::BackgroundMutationLease>,
+    element: crate::ax::snapshot::RetainedElement,
+    (pid, wid, idx): (i32, u32, usize),
+    cursor_key: String,
+) -> ToolResult {
+    let Some(lease) = lease else {
+        return super::element_simulate::note(super::pre_dispatch_refusal(
+            "background_unavailable",
+            "click: the element route holds no background lease for the pointer route; \
+             nothing was sent.",
+        ));
+    };
+    // The pointer route is a stricter rung than the semantic gate the
+    // element branch passed: gate it on the same lease, and refuse rather
+    // than fall back when it does not hold.
+    if let Err(refusal) = lease
+        .gate_again(
+            wid,
+            Some(element.as_ptr()),
+            cua_driver_core::background_input::BackgroundAction::WindowPointer,
+        )
+        .await
+    {
+        return super::element_simulate::note(refusal);
+    }
+    let sampled = element.clone();
+    checked_pointer_press(
+        std::sync::Arc::new(super::actionability::semantic_clock()),
+        cua_driver_core::actionability::DEFAULT_BUDGET,
+        lease,
+        move |stability, clock| background_click_sample(&sampled, pid, wid, stability, clock),
+        |lease| {
+            super::element_pointer::click_element(
+                state,
+                super::element_pointer::ElementClick {
+                    pid,
+                    window_id: wid,
+                    idx,
+                    element,
+                    count: 1,
+                    foreground: false,
+                    cursor_key,
+                    lease: Some(lease),
+                },
+            )
+        },
+    )
+    .await
 }
 
 enum FirstSelectionRoute<T> {
@@ -8282,5 +8755,698 @@ mod finder_title_tests {
             !title_names_target("Recents", "Downloads — Local", "Desktop"),
             "another location"
         );
+    }
+}
+
+#[cfg(test)]
+mod checked_pointer_press_tests {
+    use super::super::actionability::{Scope, ScopeReader};
+    use super::*;
+    use cua_driver_core::action_record::ActionEffect;
+    use cua_driver_core::actionability::{
+        Clock, Evidence, Hit, Intent, Occluder, Point, Policy, Rect, StabilitySampler, Verdict,
+    };
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use UnadvertisedPressRoute::{CheckedPointer, Existing};
+
+    /// A plain background left press, as the element branch resolves it.
+    fn press(modifiers: &[&str]) -> PressRequest {
+        PressRequest {
+            effective_action: "press".into(),
+            resolved_action: "AXPress".into(),
+            button: "left".into(),
+            modifiers: modifiers.iter().map(|m| (*m).to_owned()).collect(),
+            foreground: false,
+            selection_container: false,
+        }
+    }
+
+    /// The three reads the route makes, as an app answers them, with the
+    /// reads it was asked for.
+    struct Element {
+        actions: Evidence<Vec<String>>,
+        role: Evidence<String>,
+        subrole: Evidence<String>,
+        reads: Vec<&'static str>,
+    }
+    impl PressFactsReader for Element {
+        type Element = u8;
+        fn actions(&mut self, _: u8) -> Evidence<Vec<String>> {
+            self.reads.push("actions");
+            self.actions.clone()
+        }
+        fn role(&mut self, _: u8) -> Evidence<String> {
+            self.reads.push("role");
+            self.role.clone()
+        }
+        fn subrole(&mut self, _: u8) -> Evidence<String> {
+            self.reads.push("subrole");
+            self.subrole.clone()
+        }
+    }
+
+    fn element(role: &str, actions: &[&str]) -> Element {
+        Element {
+            actions: Evidence::Known(actions.iter().map(|a| (*a).to_owned()).collect()),
+            role: Evidence::Known(role.to_owned()),
+            subrole: Evidence::Absent,
+            reads: Vec::new(),
+        }
+    }
+
+    /// The route through the same function the element branch calls.
+    fn route(request: &PressRequest, mut element: Element) -> UnadvertisedPressRoute {
+        unadvertised_press_route(request, &mut element, 0)
+    }
+
+    #[test]
+    fn checked_pointer_press_routes_a_plain_background_button_press() {
+        for actions in [
+            &[][..],
+            &["AXShowMenu"][..],
+            &["AXScrollToVisible", "AXShowMenu"][..],
+        ] {
+            assert_eq!(
+                route(&press(&[]), element("AXButton", actions)),
+                CheckedPointer,
+                "{actions:?}"
+            );
+        }
+        let mut toolbar = element("AXButton", &[]);
+        toolbar.subrole = Evidence::Known("AXToolbarButton".into());
+        assert_eq!(route(&press(&[]), toolbar), CheckedPointer);
+    }
+
+    #[test]
+    fn checked_pointer_press_keeps_the_selection_route() {
+        let request = PressRequest {
+            selection_container: true,
+            ..press(&[])
+        };
+        assert_eq!(route(&request, element("AXButton", &[])), Existing);
+    }
+
+    #[test]
+    fn checked_pointer_press_keeps_an_advertised_or_unknown_press() {
+        for actions in [&["AXPress"][..], &["AXShowMenu", "AXPress"][..]] {
+            assert_eq!(
+                route(&press(&[]), element("AXButton", actions)),
+                Existing,
+                "{actions:?}"
+            );
+        }
+        for actions in [
+            Evidence::Unknown("AX error -25204".into()),
+            Evidence::Absent,
+        ] {
+            let mut button = element("AXButton", &[]);
+            button.actions = actions;
+            assert_eq!(route(&press(&[]), button), Existing);
+        }
+    }
+
+    #[test]
+    fn checked_pointer_press_excludes_inputs_modifiers_and_other_roles() {
+        // Text inputs (a file-name cell is an AXTextField naming a file),
+        // secure fields and every role with its own route keep it.
+        for role in [
+            "AXTextField",
+            "AXTextArea",
+            "AXSearchField",
+            "AXSecureTextField",
+            "AXComboBox",
+            "AXRow",
+            "AXCell",
+            "AXLink",
+            "AXMenuItem",
+            "AXStaticText",
+            "AXPopUpButton",
+            "AXMenuButton",
+            "AXRadioButton",
+            "AXCheckBox",
+            "AXDisclosureTriangle",
+            "AXGroup",
+        ] {
+            assert_eq!(route(&press(&[]), element(role, &[])), Existing, "{role}");
+        }
+        for subrole in [
+            "AXSecureTextField",
+            "AXCloseButton",
+            "AXMinimizeButton",
+            "AXZoomButton",
+            "AXFullScreenButton",
+        ] {
+            let mut button = element("AXButton", &[]);
+            button.subrole = Evidence::Known(subrole.into());
+            assert_eq!(route(&press(&[]), button), Existing, "{subrole}");
+        }
+        for (role, subrole) in [
+            (
+                Evidence::Unknown("AX error -25204".into()),
+                Evidence::Absent,
+            ),
+            (Evidence::Absent, Evidence::Absent),
+            (
+                Evidence::Known("AXButton".into()),
+                Evidence::Unknown("AX error -25204".into()),
+            ),
+        ] {
+            let unproven = Element {
+                role,
+                subrole,
+                ..element("AXButton", &[])
+            };
+            assert_eq!(route(&press(&[]), unproven), Existing);
+        }
+        for request in [
+            press(&["cmd"]),
+            PressRequest {
+                foreground: true,
+                ..press(&[])
+            },
+            PressRequest {
+                button: "right".into(),
+                ..press(&[])
+            },
+            PressRequest {
+                button: "middle".into(),
+                ..press(&[])
+            },
+            PressRequest {
+                effective_action: "show_menu".into(),
+                resolved_action: "AXShowMenu".into(),
+                ..press(&[])
+            },
+            PressRequest {
+                effective_action: "open".into(),
+                resolved_action: "AXOpen".into(),
+                ..press(&[])
+            },
+            PressRequest {
+                resolved_action: "AXOpen".into(),
+                ..press(&[])
+            },
+        ] {
+            assert_eq!(route(&request, element("AXButton", &[])), Existing);
+        }
+    }
+
+    #[test]
+    fn checked_pointer_press_reads_only_what_the_decision_needs() {
+        let reads = |request: &PressRequest, mut element: Element| {
+            unadvertised_press_route(request, &mut element, 0);
+            element.reads
+        };
+        // The request alone settles it: nothing is read from the app.
+        for request in [
+            press(&["cmd"]),
+            PressRequest {
+                foreground: true,
+                ..press(&[])
+            },
+            PressRequest {
+                selection_container: true,
+                ..press(&[])
+            },
+            PressRequest {
+                effective_action: "show_menu".into(),
+                resolved_action: "AXShowMenu".into(),
+                ..press(&[])
+            },
+        ] {
+            assert!(reads(&request, element("AXButton", &[])).is_empty());
+        }
+        // A listed AXPress ends it after the action list; another role
+        // after the role.
+        assert_eq!(
+            reads(&press(&[]), element("AXButton", &["AXPress"])),
+            ["actions"]
+        );
+        assert_eq!(
+            reads(&press(&[]), element("AXTextField", &[])),
+            ["actions", "role"]
+        );
+        assert_eq!(
+            reads(&press(&[]), element("AXButton", &[])),
+            ["actions", "role", "subrole"]
+        );
+        // A selection stop for any other reason reads nothing.
+        let mut button = element("AXButton", &[]);
+        assert!(!selection_limit_allows_pointer(
+            "AXPress capability is unknown",
+            &press(&[]),
+            &mut button,
+            0
+        ));
+        assert!(button.reads.is_empty());
+    }
+
+    // ── The background pointer battery ─────────────────────────────────
+
+    const FRAME: Rect = Rect {
+        x: 100.0,
+        y: 100.0,
+        width: 50.0,
+        height: 20.0,
+    };
+
+    /// A button as the actionability reader sees it.
+    struct Button {
+        enabled: Evidence<bool>,
+        frame: Evidence<Rect>,
+        /// Every frame read finds it somewhere else.
+        moving: bool,
+        frame_reads: usize,
+    }
+    impl Button {
+        fn plain() -> Self {
+            Self {
+                enabled: Evidence::Known(true),
+                frame: Evidence::Known(FRAME),
+                moving: false,
+                frame_reads: 0,
+            }
+        }
+    }
+    impl crate::ax::actionability::Reader for Button {
+        type Element = u8;
+        fn boolean(&mut self, _: u8, attribute: &str) -> Evidence<bool> {
+            if attribute == "AXEnabled" {
+                self.enabled.clone()
+            } else {
+                Evidence::Absent
+            }
+        }
+        fn string(&mut self, _: u8, attribute: &str) -> Evidence<String> {
+            // The native reader reads nothing else.
+            assert_eq!(attribute, "AXRole");
+            Evidence::Known("AXButton".into())
+        }
+        fn actions(&mut self, _: u8) -> Evidence<Vec<String>> {
+            Evidence::Known(Vec::new())
+        }
+        fn frame(&mut self, _: u8) -> Evidence<Rect> {
+            self.frame_reads += 1;
+            match &self.frame {
+                Evidence::Known(rect) if self.moving => Evidence::Known(Rect {
+                    x: rect.x + self.frame_reads as f64 * 10.0,
+                    ..*rect
+                }),
+                other => other.clone(),
+            }
+        }
+        fn settable(&mut self, _: u8, _: &str) -> Evidence<bool> {
+            Evidence::Known(false)
+        }
+    }
+
+    /// The button's window, answering for its own app-rooted hit test.
+    struct Window {
+        visible: Evidence<bool>,
+        hit: Hit,
+    }
+    impl Window {
+        fn clear() -> Self {
+            Self {
+                visible: Evidence::Known(true),
+                hit: Hit::ReachesTarget,
+            }
+        }
+    }
+    impl ScopeReader<u8> for Window {
+        fn visible(&mut self, _: u8, _: u8, _: Scope) -> Evidence<bool> {
+            self.visible.clone()
+        }
+        fn offscreen(&mut self, _: u8, _: u8, _: Scope) -> Evidence<bool> {
+            Evidence::Known(false)
+        }
+        fn hit(&mut self, _: u8, _: u8, scope: Scope, _: Point) -> Hit {
+            assert_eq!(scope, Scope::WindowInternal, "window-internal hits only");
+            self.hit.clone()
+        }
+    }
+
+    fn other_window() -> Hit {
+        Hit::Occluded(Occluder {
+            role: Some("AXWindow".into()),
+            name: None,
+            bounds: None,
+        })
+    }
+
+    #[derive(Default)]
+    struct ManualClock(Mutex<Duration>);
+    impl ManualClock {
+        fn at(&self, ms: u64) {
+            *self.0.lock().unwrap() = Duration::from_millis(ms);
+        }
+    }
+    impl Clock for ManualClock {
+        fn now(&self) -> Duration {
+            *self.0.lock().unwrap()
+        }
+        fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            *self.0.lock().unwrap() += duration;
+            Box::pin(async {})
+        }
+    }
+
+    fn verdicts(button: &mut Button, window: &mut Window, at_ms: &[u64]) -> Vec<Verdict> {
+        let clock = ManualClock::default();
+        let mut stability = StabilitySampler::default();
+        at_ms
+            .iter()
+            .map(|ms| {
+                clock.at(*ms);
+                sample_background_click(1_u8, 2_u8, button, window, &clock, &mut stability).verdict
+            })
+            .collect()
+    }
+
+    #[test]
+    fn checked_pointer_press_battery_passes_a_stable_visible_button_without_axpress() {
+        let verdicts = verdicts(&mut Button::plain(), &mut Window::clear(), &[0, 17, 34]);
+        assert!(
+            verdicts[..2]
+                .iter()
+                .all(|verdict| matches!(verdict, Verdict::Transient { .. })),
+            "{verdicts:?}"
+        );
+        assert_eq!(verdicts[2], Verdict::Pass);
+        // The semantic battery the base runs refuses the same button.
+        let facts = super::super::actionability::Adapter::new(1_u8, 2_u8, Scope::WindowInternal)
+            .semantic_facts(
+                &mut Button::plain(),
+                &mut Window::clear(),
+                &ManualClock::default(),
+            );
+        assert!(matches!(
+            super::super::actionability::evaluate(Intent::Click, Policy::headless(), &facts)
+                .verdict,
+            Verdict::Terminal {
+                code: "policy_denied",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn checked_pointer_press_battery_refuses_unproven_targets() {
+        let cases = [
+            (
+                "missing frame",
+                Button {
+                    frame: Evidence::Absent,
+                    ..Button::plain()
+                },
+                Window::clear(),
+            ),
+            (
+                "moving frame",
+                Button {
+                    moving: true,
+                    ..Button::plain()
+                },
+                Window::clear(),
+            ),
+            (
+                "hit in another window or on another element",
+                Button::plain(),
+                Window {
+                    hit: other_window(),
+                    ..Window::clear()
+                },
+            ),
+            (
+                "unknown hit",
+                Button::plain(),
+                Window {
+                    hit: Hit::Unknown,
+                    ..Window::clear()
+                },
+            ),
+            (
+                "hidden or minimized window",
+                Button::plain(),
+                Window {
+                    visible: Evidence::Known(false),
+                    ..Window::clear()
+                },
+            ),
+            (
+                "disabled",
+                Button {
+                    enabled: Evidence::Known(false),
+                    ..Button::plain()
+                },
+                Window::clear(),
+            ),
+        ];
+        for (case, mut button, mut window) in cases {
+            let verdicts = verdicts(&mut button, &mut window, &[0, 17, 34, 51, 68, 1000]);
+            assert!(!verdicts.contains(&Verdict::Pass), "{case}: {verdicts:?}");
+        }
+    }
+
+    // ── Battery, then exactly one delivery ─────────────────────────────
+
+    /// A clock on tokio's paused time: waits advance only when nothing runs.
+    struct PausedClock(tokio::time::Instant);
+    impl Clock for PausedClock {
+        fn now(&self) -> Duration {
+            self.0.elapsed()
+        }
+        fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(tokio::time::sleep(duration))
+        }
+    }
+
+    fn delivered_click() -> ToolResult {
+        use super::super::element_pointer::{ElementPoint, Performed, PointerClicks};
+        let point = ElementPoint {
+            screen: (125.0, 110.0),
+            window_local: (125.0, 110.0),
+        };
+        super::super::element_pointer::performed_result(
+            3,
+            7,
+            1,
+            false,
+            &Performed::Clicks(PointerClicks {
+                point,
+                primer: true,
+            }),
+            "",
+        )
+    }
+
+    async fn press_through_battery(button: Button, window: Window) -> (ToolResult, usize) {
+        let deliveries = Arc::new(AtomicUsize::new(0));
+        let counted = deliveries.clone();
+        let readers = Mutex::new((button, window));
+        let result = checked_pointer_press(
+            Arc::new(PausedClock(tokio::time::Instant::now())),
+            cua_driver_core::actionability::DEFAULT_BUDGET,
+            (),
+            move |stability: &mut StabilitySampler, clock: &PausedClock| {
+                let mut readers = readers.lock().unwrap();
+                let (button, window) = &mut *readers;
+                sample_background_click(1_u8, 2_u8, button, window, clock, stability)
+            },
+            |()| async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                delivered_click()
+            },
+        )
+        .await;
+        (result, deliveries.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn checked_pointer_press_delivers_only_after_the_battery() {
+        let (result, deliveries) = press_through_battery(Button::plain(), Window::clear()).await;
+        assert_eq!(deliveries, 1);
+        let structured = result.structured_content.clone().unwrap();
+        assert_eq!(structured["effect"], "unverifiable");
+        assert_eq!(structured["verified"], false);
+        assert_eq!(structured["clicks_posted"], 1);
+        assert_eq!(structured["note"], "Element click used the pointer route.");
+        assert_eq!(
+            result.action_record.as_ref().map(|record| record.effect),
+            Some(ActionEffect::Unverifiable)
+        );
+
+        for (case, button, window) in [
+            (
+                "hit in another window",
+                Button::plain(),
+                Window {
+                    hit: other_window(),
+                    ..Window::clear()
+                },
+            ),
+            (
+                "frame never settles",
+                Button {
+                    moving: true,
+                    ..Button::plain()
+                },
+                Window::clear(),
+            ),
+        ] {
+            let (result, deliveries) = press_through_battery(button, window).await;
+            assert_eq!(deliveries, 0, "{case}");
+            let structured = result.structured_content.clone().unwrap();
+            assert_eq!(structured["code"], "element_not_actionable", "{case}");
+            assert_eq!(structured["effect"], "refused", "{case}");
+            assert_eq!(structured["note"], "Element click used the pointer route.");
+            assert_eq!(
+                result.disposition,
+                Some(cua_driver_contract::ErrorDisposition::NOT_DELIVERED),
+                "{case}"
+            );
+        }
+    }
+
+    // ── A selection search that stops at its ancestor limit ────────────
+
+    /// An AX chain for the selection search: element 0 is the target and
+    /// each element's parent is the next one.
+    struct Chain {
+        roles: Vec<&'static str>,
+        failing_parent: Option<usize>,
+    }
+    impl crate::input::ax_actions::SelectionEvidenceReader for Chain {
+        type Element = usize;
+        fn role(&mut self, element: &usize) -> Evidence<String> {
+            self.roles
+                .get(*element)
+                .map_or(Evidence::Absent, |role| Evidence::Known((*role).into()))
+        }
+        fn parent(&mut self, element: &usize) -> Evidence<usize> {
+            if self.failing_parent == Some(*element) {
+                return Evidence::Unknown("AX error -25204".into());
+            }
+            if element + 1 < self.roles.len() {
+                Evidence::Known(element + 1)
+            } else {
+                Evidence::Absent
+            }
+        }
+        fn selected(&mut self, _: &usize) -> Evidence<bool> {
+            Evidence::Absent
+        }
+    }
+
+    /// A button ten groups below its window.
+    fn deep_button(failing_parent: Option<usize>) -> Chain {
+        let mut roles = vec!["AXButton"];
+        roles.extend(std::iter::repeat_n("AXGroup", 10));
+        roles.extend(["AXWindow", "AXApplication"]);
+        Chain {
+            roles,
+            failing_parent,
+        }
+    }
+
+    fn selection_stop(chain: Chain) -> String {
+        match crate::input::ax_actions::discover_selection_with(chain, 0) {
+            crate::input::ax_actions::SelectionDiscovery::Unknown(reason) => reason,
+            _ => panic!("the selection search settles nothing for a deep chain"),
+        }
+    }
+
+    #[test]
+    fn checked_pointer_press_takes_a_deep_button_past_the_selection_limit() {
+        let reason = selection_stop(deep_button(None));
+        assert_eq!(reason, SELECTION_ANCESTOR_LIMIT);
+        assert!(selection_limit_allows_pointer(
+            &reason,
+            &press(&[]),
+            &mut element("AXButton", &[]),
+            0
+        ));
+    }
+
+    #[test]
+    fn checked_pointer_press_keeps_other_selection_uncertainty_refused() {
+        let limit = selection_stop(deep_button(None));
+        let allows = |reason: &str, request: &PressRequest, mut element: Element| {
+            selection_limit_allows_pointer(reason, request, &mut element, 0)
+        };
+        for role in [
+            "AXTextField",
+            "AXSecureTextField",
+            "AXRow",
+            "AXStaticText",
+            "AXPopUpButton",
+        ] {
+            assert!(!allows(&limit, &press(&[]), element(role, &[])), "{role}");
+        }
+        assert!(!allows(
+            &limit,
+            &press(&[]),
+            element("AXButton", &["AXPress"])
+        ));
+        let mut unknown_actions = element("AXButton", &[]);
+        unknown_actions.actions = Evidence::Unknown("AX error -25204".into());
+        assert!(!allows(&limit, &press(&[]), unknown_actions));
+        let mut unknown_subrole = element("AXButton", &[]);
+        unknown_subrole.subrole = Evidence::Unknown("AX error -25204".into());
+        assert!(!allows(&limit, &press(&[]), unknown_subrole));
+        assert!(!allows(&limit, &press(&["cmd"]), element("AXButton", &[])));
+        let foreground = PressRequest {
+            foreground: true,
+            ..press(&[])
+        };
+        assert!(!allows(&limit, &foreground, element("AXButton", &[])));
+
+        let failed_parent = selection_stop(deep_button(Some(2)));
+        assert_ne!(failed_parent, SELECTION_ANCESTOR_LIMIT);
+        for reason in [
+            "AXPress capability is unknown".to_owned(),
+            "AXRole unavailable".to_owned(),
+            failed_parent,
+            crate::input::ax_actions::disabled_action_refusal("AXPress", false).to_string(),
+        ] {
+            assert!(
+                !allows(&reason, &press(&[]), element("AXButton", &[])),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn checked_pointer_press_returns_the_deferred_refusal_for_any_other_route() {
+        let deferred = || {
+            super::super::pre_dispatch_refusal(
+                "action_unavailable",
+                format!("selection target is unknown: {SELECTION_ANCESTOR_LIMIT}"),
+            )
+        };
+        match press_fallback_step(Existing, Some(deferred())) {
+            PressFallbackStep::Refuse(result) => {
+                let structured = result.structured_content.unwrap();
+                assert_eq!(structured["code"], "action_unavailable");
+                assert_eq!(structured["dispatched"], false);
+            }
+            _ => panic!("a deferred selection refusal is returned unchanged"),
+        }
+        assert!(matches!(
+            press_fallback_step(CheckedPointer, Some(deferred())),
+            PressFallbackStep::Pointer
+        ));
+        assert!(matches!(
+            press_fallback_step(Existing, None),
+            PressFallbackStep::Continue
+        ));
+        assert!(matches!(
+            press_fallback_step(CheckedPointer, None),
+            PressFallbackStep::Pointer
+        ));
     }
 }
