@@ -1394,6 +1394,8 @@ async fn pauses_between_steps_but_not_after_the_last() {
     )
     .unwrap_or_else(|error| panic!("invalid plan: {}", error.message));
     plan.pause = super::StepPause::Recorded(harness.events.clone());
+    let (_deadline_tx, deadline_rx) = tokio::sync::oneshot::channel();
+    plan.step_deadline = Some(super::StepDeadline::Trigger(deadline_rx));
     let result = plan.run(harness.registry.clone(), None).await;
     assert_ne!(result.is_error, Some(true), "{}", text(&result));
     assert_eq!(
