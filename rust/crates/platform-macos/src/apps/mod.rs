@@ -43,6 +43,11 @@ pub struct AppInfo {
     /// `mtime`, when available. `None` when the field could not be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_used: Option<String>,
+    /// #299: opaque label of the running process instance (its kernel start
+    /// time), so a later answer can tell a reused pid apart. `None` for an
+    /// installed-only entry or when it could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_instance: Option<String>,
 }
 
 /// Enumerate running, user-facing apps (the `NSApplicationActivationPolicyRegular`
@@ -300,6 +305,7 @@ fn running_apps_from_processes(
                 launch_path: Some(app_path.clone()),
                 kind: Some("desktop".to_owned()),
                 last_used: None,
+                process_instance: None,
             });
         }
     }
@@ -409,6 +415,7 @@ fn enumerate_running_apps() -> (Vec<AppInfo>, RunningAppStates) {
                 launch_path,
                 kind: Some("desktop".to_owned()),
                 last_used: None,
+                process_instance: None,
             });
         }
     }
@@ -985,6 +992,7 @@ fn read_app_plist(plist_path: &std::path::Path) -> Option<AppInfo> {
         launch_path: None,
         kind: None,
         last_used: None,
+        process_instance: None,
     })
 }
 
@@ -1362,6 +1370,7 @@ mod tests {
             launch_path: None,
             kind: None,
             last_used: None,
+            process_instance: None,
         }
     }
 

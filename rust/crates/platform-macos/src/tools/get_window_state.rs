@@ -614,6 +614,15 @@ impl Tool for GetWindowStateTool {
         let mut prefetched_facts: Option<cua_driver_core::background_input::BackgroundTargetFacts> =
             None;
         let abandon_events_before_prefetch = crate::capture::native_capture_abandon_events();
+        // AD-G2: the process instance this read names, taken before the walk
+        // and again before publication; a read that spans a restart publishes
+        // a failed capture, whose tokens refuse.
+        let instance_before = latency::spawn_blocking(move || {
+            crate::process_identity::process_fingerprint(i64::from(pid))
+        })
+        .await
+        .ok()
+        .flatten();
         let prefetched_capture = prefetch_capture(should_capture, want_tree, move || {
             crate::capture::screenshot_window_image(window_id)
         });
@@ -739,6 +748,7 @@ impl Tool for GetWindowStateTool {
         let screenshot = if should_capture {
             let out_file = screenshot_out_file.clone();
             let panel_args = args.clone();
+            let fast_path_session = session_id.clone();
             let side_facts = !want_tree && !display_only;
             let res = latency::spawn_blocking(move || {
                 std::thread::scope(|scope| {
@@ -770,7 +780,13 @@ impl Tool for GetWindowStateTool {
                     &bounds,
                     || crate::capture::screenshot_window_image(window_id),
                 )?;
-                crate::fast_path_guard::record_read_image(pid, window_id, &raw, &bounds);
+                crate::fast_path_guard::record_read_image(
+                    pid,
+                    window_id,
+                    &raw,
+                    &bounds,
+                    fast_path_session.as_deref(),
+                );
                 // Resize and encode once from the raw pixels; the PNG bytes
                 // are identical to the former encode-decode-resize round trip.
                 // The model-sized screenshot is capped at point resolution by
@@ -948,18 +964,31 @@ impl Tool for GetWindowStateTool {
             (screenshot_resize_scale.is_some() && refreshed.is_none())
                 .then(|| crate::ax::snapshot::AxSnapshot::from_nodes(&[]))
         });
+        let instance_after = latency::spawn_blocking(move || {
+            crate::process_identity::process_fingerprint(i64::from(pid))
+        })
+        .await
+        .ok()
+        .flatten();
+        let instance =
+            crate::process_identity::instance_capture(pid, instance_before, instance_after);
+        // #299: report the instance only when the read proved one process
+        // start throughout.
+        let process_instance = crate::process_identity::capture_label(&instance);
         let (snapshot_id, replaced) = match refreshed {
             Some(id) => (Some(id), None),
             None => snapshot_payload
                 .filter(|_| scope_matched && !observation_only)
                 .and_then(|payload| {
-                    self.state.snapshots.publish_sized_for_session(
+                    crate::process_identity::publish_read(
+                        &self.state.snapshots,
                         pid,
                         u64::from(window_id),
                         payload,
                         session_id.as_deref(),
                         screenshot_resize_scale,
                         window_size,
+                        instance,
                     )
                 })
                 .unzip(),
@@ -971,9 +1000,14 @@ impl Tool for GetWindowStateTool {
                     u64::from(window_id),
                     sid,
                     &tree.nodes,
+                    session_id.as_deref(),
                 );
                 if screenshot.is_none() {
-                    crate::fast_path_guard::record_window(pid, window_id);
+                    crate::fast_path_guard::record_window(
+                        pid,
+                        window_id,
+                        session_id.as_deref(),
+                    );
                 }
             }
         }
@@ -1057,6 +1091,9 @@ impl Tool for GetWindowStateTool {
             requested_pid,
             external_panel,
         );
+        if let Some(label) = &process_instance {
+            structured["process_instance"] = serde_json::json!(label);
+        }
         // Surface 6: an opaque snapshot identifier consumers can log
         // alongside the per-element tokens for debug correlation. Same value
         // embedded in every `element_token` emitted in `elements[]` above.

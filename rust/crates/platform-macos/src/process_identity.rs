@@ -1,6 +1,9 @@
 //! Kernel-backed process instance identity for protected snapshots.
 
 use cua_driver_core::browser::ProcessFingerprint;
+use cua_driver_core::snapshot_store::{
+    InstanceCapture, InstanceEvidence, SnapshotPayload, SnapshotStore,
+};
 
 use crate::ax::enablement::{process_start_stamp_with, read_process_info};
 
@@ -21,10 +24,93 @@ impl ProcessReader for KernelReader {
     }
 }
 
-// U33B will connect this supplier to snapshot publication and resolution.
-#[allow(dead_code)]
 pub(crate) fn process_fingerprint(pid: i64) -> Option<ProcessFingerprint> {
     fingerprint_with(pid, &KernelReader)
+}
+
+/// #299: opaque label of the process instance `pid` names now (its kernel
+/// start time in microseconds), for answers that report a pid. Compared for
+/// equality only; `None` when the start time could not be read twice alike.
+pub(crate) fn instance_label(pid: i32) -> Option<String> {
+    process_fingerprint(i64::from(pid))?
+        .start_time
+        .map(|start| start.to_string())
+}
+
+/// The label a read's instance capture reports: only a capture that proved
+/// one process start for the whole read names it.
+pub(crate) fn capture_label(capture: &InstanceCapture) -> Option<String> {
+    match capture {
+        InstanceCapture::Captured(fingerprint) => {
+            fingerprint.start_time.map(|start| start.to_string())
+        }
+        InstanceCapture::Failed(_) => None,
+    }
+}
+
+/// The process instance a read observed: the fingerprints taken before and
+/// after it must name the same start of `pid`. Anything else is a failed
+/// capture, which the store keeps protected (its tokens refuse) until a fresh
+/// read replaces it.
+pub(crate) fn instance_capture(
+    pid: i32,
+    before: Option<ProcessFingerprint>,
+    after: Option<ProcessFingerprint>,
+) -> InstanceCapture {
+    match (before, after) {
+        (Some(before), Some(after))
+            if before.pid == i64::from(pid)
+                && before.start_time.is_some()
+                && before.matches(&after) =>
+        {
+            InstanceCapture::Captured(after)
+        }
+        (Some(_), Some(_)) => InstanceCapture::Failed("the process changed during the read".into()),
+        _ => InstanceCapture::Failed("process identity could not be read".into()),
+    }
+}
+
+/// Live evidence for an element-token action on `pid`, read off the async
+/// runtime. A call without a token resolves nothing and needs none.
+pub(crate) async fn evidence(args: &serde_json::Value, pid: i32) -> InstanceEvidence {
+    if args.get("element_token").is_none() {
+        return InstanceEvidence::NotChecked;
+    }
+    match crate::goat::action_latency::spawn_blocking(move || {
+        process_fingerprint(i64::from(pid))
+    })
+    .await
+    {
+        Ok(Some(fingerprint)) => InstanceEvidence::Live(fingerprint),
+        Ok(None) => InstanceEvidence::Unavailable("process identity could not be read".into()),
+        Err(error) => {
+            InstanceEvidence::Unavailable(format!("process identity task failed: {error}"))
+        }
+    }
+}
+
+/// Publish a window read's element snapshot with the process instance it was
+/// read from, so a token from it refuses once that process is gone.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn publish_read<S: SnapshotPayload>(
+    store: &SnapshotStore<S>,
+    pid: i32,
+    window_id: u64,
+    payload: S,
+    session: Option<&str>,
+    screenshot_scale: Option<f64>,
+    window_size: Option<(f64, f64)>,
+    capture: InstanceCapture,
+) -> Option<(u32, Vec<u32>)> {
+    store.publish_sized_for_session_with_instance(
+        pid,
+        window_id,
+        payload,
+        session,
+        screenshot_scale,
+        window_size,
+        capture,
+    )
 }
 
 fn fingerprint_with(pid: i64, reader: &impl ProcessReader) -> Option<ProcessFingerprint> {
@@ -185,5 +271,67 @@ mod u33_identity_tests {
     fn stamp_change_during_executable_read_is_unavailable() {
         let reader = FakeReader::new(&[full(12, 1), full(12, 2)], Some("/a"));
         assert_eq!(fingerprint_with(42, &reader), None);
+    }
+
+    struct Rows(Vec<u64>);
+
+    impl SnapshotPayload for Rows {
+        type Element = u64;
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+        fn retain(&self, index: usize) -> Option<u64> {
+            self.0.get(index).copied()
+        }
+    }
+
+    fn started(start_time: u64) -> ProcessFingerprint {
+        ProcessFingerprint {
+            pid: 42,
+            start_time: Some(start_time),
+            executable: Some("/Applications/App.app/Contents/MacOS/App".into()),
+        }
+    }
+
+    /// AD-G2 / #299: a token minted from a read of one process start refuses
+    /// once the pid names another start (the app quit and the pid was reused).
+    #[test]
+    fn a_token_from_an_earlier_start_of_the_pid_is_refused() {
+        let store = SnapshotStore::new();
+        let capture = instance_capture(42, Some(started(1)), Some(started(1)));
+        let (id, _) = publish_read(&store, 42, 7, Rows(vec![10]), Some("s"), None, None, capture)
+            .unwrap();
+        let args = serde_json::json!({
+            "element_token": cua_driver_core::element_token::token_for(id, 0),
+            "_session_id": "s",
+        });
+        assert!(store
+            .resolve_for_instance(42, &args, InstanceEvidence::Live(started(1)))
+            .is_ok());
+        let refused = store
+            .resolve_for_instance(42, &args, InstanceEvidence::Live(started(2)))
+            .err()
+            .expect("a restarted process refuses the old token");
+        assert_eq!(
+            refused.structured_content.unwrap()["refusal"]["code"],
+            "process_instance_mismatch"
+        );
+    }
+
+    #[test]
+    fn a_read_that_spans_a_restart_is_a_failed_capture() {
+        assert!(matches!(
+            instance_capture(42, Some(started(1)), Some(started(2))),
+            InstanceCapture::Failed(_)
+        ));
+        assert!(matches!(
+            instance_capture(42, None, Some(started(1))),
+            InstanceCapture::Failed(_)
+        ));
+        let other_pid = ProcessFingerprint { pid: 43, ..started(1) };
+        assert!(matches!(
+            instance_capture(42, Some(other_pid.clone()), Some(other_pid)),
+            InstanceCapture::Failed(_)
+        ));
     }
 }

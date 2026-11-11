@@ -64,6 +64,94 @@ Mirror `platform-windows/src/process_instance.rs` (U15 #260):
 - Test (failing first): `store.rs` tests — `another_sessions_snapshot_is_not_visible`: put_snapshot(id 1, session "a"),
   `element(1, 0, Some("b"))` is `None`, `element(1, 0, Some("a"))` is `Some`; same for `element_at` and `image`.
 
+## wp2 P (on committed wp1 HEAD 20449d9f) — settled design
+
+Core facts (cua-driver-core/src/snapshot_store.rs): `instance_failure` (:44-69) refuses a token on a snapshot published with an
+instance unless live evidence matches: (Captured, Live) compares `ProcessFingerprint::matches` (pid, start time, executable when both
+present); (Captured, NotChecked | Unavailable) and (Failed, _) refuse `process_instance_unverified`. A token-free call returns
+`ResolvedElement::None` before any instance check (:1319-1324). So once macOS publishes with an instance, every macOS token
+resolution must pass live evidence: the ten `snapshots.resolve(pid, &args)` sites (012) are the complete inventory
+(`pid_for_token`, `token_owner`, zoom and session-retire calls read metadata only; macOS has no rooted reads).
+
+§B implementation:
+- process_identity.rs: `instance_capture(pid, before, after) -> InstanceCapture` (Captured only when both reads exist, name
+  `pid`, carry a start time and `matches`), `evidence(args, pid) -> InstanceEvidence` (NotChecked without `element_token`;
+  otherwise `process_fingerprint` off the runtime via `action_latency::spawn_blocking`), `instance_label(pid)` for §A.
+- get_window_state.rs: fingerprint before the walk (beside the prefetched capture), again before publication;
+  `publish_sized_for_session` → `publish_sized_for_session_with_instance(.., instance_capture(..))`. The screenshot-only
+  `refresh_screenshot_for_session` keeps the snapshot's original capture; a token from a restarted process is still refused at
+  resolve (mismatch), so no change there.
+- the ten resolve sites: `let evidence = crate::process_identity::evidence(&args, pid).await;` then `resolve_for_instance`.
+§A: `process_instance` (decimal kernel start time in µs, read twice, omitted when unreadable or changed) on list_apps records,
+list_windows records and the get_window_state structured answer; additive output (protocol record in D).
+§C (#288): dispatched to a child (core fast_path store + platform-macos fast_path_guard.rs; disjoint from §A/§B files).
+Failing-first: (1) process_identity test publishing through the macOS publish helper and resolving with a different live instance
+must refuse `process_instance_mismatch` (helper first written with today's unprotected publish → test fails); (2) list_apps
+record carries `process_instance`.
+
+## wp2 B/C evidence — §A/§B (#299, AD-G2), lead-implemented
+
+Changes: process_identity.rs (`instance_capture`, `evidence`, `publish_read`, `instance_label`, `capture_label`; dead-code allow
+removed); get_window_state.rs (fingerprint before the walk and before publication → `publish_read` with the capture; structured
+`process_instance` from `capture_label`); the ten resolve sites → `evidence(&args, pid).await` + `resolve_for_instance`
+(click.rs:1540, scroll.rs:233, set_value.rs:132, double_click.rs:132, type_text.rs:332, press_key.rs:736, hotkey.rs:334,
+select_text.rs:355, type_text_chars.rs:228, right_click.rs:316); apps/mod.rs `AppInfo.process_instance`; list_apps.rs
+`label_running_apps` in the inventory task + record field; list_windows.rs `label_window_records`; cua-driver-contract
+windows.rs `process_instance_schema` on list_apps items, list_windows items, get_window_state; docs/tool-output-format.md.
+
+| Command (rust/) | Exit | Result |
+|---|---|---|
+| `cargo test -p platform-macos --lib process_identity` (publish_read still unprotected) | 101 | `a_token_from_an_earlier_start_of_the_pid_is_refused` panicked at process_identity.rs:286 ("a restarted process refuses the old token") |
+| same, after the protected publish | 0 | 24 passed |
+| `cargo test -p cua-driver-contract --lib answers_naming_a_pid` (before the schema) | 101 | `answers_naming_a_pid_document_its_process_instance` FAILED |
+| `cargo test -p platform-macos --lib -- process_instance` (before the helpers) | 101 | E0425 `label_running_apps`, `label_window_records` not found |
+| `cargo test -p cua-driver-contract --lib` after | 0 | 91 passed |
+| `cargo test -p platform-macos --lib -- process_instance list_apps list_windows process_identity` after | 0 | 39 passed, 1 ignored |
+| `cargo test -p platform-macos --lib` (after §B wiring) | 0 | 2002 passed, 48 ignored |
+| `cargo check -p platform-macos -p cua-driver-contract -p cua-driver-core -p cua-driver --all-targets` | 0 | no warnings |
+| (repo) check_protocol.py vs frozen baseline | 0 | compatible in every launch form |
+| (repo) proto_delta vs 0.40.1-goat.1 | 0 | 65 = 65 tools, inputs unchanged, problems 0 |
+| (repo) output-schema delta vs 0.40.1-goat.1 (/tmp/goat-cu-sync/wp2-output-delta.log) | 0 | both launch forms: list_apps items, list_windows items, get_window_state each add `process_instance`; nothing removed |
+
+Protocol record (c-3): additive output only — `process_instance` (string, optional) on three tools; no `allowed-changes.json` entry
+(check_protocol.py reports no non-additive change). Linux/Windows answers do not report it yet (Linux `proc_fs::process_instance_id`
+and Windows `process_instance::process_fingerprint` exist; wiring them is a follow-up, not claimed here).
+
+## wp2 B/C evidence — §C (#288), child-implemented, lead-audited
+
+Child `cu-wp2-288-s24-261112` (codex / system24/deepseek-v4.1-flash / high). Lead read the full diff:
+
+- `cua-driver-core/src/fast_path/store.rs`: `SnapshotFingerprints.session`; images/windows keyed `(Option<String>, pid, window)`
+  (`WindowKey`, `window_key`, `same_window`); `element`, `stats`, `latest_stats`, `element_at`, `window`, `image` match only the
+  caller's session (`None` matches only `None`); `forget_window` drops the window for every session.
+- `fast_path/wire.rs`: `session_of(args)` reads `args["_session_id"]`, used by `skip_reread_screenshot` and `delta_target`.
+- `platform-macos/src/fast_path_guard.rs`: `record_snapshot` / `record_read_image` / `record_window` store the session;
+  `guard_element` looks up with `wire::session_of(args)`; `guard_pixel` takes the session (click.rs:2587 passes `args["_session_id"]`).
+- `get_window_state.rs` records under `session_id = args.opt_str("_session_id")` (:483), the same daemon-stamped key the snapshot
+  store already scopes by (`snapshot_store.rs` resolve paths). A caller-supplied `_session_id` is never trusted:
+  `tool_args::apply_session_identity` (:120) replaces it with the call's effective session (its public `session` label, else the
+  transport session) and `sanitize_reserved_args` (:104) drops other `_`-prefixed keys. Fast-path scoping is therefore exactly as
+  strong as snapshot-token scoping: same key, same derivation.
+- Lease-wiring source inventory: the two read-only `spawn_blocking` sites whose closure text changed (`fast_path_guard.rs::guard_pixel`
+  now passes the session; `tools/list_apps.rs::inventory_result` now also reads process-instance labels for §A) re-pinned in
+  `tools/lease_wiring_tests/source_exemptions.rs` (fingerprints 11082233245211704923 and 399154389028660781), category still Read.
+
+| Command (rust/) | Exit | Result |
+|---|---|---|
+| child: `cargo test -p cua-driver-core --lib fast_path::store` before the store change | 101 | compile red (E0560 `session` field, E0061 arity) |
+| lead: same test with the session filter neutralised (filters → `true`, keys → `None`), fix restored after (`cmp` identical) | 101 | `another_sessions_snapshot_is_not_visible` panicked at store.rs:348 `store.element(1, 0, Some("b")).is_none()` |
+| `cargo test -p cua-driver-core --lib fast_path` | 0 | 55 passed |
+| `cargo test -p platform-macos --lib fast_path_guard` | 0 | 1 passed |
+| `cargo test -p platform-macos --lib lease_wiring` before the re-pin | 101 | 2 failed (`guard_pixel`, `inventory_result` fingerprints) |
+| same, after the re-pin | 0 | 22 passed |
+
+Pre-receipt dry run of `/tmp/goat-cu-sync/receipt-wp2.sh` on the uncommitted wp2 tree (not a recorded receipt): failures=0 —
+kache doctor 0; check (macos/core/contract/driver, all targets) 0, no warnings; core fast_path 55; core snapshot_store 74; contract 91;
+macOS lib 2004 passed / 48 ignored; Windows host 203; build-driver 0; check_protocol compatible in every launch form; proto_delta 65 = 65,
+problems 0; output_delta (`/tmp/goat-cu-sync/output_delta.py`) adds only `process_instance` on get_window_state, list_apps items and
+list_windows items, nothing removed. wp2 committed locally ahead of the two reviews so wp1b/wp3 can proceed; any accepted finding lands
+as a follow-up commit with its own failing-first test, and the recorded C receipt runs after the reviews.
+
 ## Verification
 
 `cargo test -p cua-driver-core --lib fast_path`, `cargo test -p platform-macos --lib process_identity list_apps list_windows`,

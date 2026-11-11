@@ -7,6 +7,11 @@
 //!
 //! With `fast_path` off (the default) every entry point returns at once and
 //! nothing is recorded.
+//!
+//! The store is daemon wide, so everything recorded here is tagged with the
+//! session the tool call runs as (`args["_session_id"]`, absent for the
+//! unnamed global caller) and every lookup passes that same session: one MCP
+//! session never acts on another session's read.
 
 use crate::ax::bindings::{
     copy_children, copy_element_attr, copy_string_attr, element_screen_rect,
@@ -46,7 +51,13 @@ fn label_of(title: Option<&str>, description: Option<&str>) -> Option<String> {
 
 /// Fingerprints for the actionable rows of a published snapshot, in token
 /// index order (the same filter `AxSnapshot::from_nodes` uses).
-pub fn record_snapshot(pid: i32, window_id: u64, snapshot_id: u32, nodes: &[AXNode]) {
+pub fn record_snapshot(
+    pid: i32,
+    window_id: u64,
+    snapshot_id: u32,
+    nodes: &[AXNode],
+    session: Option<&str>,
+) {
     if !fp::mode().checks() {
         return;
     }
@@ -79,6 +90,7 @@ pub fn record_snapshot(pid: i32, window_id: u64, snapshot_id: u32, nodes: &[AXNo
         SnapshotFingerprints {
             pid,
             window_id,
+            session: session.map(str::to_owned),
             elements,
             element_count: nodes.len(),
             thin_frames: thin,
@@ -93,6 +105,7 @@ pub fn record_read_image(
     window_id: u32,
     raw: &cua_driver_core::image_utils::CapturedImage,
     bounds: &crate::windows::WindowBounds,
+    session: Option<&str>,
 ) {
     if !fp::mode().checks() {
         return;
@@ -117,17 +130,18 @@ pub fn record_read_image(
                 scale,
             },
         },
+        session,
     );
 }
 
 /// Record only the window fingerprint (tree-only reads).
-pub fn record_window(pid: i32, window_id: u32) {
+pub fn record_window(pid: i32, window_id: u32, session: Option<&str>) {
     if !fp::mode().checks() {
         return;
     }
     if let Some(info) = crate::windows::window_info_by_id(window_id) {
         let scale = global()
-            .window(pid, u64::from(window_id))
+            .window(pid, u64::from(window_id), session)
             .map(|w| w.scale)
             .unwrap_or(0.0);
         let b = info.bounds;
@@ -139,6 +153,7 @@ pub fn record_window(pid: i32, window_id: u32) {
                 frame: Rect::new(b.x, b.y, b.width, b.height),
                 scale,
             },
+            session,
         );
     }
 }
@@ -392,7 +407,7 @@ pub async fn guard_element(
             relocate: None,
         };
     };
-    let Some((_, _, want)) = global().element(snapshot_id, index) else {
+    let Some((_, _, want)) = global().element(snapshot_id, index, wire::session_of(args)) else {
         // Read before the flag was on: nothing to compare.
         return Outcome::Proceed {
             summary: Some(wire::check_summary(&Verdict::Ok, None, "none", 0.0)),
@@ -466,6 +481,7 @@ pub async fn guard_pixel(
     local: (f64, f64),
     screen: (f64, f64),
     foreground: bool,
+    session: Option<&str>,
 ) -> Outcome {
     if !fp::mode().checks() {
         return Outcome::Proceed {
@@ -476,13 +492,15 @@ pub async fn guard_pixel(
     let started = Instant::now();
     let wid = u64::from(window_id);
     let tool_name = tool.to_owned();
+    let session = session.map(str::to_owned);
     let (verdict, class, verified, scale) = tokio::task::spawn_blocking(move || unsafe {
         let store = global();
-        let image = store.image(pid, wid);
+        let session = session.as_deref();
+        let image = store.image(pid, wid, session);
         let window_fp = image
             .as_ref()
             .map(|i| i.window)
-            .or_else(|| store.window(pid, wid));
+            .or_else(|| store.window(pid, wid, session));
         let delivery = if foreground {
             PointerDelivery::Screen
         } else {
@@ -501,13 +519,13 @@ pub async fn guard_pixel(
             .map(|w| w.frame)
             .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
         let stats = store
-            .latest_stats(pid, wid)
+            .latest_stats(pid, wid, session)
             .map(|(elements, thin_frames)| TreeStats {
                 elements,
                 thin_frames,
             });
         let class = classify(info.as_ref(), stats.as_ref(), window_rect);
-        let seen = store.element_at(pid, wid, screen.0, screen.1);
+        let seen = store.element_at(pid, wid, screen.0, screen.1, session);
 
         // Rich target the agent saw in the tree: the element there now must
         // be the one it saw (or contain the hit).

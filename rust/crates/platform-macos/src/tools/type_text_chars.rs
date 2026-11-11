@@ -225,7 +225,8 @@ impl Tool for TypeTextCharsTool {
             .into_owned();
         let delay_ms = args.u64_or("delay_ms", 30);
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match self.state.snapshots.resolve(pid, &args) {
+        let evidence = crate::process_identity::evidence(&args, pid).await;
+        let resolved = match self.state.snapshots.resolve_for_instance(pid, &args, evidence) {
             Ok(r) => r,
             Err(e) => return e,
         };

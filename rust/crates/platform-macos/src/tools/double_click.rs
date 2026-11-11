@@ -129,7 +129,8 @@ impl Tool for DoubleClickTool {
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
         let cursor_key = super::cursor_tools::resolve_cursor_key(&args);
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match latency::resolve(|| self.state.snapshots.resolve(pid, &args)) {
+        let evidence = crate::process_identity::evidence(&args, pid).await;
+        let resolved = match latency::resolve(|| self.state.snapshots.resolve_for_instance(pid, &args, evidence)) {
             Ok(r) => r,
             Err(e) => return e,
         };

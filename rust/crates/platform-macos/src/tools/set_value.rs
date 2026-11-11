@@ -129,8 +129,9 @@ impl Tool for SetValueTool {
             Err(e) => return e,
         };
 
+        let evidence = crate::process_identity::evidence(&args, pid).await;
         let (element_index, window_id, element_guard) = match latency::resolve(|| {
-            self.state.snapshots.resolve(pid, &args)
+            self.state.snapshots.resolve_for_instance(pid, &args, evidence)
         }) {
             Ok(cua_driver_core::element_token::ResolvedElement::None) => {
                 return super::invalid_arguments(

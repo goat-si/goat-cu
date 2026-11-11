@@ -218,7 +218,23 @@ pub struct ListAppsOutput {
     pub apps: Vec<AppInfo>,
 }
 
-impl ToolOutput for ListAppsOutput {}
+/// Schema of the `process_instance` label an answer reports beside a pid
+/// (#299). Wire-only: the UniFFI records stay unchanged.
+fn process_instance_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "string",
+        "description": "Opaque label of the process instance that owned pid when this answer was read (macOS: its kernel start time). Compare for equality only: the same pid with a different label is a different process, the earlier one having exited. Absent when it could not be read or the platform does not report it."
+    })
+}
+
+impl ToolOutput for ListAppsOutput {
+    fn output_schema() -> serde_json::Value {
+        let mut schema = crate::outputs::output_schema_with_additional_properties::<Self>(true);
+        schema["properties"]["apps"]["items"]["properties"]["process_instance"] =
+            process_instance_schema();
+        schema
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
 pub struct WindowBounds {
@@ -267,6 +283,8 @@ impl ToolOutput for ListWindowsOutput {
         // Stacking semantics are part of the existing live discovery contract.
         schema["properties"]["windows"]["items"]["properties"]["z_index"]["description"] =
             serde_json::json!("Higher values are closer to the front. Null means the provider cannot observe stacking order; callers must not infer an order from array position or treat null as zero.");
+        schema["properties"]["windows"]["items"]["properties"]["process_instance"] =
+            process_instance_schema();
         // Window-closure evidence. These keys are part of the wire contract
         // only, not of the record: adding them to the struct would change its
         // UniFFI layout under the checked-in bindings. The typed SDK record
@@ -639,6 +657,12 @@ pub struct WindowStateOutput {
 }
 
 impl ToolOutput for WindowStateOutput {
+    fn output_schema() -> serde_json::Value {
+        let mut schema = crate::outputs::output_schema_with_additional_properties::<Self>(true);
+        schema["properties"]["process_instance"] = process_instance_schema();
+        schema
+    }
+
     fn validate(&self) -> Result<(), String> {
         match self.drilldown_status {
             Some(DrilldownStatus::Complete) => {
@@ -715,6 +739,24 @@ impl ToolOutput for WindowStateOutput {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// #299: the process-instance label beside each pid is part of the
+    /// documented output of every answer that names a pid.
+    #[test]
+    fn answers_naming_a_pid_document_its_process_instance() {
+        let apps = ListAppsOutput::output_schema();
+        assert_eq!(
+            apps["properties"]["apps"]["items"]["properties"]["process_instance"]["type"],
+            "string"
+        );
+        let windows = ListWindowsOutput::output_schema();
+        assert_eq!(
+            windows["properties"]["windows"]["items"]["properties"]["process_instance"]["type"],
+            "string"
+        );
+        let state = WindowStateOutput::output_schema();
+        assert_eq!(state["properties"]["process_instance"]["type"], "string");
+    }
 
     #[test]
     fn canonical_vocabulary_roundtrips_and_rejects_invalid_values() {

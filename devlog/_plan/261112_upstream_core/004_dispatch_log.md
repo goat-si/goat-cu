@@ -41,3 +41,12 @@ Lead re-verification found one compile error and three unused imports in its res
 
 2026-11-11 20:35 UTC: `cu-wp24-revalidate-s24-261112` completed (codex / system24/deepseek-v4.1-flash / high); report kept in 012,
 key claims spot-checked by the lead.
+
+2026-11-11 ~20:40 UTC: wp1 reviews A/B and Linux resolution completed (all codex / system24/deepseek-v4.1-flash / high); dispositions in 010.
+2026-11-11 ~21:00 UTC: wp2 §C #288 implementation dispatched — `cu-wp2-288-s24-261112`, returned codex / system24/deepseek-v4.1-flash /
+reasoningEffort=high, status running. Lead implements §A/§B in parallel on disjoint lines.
+2026-11-12: `cu-wp2-288-s24-261112` completed; lead audited the diff, re-ran its checks, added a runtime red check and re-pinned two
+lease-wiring inventory fingerprints (020). `cu-wp2-review-ab-s24-261112` (#299 review, codex / system24/deepseek-v4.1-flash / high)
+still running at this entry.
+2026-11-12: wp2 #288 independent review dispatched — `cu-wp2-review-288-s24-261112`, role review, returned codex /
+system24/deepseek-v4.1-flash / reasoningEffort=high, status running.

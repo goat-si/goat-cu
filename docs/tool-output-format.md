@@ -58,3 +58,13 @@ budget stop and without passing over anything: no children below
 `max_depth`, no failed `AXChildren` read, no node whose attributes could not
 be read, no omitted tabs. Only then can `verify_state` answer `unsatisfied`
 for an element that is not there instead of `unknown`.
+
+On macOS, answers that name a pid also report `process_instance`: an opaque
+label of the process that owned the pid when the answer was read (its kernel
+start time), on each `list_apps` running app, each `list_windows` record and
+the `get_window_state` answer. Compare it for equality only; the same pid with
+a different label is a different process. `get_window_state` reports it only
+when the start time read before and after the walk agree, and its element
+tokens are bound to that process: once the pid names another process start,
+using them refuses with `process_instance_mismatch` (`process_instance_unverified`
+when the identity could not be read).

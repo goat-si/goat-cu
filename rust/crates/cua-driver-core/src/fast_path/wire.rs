@@ -172,10 +172,17 @@ pub fn skip_reread_screenshot(args: &Value, pid: i32, window_id: u64) -> bool {
     {
         return false;
     }
-    match super::store::global().latest_stats(pid, window_id) {
+    match super::store::global().latest_stats(pid, window_id, session_of(args)) {
         Some((elements, thin)) => elements >= 10 && thin * 2 <= elements,
         None => false,
     }
+}
+
+/// The session a tool call runs as, as the daemon named it. `None` is the
+/// unnamed (daemon-global) caller; the fast-path store only matches it with
+/// entries that same caller published.
+pub fn session_of(args: &Value) -> Option<&str> {
+    args.get("_session_id").and_then(Value::as_str)
 }
 
 /// Tools whose direct (unbatched) result gets a delta when the mode is `on`.
@@ -210,7 +217,7 @@ pub fn delta_target(args: &Value) -> Option<(i32, u64)> {
         .and_then(Value::as_str)
         .and_then(crate::element_token::parse_token)?;
     super::store::global()
-        .element(snapshot, index)
+        .element(snapshot, index, session_of(args))
         .map(|(pid, window, _)| (pid, window))
 }
 

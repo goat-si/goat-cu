@@ -329,7 +329,8 @@ impl Tool for TypeTextTool {
             );
         }
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match latency::resolve(|| self.state.snapshots.resolve(pid, &args)) {
+        let evidence = crate::process_identity::evidence(&args, pid).await;
+        let resolved = match latency::resolve(|| self.state.snapshots.resolve_for_instance(pid, &args, evidence)) {
             Ok(r) => r,
             Err(e) => return e,
         };
