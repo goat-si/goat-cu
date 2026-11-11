@@ -9295,6 +9295,9 @@ mod checked_pointer_press_tests {
         }
     }
     impl ScopeReader<u8> for Window {
+        fn window_visible(&mut self, _: u8, _: u8, _: Scope) -> Evidence<bool> {
+            self.visible.clone()
+        }
         fn visible(&mut self, _: u8, _: u8, _: Scope) -> Evidence<bool> {
             self.visible.clone()
         }

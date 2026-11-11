@@ -46,3 +46,43 @@ Read `cua-driver-core/src/post_action_wait.rs` tests. If any budget test sleeps 
 ## Verification
 
 `cargo test -p cua-driver-core --lib actionability post_action_wait`, `cargo test -p platform-macos --lib actionability`.
+
+## wp4 P decision and B/C evidence (lead), on HEAD 393c49e2
+
+**§A #272 / AD-G1 — decided at P: fix in the macOS adapter, not in core.** Core cannot tell clipping-derived evidence from
+explicit state: `NativeScope::visible` (scope.rs) is window hidden/minimized *then* ancestor clipping, and `offscreen` at
+`Scope::WindowInternal` is clipping only, so a zero-size or scrolled-out ancestor gives *known* `visible=false`/`offscreen=true`
+(issue cases 1 and 5) and the 012 guard on Unknown alone would not fix them. Agent-desktop's `gates.rs::visibility` (54855b62) fails only
+on live hidden/offscreen state and the target's own zero-size bounds, never on ancestor clipping, for delivery without a pointer.
+Change: `ScopeReader::window_visible` (actionability.rs:54; native scope.rs:331, which `visible` now reuses) reads only the window's
+explicit visibility; `Adapter::facts_with_hits` (actionability.rs:156) keeps clipping `visible`/`offscreen` for the pointer battery and,
+for `semantic_facts`, uses `semantic_visibility` (:194): window hidden/minimized → false, window state unreadable → unknown, own frame
+empty → false, own frame absent/unreadable/invalid → unknown, else true; `offscreen` is `Absent` (macOS has no live offscreen state).
+Kept: hidden app / minimized window / unreadable window state / empty or unreadable own frame still wait and refuse; stability, enabled,
+affordance and token/exact-target checks unchanged; pointer clicks unchanged (clipping + hit). Tradeoff for review: the clipping walk
+also proved the target descends from the admitted window; semantic delivery now relies on the token's snapshot binding for that, which
+is what issue case 3 (sheets, popovers, menus whose window differs) asks for. Issue's live smoke (Safari/Chrome page button, Electron,
+sheet/popover, scrolled-out row, AppKit button): NOT RUN — those are not GOAT-owned fixtures.
+Test adjustment: `failed_action_names_block_custom_action` (actionability.rs:666) gives its semantic loop a target frame; it passed only
+because FakeScope claimed clipping visibility for a frameless target, which the native clipping read never did (scope.rs `clipping`
+returns unknown "target frame unavailable").
+
+**§B AD-G8 — NOT APPLICABLE as a test-only port.** `post_action_wait.rs` has no time-based tests (:113-149, argument parsing and task
+scope). GOAT's post-action settle is the window-change detector's own std::thread with wall-clock deadlines
+(window_change_detector.rs:760, :796); its tests poll with 2 s ceilings, one asserts an upper bound `elapsed < 100ms` (:1360). A virtual
+clock needs clock injection into that production thread, beyond agent-desktop #642's test-only scope. Residual: that upper bound can
+flake on a saturated host.
+
+**§C re-confirmed on the synced tree.** AD-G4 COVERED: get_window_state.rs:1720-1721 sets `observation_complete:false` and
+`observation_incomplete_reasons` (tests :3516, :3547). AD-G5 COVERED by wp1: session.rs:864-883 releases labels when the owner
+transport closes (#7083), session_tools.rs:526 ends after the in-flight action. AD-G6 / AD-G7 NOT APPLICABLE: no app-terminated wait
+and no on-disk ref store in rust/crates (`rg wait_event|app_terminated|refs_store` empty). AD-G9 → #287 (wp3 §B), AD-G10 → #286 (fixed,
+393c49e2).
+
+| Command (rust/) | Exit | Result |
+|---|---|---|
+| `cargo test -p platform-macos --lib -- semantic_press_ignores_ancestor_clipping` (semantic facts still from clipping) | 101 | actionability.rs:1004 "zero-size or scrolled-out ancestor": `Transient { reason: "visible is false or absent" }` vs `Pass` |
+| `cargo test -p platform-macos --lib -- actionability tools::click::` after the change, before the test adjustment | 101 | 1 failed: `failed_action_names_block_custom_action` "visible: target frame unavailable" (frameless semantic target) |
+| same, after the adjustment | 0 | 164 passed, 1 ignored |
+| `cargo check -p platform-macos --all-targets` | 0 | no warnings |
+| rustfmt --check actionability.rs / scope.rs / click.rs vs HEAD | — | identical remaining diffs |

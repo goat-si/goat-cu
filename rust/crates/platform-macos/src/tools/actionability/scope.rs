@@ -328,14 +328,18 @@ impl<R> NativeScope<R> {
     }
 }
 impl<E: Copy, R: RawScope<E>> ScopeReader<E> for NativeScope<R> {
-    fn visible(&mut self, target: E, window: E, _: Scope) -> Evidence<bool> {
+    fn window_visible(&mut self, _: E, window: E, _: Scope) -> Evidence<bool> {
         let w = self.raw.node(window);
         match (self.raw.hidden(), self.raw.minimized(&w)) {
-            (Evidence::Known(true), _) | (_, Evidence::Known(true)) => {
-                return Evidence::Known(false)
-            }
-            (Evidence::Known(false), Evidence::Known(false)) => {}
-            _ => return unknown("window visibility unavailable"),
+            (Evidence::Known(true), _) | (_, Evidence::Known(true)) => Evidence::Known(false),
+            (Evidence::Known(false), Evidence::Known(false)) => Evidence::Known(true),
+            _ => unknown("window visibility unavailable"),
+        }
+    }
+    fn visible(&mut self, target: E, window: E, scope: Scope) -> Evidence<bool> {
+        match self.window_visible(target, window, scope) {
+            Evidence::Known(true) => {}
+            other => return other,
         }
         match self.clipping(target, window) {
             Evidence::Known(r) => Evidence::Known(r.width > 0.0 && r.height > 0.0),

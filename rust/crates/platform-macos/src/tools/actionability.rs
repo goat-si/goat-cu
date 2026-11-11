@@ -49,6 +49,9 @@ pub(crate) trait ScopeReader<E> {
     fn visible(&mut self, target: E, window: E, scope: Scope) -> Evidence<bool>;
     fn offscreen(&mut self, target: E, window: E, scope: Scope) -> Evidence<bool>;
     fn hit(&mut self, target: E, window: E, scope: Scope, point: Point) -> Hit;
+    /// The window's explicit visibility only (its app hidden, the window
+    /// minimized), with no geometry: what a semantic action needs (#272).
+    fn window_visible(&mut self, target: E, window: E, scope: Scope) -> Evidence<bool>;
 }
 
 pub(crate) struct Adapter<E> {
@@ -146,9 +149,27 @@ impl<E: Copy> Adapter<E> {
                 Evidence::Absent => Evidence::Absent,
             }
         };
+        // #272: a pointer needs the ancestor clipping and the hit; a semantic
+        // action reaches the element itself, so it needs only the window's
+        // explicit visibility and the target's own frame. macOS has no live
+        // offscreen state beyond that clipping, so none is supplied.
+        let (visible, offscreen) = if collect_hits {
+            (
+                scope_reader.visible(target, self.window, self.scope),
+                scope_reader.offscreen(target, self.window, self.scope),
+            )
+        } else {
+            (
+                semantic_visibility(
+                    scope_reader.window_visible(target, self.window, self.scope),
+                    &bounds,
+                ),
+                Evidence::Absent,
+            )
+        };
         ElementFacts {
-            visible: scope_reader.visible(target, self.window, self.scope),
-            offscreen: scope_reader.offscreen(target, self.window, self.scope),
+            visible,
+            offscreen,
             enabled: enabled(reader, target),
             editable,
             stable,
@@ -164,6 +185,34 @@ impl<E: Copy> Adapter<E> {
     pub(crate) fn revalidate<R: Reader<Element = E>>(&self, reader: &mut R) -> Evidence<bool> {
         self.stability
             .revalidate(observe(reader.frame(self.target)))
+    }
+}
+
+/// Visibility for a semantic (pointer-free) action: the window must be shown
+/// and the target's own frame non-empty. A hidden app or minimized window and
+/// an empty frame are false; an unreadable window state or frame is unknown.
+fn semantic_visibility(
+    window: Evidence<bool>,
+    bounds: &Evidence<actionability::Rect>,
+) -> Evidence<bool> {
+    match window {
+        Evidence::Known(true) => {}
+        Evidence::Known(false) => return Evidence::Known(false),
+        Evidence::Absent => return Evidence::Unknown("window visibility unavailable".into()),
+        Evidence::Unknown(reason) => return Evidence::Unknown(reason),
+    }
+    match bounds {
+        Evidence::Known(rect)
+            if rect.x.is_finite()
+                && rect.y.is_finite()
+                && rect.width.is_finite()
+                && rect.height.is_finite() =>
+        {
+            Evidence::Known(rect.width > 0.0 && rect.height > 0.0)
+        }
+        Evidence::Known(_) => Evidence::Unknown("target frame is invalid".into()),
+        Evidence::Absent => Evidence::Unknown("target frame unavailable".into()),
+        Evidence::Unknown(reason) => Evidence::Unknown(reason.clone()),
     }
 }
 
@@ -612,6 +661,9 @@ mod u31_facts_tests {
                 .map(str::to_owned)
                 .collect(),
         );
+        // A semantic action needs the target's own frame (#272); the native
+        // scope reader never proved a frameless target visible either.
+        reader.frame_result = Evidence::Known(rectangle());
         for intent in [
             semantic::SemanticIntent::Click,
             semantic::SemanticIntent::Open,
@@ -665,6 +717,7 @@ mod u31_facts_tests {
     struct FakeScope {
         visible: Evidence<bool>,
         offscreen: Evidence<bool>,
+        window_visible: Evidence<bool>,
         hit: Hit,
         calls: Vec<(u32, u32, Scope, &'static str)>,
         points: Vec<Point>,
@@ -674,6 +727,7 @@ mod u31_facts_tests {
             Self {
                 visible: Evidence::Known(true),
                 offscreen: Evidence::Known(false),
+                window_visible: Evidence::Known(true),
                 hit: Hit::ReachesTarget,
                 calls: vec![],
                 points: vec![],
@@ -681,6 +735,10 @@ mod u31_facts_tests {
         }
     }
     impl ScopeReader<u32> for FakeScope {
+        fn window_visible(&mut self, e: u32, w: u32, scope: Scope) -> Evidence<bool> {
+            self.calls.push((e, w, scope, "window_visible"));
+            self.window_visible.clone()
+        }
         fn visible(&mut self, e: u32, w: u32, scope: Scope) -> Evidence<bool> {
             self.calls.push((e, w, scope, "visible"));
             self.visible.clone()
@@ -951,6 +1009,92 @@ mod u31_facts_tests {
             .verdict,
             Verdict::Transient { unknown: true, .. }
         ));
+    }
+
+    /// #272 (agent-desktop gates.rs visibility): a semantic AXPress needs its
+    /// window shown and its own frame non-empty, not the ancestor clipping a
+    /// pointer needs. A zero-size or scrolled-out ancestor, a tree deeper
+    /// than the ancestry limit, or a sheet whose window differs no longer
+    /// waits out the budget; a hidden app or minimized window, an unreadable
+    /// window state and an empty or unreadable own frame still do not pass.
+    /// The pointer battery keeps reading the clipping.
+    #[test]
+    fn semantic_press_ignores_ancestor_clipping() {
+        let mut reader = Fake {
+            actions_result: Evidence::Known(vec!["AXPress".into()]),
+            frame_result: Evidence::Known(rectangle()),
+            ..Fake::default()
+        };
+        let semantic = |reader: &mut Fake, scope: &mut FakeScope| {
+            let facts = Adapter::new(7, 13, Scope::WindowInternal).semantic_facts(
+                reader,
+                scope,
+                &FakeClock::default(),
+            );
+            evaluate(Intent::Click, &facts, Policy::headless()).verdict
+        };
+        for (case, visible, offscreen) in [
+            (
+                "zero-size or scrolled-out ancestor",
+                Evidence::Known(false),
+                Evidence::Known(true),
+            ),
+            (
+                "clipping or ancestry unavailable",
+                Evidence::Unknown("clipping or ancestry unavailable".into()),
+                Evidence::Unknown("clipping or ancestry unavailable".into()),
+            ),
+        ] {
+            let mut scope = FakeScope {
+                visible: visible.clone(),
+                offscreen,
+                ..FakeScope::default()
+            };
+            assert_eq!(semantic(&mut reader, &mut scope), Verdict::Pass, "{case}");
+            assert!(
+                scope.calls.iter().all(|(_, _, _, kind)| *kind != "hit"),
+                "{case}"
+            );
+            assert_eq!(
+                adapter_facts(&mut reader, &mut scope).visible,
+                visible,
+                "{case}"
+            );
+        }
+        for (case, window) in [
+            ("hidden app or minimized window", Evidence::Known(false)),
+            (
+                "window state unreadable",
+                Evidence::Unknown("window visibility unavailable".into()),
+            ),
+        ] {
+            let mut scope = FakeScope {
+                window_visible: window,
+                ..FakeScope::default()
+            };
+            assert_ne!(semantic(&mut reader, &mut scope), Verdict::Pass, "{case}");
+        }
+        for (case, frame) in [
+            (
+                "empty own frame",
+                Evidence::Known(Rect {
+                    width: 0.0,
+                    ..rectangle()
+                }),
+            ),
+            (
+                "unreadable own frame",
+                Evidence::Unknown("frame failed".into()),
+            ),
+            ("no own frame", Evidence::Absent),
+        ] {
+            reader.frame_result = frame;
+            assert_ne!(
+                semantic(&mut reader, &mut FakeScope::default()),
+                Verdict::Pass,
+                "{case}"
+            );
+        }
     }
 }
 
