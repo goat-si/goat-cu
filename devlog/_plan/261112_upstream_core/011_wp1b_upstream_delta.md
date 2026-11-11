@@ -68,4 +68,44 @@ process-group containment and attachment holds (prepare.rs), click ordering and 
 type checks and the protocol check; (5) cursor-overlay `release_t` is reviewed in C against GOAT's click ordering (the action is
 released at the native arrival only under floor timings; GOAT's point checks run before dispatch either way).
 
+## B/C (on wp2 HEAD e0851769)
+
+Synthetic commits (objects only, no ref): base c0d3b919 tree `56564975864f` → commit `e25c9b255816`; target e51f5740 tree
+`61f0dcd7180d` → commit `c5c72eded48f` (/tmp/goat-cu-sync/wp1b-synthetic.txt). `git cherry-pick --no-commit c5c72ede`: 51 upstream
+paths, 10 unmerged — the same set as trial 2.
+
+| Path | Resolution |
+|---|---|
+| rust/VERSION, rust/Cargo.toml, python/pyproject.toml, python/src/cua_driver/__init__.py, typescript/package.json, rust/Skills/cua-driver/SKILL.md | KEEP-GOAT version lines (`--ours`); upstream changed only the version in these files |
+| rust/Cargo.lock, typescript/package-lock.json | KEEP-GOAT (`--ours`): upstream's delta is only the 15 workspace-member (Cargo.lock) and 2 root (package-lock) version lines 0.47.12 → 0.47.14; `git diff HEAD -- rust/Cargo.lock` empty after the cargo runs, so `cargo deny` is not re-run |
+| rust/Skills/cua-driver/EMBEDDING.md | COMBINE: upstream's #7373 wording (floor timings release the action at the native arrival, glide finishes during the action) with GOAT's 120 ms window watch |
+| cua-driver-core/src/browser/prepare.rs | COMBINE per the P plan: the real conflict equals trial 2 byte for byte after normalising marker labels (`diff` exit 0); `wp1b_prepare.py` re-run on the real file reproduces `/tmp/goat-cu-sync/wp1b-resolved/prepare.rs` exactly (`diff` exit 0) |
+| rust/CHANGELOG.md | clean: 0.47.14 and 0.47.13 above 0.47.12; GOAT entries (from `0.37.0-goat.3`, :526) untouched |
+| scripts/_install-rust.sh, scripts/install.ps1 | clean: published-installer pin 0.47.10 → 0.47.13, same rule as wp1 (these lines track upstream) |
+| vendor/README.md | source commit → e51f5740; vendored files byte-identical at e51f5740 (`diff -r -x Cargo.toml` telemetry 0, targets.json 0, sandbox-images.json 0; upstream telemetry and workspace Cargo.toml unchanged from c0d3b919) |
+
+GOAT invariants touched: (1) click ordering vs #7373 `release_t` — macOS `cursor/overlay.rs:699` takes the arrival signal from
+`tick_motion`, which now fires at `release_t`; the click is posted at the target coordinates, not at the painted cursor, and GOAT's
+gates and point checks run before the cursor moves, so an earlier release changes only how long the action waits on the glide (the same
+detached-glide model GOAT's batch steps already use). (2) #7383 `security_prompt_on_screen` (platform-macos security_prompt.rs) reads
+on-screen window owners only; nothing answers or types into a prompt. (3) GOAT browser containment and attachment holds in prepare.rs kept
+(audited at A).
+
+| Command (rust/ unless noted) | Exit | Result |
+|---|---|---|
+| `cargo check -p cua-driver-core -p platform-macos -p cursor-overlay -p cua-driver -p cua-driver-sdk --all-targets` | 0 | no warnings |
+| `cargo test -p cursor-overlay --lib` | 0 | 154 passed (incl. upstream `a_floor_timing_releases_the_action_at_the_native_arrival`) |
+| `cargo test -p cua-driver-core --lib` | 0 | 1820 passed, 3 ignored |
+| `cargo test -p cua-driver-e2e --test standalone_browser_behavior_test` | 0 | 3 passed, 22 ignored (the ignored rows launch a real Chromium; not run) |
+| `cargo test -p platform-macos --lib` | 0 | 2006 passed, 48 ignored |
+| `cargo test -p platform-windows --lib` (host) | 0 | 203 passed |
+| Linux target `cargo check --target x86_64-unknown-linux-gnu -p platform-linux -p cua-driver-core -p cursor-overlay --all-targets` (stand-in cc/ar/pkg-config) | 0 | only the third-party `nom` future-incompat note |
+| Windows target `cargo check --target x86_64-pc-windows-msvc -p cua-driver-core -p cursor-overlay --all-targets` (stand-in cc/ar) | 0 | 1 warning, `let mut command` prepare.rs:1133 — the HEAD-era warning (wp1 recorded it at :894) |
+| `cargo build -p cua-driver` | 0 | — |
+| (repo) check_protocol.py | 0 | compatible in every launch form |
+| (repo) proto_delta.py / output_delta.py | 0 / 0 | 65 = 65 tools, inputs unchanged, problems 0; outputs: only wp2's `process_instance` |
+
+NOT RUN: Linux/Windows linking and runtime tests (incl. the three new `platform-linux/tests/background_*_xorg.rs`, which need Xorg);
+live standalone-browser e2e rows; live macOS fixture runs.
+
 
