@@ -170,5 +170,21 @@ as a follow-up commit with its own failing-first test, and the recorded C receip
 | same, after | 0 | 152 passed, 1 ignored |
 | `cargo check -p platform-macos --all-targets` | 0 | no warnings |
 
+## #288 independent review (`cu-wp2-review-288-s24-261112`, on e0851769) — NEAR-PASS, 4 findings
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | P2 | `delta_target` (wire.rs) runs in `invoke_authorized` (tool.rs:2105) on args whose `_session_id` was already stripped, while `get_window_state` records under the namespaced runtime session (tool.rs:2320-2331): with `fast_path=on` an element-token action without `window_id` silently lost its delta | ACCEPTED, fixed: `GuardStore::snapshot_window` maps the token's snapshot to its window for this purpose only; safe because the delta is attached only after the action succeeded, i.e. after the snapshot store resolved the token in the caller's session, and snapshot ids are daemon-unique; the follow-up read is authorized as the caller. Fingerprint lookups stay session-scoped |
+| 2 | P3 | eviction paths untested with mixed sessions | ACCEPTED: `evictions_keep_each_entry_in_its_own_session` (image capacity, window retain past 4×capacity, snapshot capacity) — coverage only, passes on the fix |
+| 3 | P3 | `forget_window` has no production caller | ACCEPTED as a record correction: pre-existing on origin/main 40c6f6eb (no caller there either); the all-sessions clear is a store property, runtime replacement is still caught by the guard's pid/frame/visibility checks. Not wired here (new behaviour beyond #288) |
+| 4 | P3 | `record_window` stores scale 0.0 for a session without an image | REBUTTED: 0.0 means "this session read no image" instead of borrowing another session's scale (the #288 leak); no consumer divides by it — `guard_element` and the non-pixel branches pass `relocate_scale` 1.0 (fast_path_guard.rs:548, :556), the pixel branch uses the image's own scale `.max(1.0)` (:558), `window_observation` echoes `want.scale` |
+
+| Command (rust/) | Exit | Result |
+|---|---|---|
+| `cargo test -p cua-driver-core --lib -- an_element_token_delta_finds_its_window_before_the_session_is_named` (before the fix) | 101 | wire.rs:345 `left: None, right: Some((77, 9))` |
+| `cargo test -p cua-driver-core --lib fast_path` after | 0 | 57 passed |
+| `cargo test -p platform-macos --lib fast_path_guard` | 0 | 1 passed |
+| `cargo check -p cua-driver-core -p platform-macos --all-targets` | 0 | no warnings |
+
 `cargo test -p cua-driver-core --lib fast_path`, `cargo test -p platform-macos --lib process_identity list_apps list_windows`,
 `cargo check -p platform-macos --all-targets`, protocol check (B4 of 010) listing `process_instance` as additive output.

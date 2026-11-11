@@ -59,3 +59,8 @@ system24/deepseek-v4.1-flash / reasoningEffort=high, status running.
 system24/deepseek-v4.1-flash / reasoningEffort=high, status running.
 2026-11-12: wp1b review dispatched — `cu-wp1b-review-s24-261112` (commit ef7a3646), role review, returned codex /
 system24/deepseek-v4.1-flash / reasoningEffort=high, status running.
+2026-11-12: `cu-wp2-review-ab-s24-261112` (#299) completed NEAR-PASS, 4 findings accepted → 09484534; decisions recorded
+(review_findings.record). Round 2 dispatched with continueFrom — `cu-wp2-review-ab-r2-s24-261112`, returned codex /
+system24/deepseek-v4.1-flash / reasoningEffort=high.
+2026-11-12: `cu-wp3-287-s24-261112` completed; lead verified (156 overlay tests), added the GNOME helper `park` field, committed
+a5e2bbde. Fresh review dispatched — `cu-wp3-287-review-s24-261112`, returned codex / system24/deepseek-v4.1-flash / reasoningEffort=high.

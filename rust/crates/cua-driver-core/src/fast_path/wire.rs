@@ -203,6 +203,9 @@ pub fn returns_delta(tool: &str) -> bool {
 
 /// The window a direct action's delta is read from, when the mode is `on`.
 /// From `pid`/`window_id`, or from the snapshot an `element_token` names.
+/// It runs on the call's arguments before dispatch names the runtime
+/// session, and the delta is attached only after the action succeeded, so
+/// the token already resolved in the caller's session (#288 review).
 pub fn delta_target(args: &Value) -> Option<(i32, u64)> {
     if !mode().deltas() {
         return None;
@@ -212,13 +215,11 @@ pub fn delta_target(args: &Value) -> Option<(i32, u64)> {
     if let (Some(pid), Some(window)) = (pid, window) {
         return Some((pid, window));
     }
-    let (snapshot, index) = args
+    let (snapshot, _index) = args
         .get("element_token")
         .and_then(Value::as_str)
         .and_then(crate::element_token::parse_token)?;
-    super::store::global()
-        .element(snapshot, index, session_of(args))
-        .map(|(pid, window, _)| (pid, window))
+    super::store::global().snapshot_window(snapshot)
 }
 
 /// Append a delta read to an action result: its text after the action's,
@@ -317,6 +318,32 @@ mod tests {
         assert_eq!(s["path"], "ax");
         assert_eq!(s["fast_path"]["delta"]["snapshot_id"], "s00000002");
         assert_eq!(result.content.len(), 2);
+    }
+
+    /// #288 review: `delta_target` runs on the call's arguments before
+    /// dispatch names the runtime session, while `get_window_state` records
+    /// under that named session. The snapshot an element token names still
+    /// maps to its window, so a direct element action keeps its delta.
+    #[test]
+    fn an_element_token_delta_finds_its_window_before_the_session_is_named() {
+        let _guard = crate::fast_path::tests_lock();
+        let snapshot = 3_900_000_123;
+        super::super::store::global().put_snapshot(
+            snapshot,
+            super::super::store::SnapshotFingerprints {
+                pid: 77,
+                window_id: 9,
+                session: Some("__cua_runtime_x:implicit-direct".into()),
+                elements: vec![Default::default()],
+                element_count: 1,
+                thin_frames: 0,
+            },
+        );
+        let args = json!({ "element_token": crate::element_token::token_for(snapshot, 0) });
+        apply_config_args(&json!({"fast_path": "on"})).unwrap();
+        let target = delta_target(&args);
+        apply_config_args(&json!({"fast_path": "off"})).unwrap();
+        assert_eq!(target, Some((77, 9)));
     }
 
     #[test]

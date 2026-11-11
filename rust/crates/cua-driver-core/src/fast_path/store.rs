@@ -110,6 +110,16 @@ impl GuardStore {
             .map(|f| (f.element_count, f.thin_frames))
     }
 
+    /// The window a snapshot was read from, whichever session read it. Only
+    /// for choosing the window a direct action's delta re-reads: that action
+    /// already resolved the token in its own session's snapshot store, and
+    /// snapshot ids are unique daemon-wide, so this names the same snapshot.
+    /// Fingerprints are never returned across sessions.
+    pub fn snapshot_window(&self, snapshot_id: u32) -> Option<(i32, u64)> {
+        let s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        s.snapshots.get(&snapshot_id).map(|f| (f.pid, f.window_id))
+    }
+
     pub fn latest_stats(
         &self,
         pid: i32,
@@ -398,5 +408,63 @@ mod tests {
         assert!(store.image(1, 5, Some("b")).is_none());
         assert!(store.window(1, 5, Some("a")).is_none());
         assert!(store.window(1, 5, Some("b")).is_none());
+    }
+
+    /// #288 review: the capacity and retention paths (image eviction, the
+    /// window map's retain over the image order, snapshot eviction) keep every
+    /// surviving entry answering only the session that published it.
+    #[test]
+    fn evictions_keep_each_entry_in_its_own_session() {
+        let store = GuardStore::new();
+        let own = |id: u64| if id % 2 == 0 { "a" } else { "b" };
+        let other = |id: u64| if id % 2 == 0 { "b" } else { "a" };
+        let images = IMAGE_CAPACITY as u64 + 4;
+        for id in 0..images {
+            store.put_image(
+                1,
+                ReadImage {
+                    snapshot_id: id as u32,
+                    image: GrayImage::filled(2, 2, 0),
+                    window: win(id),
+                },
+                Some(own(id)),
+            );
+        }
+        for id in 0..images {
+            assert!(store.image(1, id, Some(other(id))).is_none(), "{id}");
+            assert_eq!(
+                store.image(1, id, Some(own(id))).map(|i| i.snapshot_id),
+                (id >= 4).then_some(id as u32),
+                "{id}"
+            );
+        }
+        let windows = 100..(100 + 4 * IMAGE_CAPACITY as u64);
+        for id in windows.clone() {
+            store.put_window(1, win(id), Some(own(id)));
+        }
+        for id in 4..images {
+            assert_eq!(
+                store.window(1, id, Some(own(id))).map(|w| w.window_id),
+                Some(id),
+                "{id}"
+            );
+            assert!(store.window(1, id, Some(other(id))).is_none(), "{id}");
+        }
+        for id in windows {
+            assert!(store.window(1, id, Some(other(id))).is_none(), "{id}");
+        }
+        let snapshots = SNAPSHOT_CAPACITY as u32 + 6;
+        for id in 0..snapshots {
+            store.put_snapshot(id, named_snapshot(Some(own(u64::from(id)))));
+        }
+        for id in 0..snapshots {
+            let id64 = u64::from(id);
+            assert!(store.element(id, 0, Some(other(id64))).is_none(), "{id}");
+            assert_eq!(
+                store.element(id, 0, Some(own(id64))).is_some(),
+                id >= 6,
+                "{id}"
+            );
+        }
     }
 }
