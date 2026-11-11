@@ -107,3 +107,29 @@ fixture build in this lane).
 | `cargo test -p platform-macos --lib -- tools::click:: tools::hotkey::` | 0 | 125 passed, 2 ignored |
 | `cargo test -p platform-macos --lib lease_wiring` | 0 | 22 passed |
 | `rustfmt --edition 2021 --check` click.rs / hotkey.rs vs the same on HEAD | — | identical remaining diffs (pre-existing only) |
+
+## wp3 B/C evidence — §B #287 (child `cu-wp3-287-s24-261112`, lead-verified), on HEAD 09484534
+
+Issue option 2 (change the rest curve), bounded as planned: `FLOAT_REST_SECS = 2 × FLOAT_SECS` (cursor_pose.rs:42). `rest_amplitude`
+(:101) multiplies the old envelope by `1 − smoothstep((hold − REST_PARK_SECS) / FLOAT_EASE_IN_SECS)` (`REST_PARK_SECS` :94 = hold + ease-in +
+rest), so a settled default cursor floats ≈8 s at full amplitude and eases to exactly 0; `rest_parked` (:112). `has_resting_motion`
+(render_state.rs:403) returns `!rest_parked(float_hold_secs)`, so `needs_frame_tick` drops to false until the idle fade is due; every
+motion restart zeroes `float_hold_secs` (settle_float, arrival, mid-move SnapTo) and the 3 600 s clamp stays parked. Parked pose is
+`FloatOffset::ZERO` (upright, no mid-tilt freeze). Host-level `cursor.float:false` still parks at once (issue option 1, GOAT app side).
+Lead addition: the GNOME Shell helper paints its own resting float from the look JSON (wayland-helper/winrects@cua/extension.js
+`restAmplitude`), so it would keep floating after the Rust cursor parked. The look's float object now carries `park` (pose_stream.rs:187,
+`FloatLook.rest_secs` :99) and the helper honours it (extension.js:111-123, :233-234); a payload without `park` (older driver) never parks,
+an older helper ignores the extra field. The helper's 33 ms repaint timer is unchanged (pre-existing; it does not follow the float).
+
+| Command (rust/) | Exit | Result |
+|---|---|---|
+| child: `cargo test -p cursor-overlay --lib` with `rest_parked` stubbed false | 101 | 154 passed, 2 failed: cursor_pose.rs:395 "parked upright" (1.0 vs 0.0), render_map.rs:810 "a parked cursor rests still" |
+| lead: `cargo test -p cursor-overlay --lib -- the_json_carries_every_sample_and_the_look` before `park` | 101 | pose_stream.rs:719 "the look carries park" |
+| lead: `cargo test -p cursor-overlay --lib` after | 0 | 156 passed (incl. `the_rest_amplitude_parks_at_zero_after_the_rest_window`, `a_visible_resting_default_cursor_parks_until_idle_fade`; upstream's `the_resting_cursor_floats_unless_float_is_off` and `a_visible_resting_cursor_keeps_ticking_for_its_resting_motion` unchanged) |
+| child: `cargo test -p platform-macos --lib cursor` | 0 | 30 passed, 2 ignored |
+| child: `cargo check -p cursor-overlay -p platform-macos --all-targets`; `cargo check -p platform-linux -p platform-windows --all-targets` (host) | 0 / 0 | — |
+| `node --check` on a copy of extension.js | 0 | parses |
+
+Pre-existing (not this lane): building cua-driver-core for cursor-overlay alone warns `LocatorRegistry::Borrowed` / `Locator::new` unused
+(batch_tools/locate.rs:957/:977, test-only callers); identical on origin/main 40c6f6eb and in the wp1 receipt's overlay log.
+NOT RUN: Linux/Windows overlay suites and the GNOME helper (no Linux/GNOME host); manual overlay observation.

@@ -37,6 +37,9 @@ pub const FLOAT_TILT_RADIANS: f64 = 2.5 * std::f64::consts::PI / 180.0;
 pub const FLOAT_HOLD_SECS: f64 = 0.5;
 /// ... then eases back in over this long.
 pub const FLOAT_EASE_IN_SECS: f64 = 0.8;
+/// The float plays this long at full amplitude at rest, then eases back out
+/// to 0 and parks: a resting cursor stops costing frames.
+pub const FLOAT_REST_SECS: f64 = 2.0 * FLOAT_SECS;
 /// A cue at rest with no move before it eases the float out this fast.
 pub const FLOAT_EASE_OUT_SECS: f64 = 0.2;
 /// Hops shorter than this keep no float while travelling (whatever float
@@ -87,13 +90,27 @@ pub fn float_at(secs: f64) -> FloatOffset {
     }
 }
 
+/// Seconds into the rest at which the float starts easing out to park.
+const REST_PARK_SECS: f64 = FLOAT_HOLD_SECS + FLOAT_EASE_IN_SECS + FLOAT_REST_SECS;
+
 /// Float amplitude (0..1) at rest, `hold` seconds after the cursor last
 /// settled, with amplitude `from` at that moment: `from` eases out to 0,
-/// holds at 0 for [`FLOAT_HOLD_SECS`], then eases back in to 1.
+/// holds at 0 for [`FLOAT_HOLD_SECS`], eases back in to 1, plays at full
+/// amplitude for [`FLOAT_REST_SECS`], then eases back out to exactly 0 and
+/// stays parked upright.
 pub fn rest_amplitude(hold: f64, from: f64) -> f64 {
     let out = from.clamp(0.0, 1.0) * (1.0 - smoothstep(hold / FLOAT_EASE_OUT_SECS));
     let back = smoothstep((hold - FLOAT_HOLD_SECS) / FLOAT_EASE_IN_SECS);
-    out.max(back)
+    let park = smoothstep((hold - REST_PARK_SECS) / FLOAT_EASE_IN_SECS);
+    out.max(back) * (1.0 - park)
+}
+
+/// Whether the resting float has parked: [`rest_amplitude`] is exactly 0 from
+/// here on, `hold` seconds after the cursor last settled. A parked cursor
+/// paints [`FloatOffset::ZERO`], so it rests upright rather than frozen
+/// mid-tilt, and the overlay can stop ticking frames.
+pub fn rest_parked(hold: f64) -> bool {
+    hold >= REST_PARK_SECS + FLOAT_EASE_IN_SECS
 }
 
 /// Float amplitude (0..1) while travelling, `t` seconds into `traj`, from
@@ -366,6 +383,34 @@ mod tests {
             assert!((a - last).abs() < 0.05, "smooth at {i}: {last} -> {a}");
             last = a;
         }
+    }
+
+    #[test]
+    fn the_rest_amplitude_parks_at_zero_after_the_rest_window() {
+        let window_end = FLOAT_HOLD_SECS + FLOAT_EASE_IN_SECS + FLOAT_REST_SECS;
+        // The float plays at full amplitude for the whole window ...
+        assert_eq!(rest_amplitude(window_end, 0.0), 1.0);
+        assert!(!rest_parked(window_end));
+        // ... then eases back out to exactly 0 over the ease-in length.
+        let mut last = rest_amplitude(window_end, 0.0);
+        for i in 1..=80 {
+            let hold = window_end + FLOAT_EASE_IN_SECS * f64::from(i) / 80.0;
+            let a = rest_amplitude(hold, 0.0);
+            assert!((0.0..=1.0).contains(&a), "{hold}: {a}");
+            assert!((a - last).abs() < 0.05, "smooth at {hold}: {last} -> {a}");
+            last = a;
+        }
+        assert_eq!(
+            rest_amplitude(window_end + FLOAT_EASE_IN_SECS, 0.0),
+            0.0,
+            "parked upright"
+        );
+        assert!(rest_parked(window_end + FLOAT_EASE_IN_SECS));
+        // Parking is permanent, even from a full amplitude and at the
+        // `float_hold_secs` saturation cap.
+        assert_eq!(rest_amplitude(window_end + 60.0, 1.0), 0.0);
+        assert_eq!(rest_amplitude(3_600.0, 1.0), 0.0);
+        assert!(rest_parked(3_600.0));
     }
 
     #[test]

@@ -107,7 +107,8 @@ function parseFloatLook(value) {
     finiteWithin(f.tilt, 1) && f.tilt >= 0 &&
     finiteWithin(f.hold, 60) && f.hold >= 0 &&
     finiteWithin(f.ease_in, 60) && f.ease_in > 0 &&
-    finiteWithin(f.ease_out, 60) && f.ease_out > 0;
+    finiteWithin(f.ease_out, 60) && f.ease_out > 0 &&
+    (f.park === undefined || (finiteWithin(f.park, 3600) && f.park >= 0));
   if (!ok) return undefined;
   return {
     secs: f.secs,
@@ -118,6 +119,8 @@ function parseFloatLook(value) {
     hold: f.hold,
     easeIn: f.ease_in,
     easeOut: f.ease_out,
+    // A driver that predates parking sends no `park`: the float never parks.
+    park: f.park === undefined ? Infinity : f.park,
   };
 }
 
@@ -222,11 +225,13 @@ function smoothstep(x) {
 }
 
 // cursor_pose::rest_amplitude: `from` eases out to 0, holds at 0 for the
-// click, drop or typing that follows, then eases back in to 1.
+// click, drop or typing that follows, eases back in to 1, then from `park`
+// eases back out to 0 and stays parked upright.
 function restAmplitude(float, hold, from) {
   const out = Math.min(1, Math.max(0, from)) * (1 - smoothstep(hold / float.easeOut));
   const back = smoothstep((hold - float.hold) / float.easeIn);
-  return Math.max(out, back);
+  const park = smoothstep((hold - float.park) / float.easeIn);
+  return Math.max(out, back) * (1 - park);
 }
 
 const STILL = Object.freeze({ dx: 0, dy: 0, rotation: 0 });

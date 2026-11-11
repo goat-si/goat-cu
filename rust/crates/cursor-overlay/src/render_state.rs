@@ -371,6 +371,11 @@ impl RenderStateCore {
     /// animation loops). With both off the cursor rests still, so the overlay
     /// stops rendering once activity settles.
     ///
+    /// The float is bounded too: it plays for
+    /// [`crate::cursor_pose::FLOAT_REST_SECS`] after easing back in, then
+    /// parks upright (`rest_parked`), so a resting cursor costs no frames
+    /// however long the idle-hide delay is.
+    ///
     /// Resting motion is bounded by idle hide: it runs while the idle-hide
     /// countdown runs and stops when the fade hides the cursor. A cursor
     /// configured never to hide (`idle_hide_ms == 0`) rests still, so a
@@ -392,7 +397,10 @@ impl RenderStateCore {
             .as_deref()
             .is_none_or(|theme| theme.id == crate::DEFAULT_THEME_ID);
         if options.float && default_theme {
-            return true;
+            // The float plays for a bounded window after the cursor settles,
+            // then parks upright: a resting cursor stops costing frames while
+            // its idle-hide countdown still runs.
+            return !crate::cursor_pose::rest_parked(self.float_hold_secs);
         }
         let action = self.painted_action();
         match self.theme.as_deref() {

@@ -94,6 +94,9 @@ pub struct FloatLook {
     pub hold_secs: f64,
     pub ease_in_secs: f64,
     pub ease_out_secs: f64,
+    /// How long the float plays at full amplitude at rest before it parks
+    /// (#287).
+    pub rest_secs: f64,
 }
 
 impl FloatLook {
@@ -106,6 +109,7 @@ impl FloatLook {
         hold_secs: crate::cursor_pose::FLOAT_HOLD_SECS,
         ease_in_secs: crate::cursor_pose::FLOAT_EASE_IN_SECS,
         ease_out_secs: crate::cursor_pose::FLOAT_EASE_OUT_SECS,
+        rest_secs: crate::cursor_pose::FLOAT_REST_SECS,
     };
 }
 
@@ -178,6 +182,9 @@ impl PoseLook {
                 "hold": f.hold_secs,
                 "ease_in": f.ease_in_secs,
                 "ease_out": f.ease_out_secs,
+                // #287: rest time at which the float eases back out and
+                // parks upright (`cursor_pose::rest_amplitude`).
+                "park": f.hold_secs + f.ease_in_secs + f.rest_secs,
             })
         });
         let halo = self.halo.map(|halo| {
@@ -714,6 +721,16 @@ mod tests {
         assert_eq!(look["halo"]["stops"].as_array().unwrap().len(), 3);
         assert_eq!(look["float"]["secs"].as_f64().unwrap(), 4.0);
         assert!((look["float"]["sway"].as_f64().unwrap() - FLOAT_SWAY_PT).abs() < 1e-3);
+        // #287: a helper that runs the float itself parks it where the
+        // overlay does: `park` is the rest time at which it eases out.
+        let park = look["float"]["park"]
+            .as_f64()
+            .expect("the look carries park");
+        assert_eq!(crate::cursor_pose::rest_amplitude(park, 0.0), 1.0);
+        assert!(crate::cursor_pose::rest_amplitude(park + 0.4, 0.0) < 1.0);
+        assert!(crate::cursor_pose::rest_parked(
+            park + crate::cursor_pose::FLOAT_EASE_IN_SECS
+        ));
     }
 
     #[test]
