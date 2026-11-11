@@ -3,6 +3,12 @@
 Class C4 (cross-platform merge, security-relevant). Stale check at wp1 P: re-run the 001 classification against the
 then-current HEAD; any new goat-cu commit on `origin/main` is merged first.
 
+wp1 P stale check (2026-11-11 ~18:40 UTC): `origin/main` still `40c6f6eb`; trycua/cua `main` still `c0d3b919`; HEAD `e3dd8120`
+differs from `40c6f6eb` only by `devlog/`, so 001's classification stands. Previous D (wp0): "roadmap locked; next wp1 P
+re-verifies 010 then executes B1–B4" — unchanged direction. Architect dispatch `cu-wp1-architect-261112` failed with 429 (004).
+Host targets installed: `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc` (cross `cargo check` attempted in C; C toolchain
+availability decides RUN/NOT RUN). `cargo-deny` present.
+
 ## B1 — Synthetic upstream commits and 3-way apply (no remote, no clone)
 
 ```sh

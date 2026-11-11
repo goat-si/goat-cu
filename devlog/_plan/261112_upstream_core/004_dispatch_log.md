@@ -10,5 +10,7 @@ provider/model/options; if the provider is unavailable, record the actual return
 | 2026-11-11 ~17:50 | R2 agent-desktop gap list | `cu-r2-adgap-261112` | codex / hyds/deepseek-v4.1-flash / reasoningEffort=high | failed: "exceeded retry limit, last status: 429 Too Many Requests" |
 | 2026-11-11 ~17:50 | R3 issue revalidation | `cu-r3-issues-261112` | codex / hyds/deepseek-v4.1-flash / reasoningEffort=high | failed: "exceeded retry limit, last status: 429 Too Many Requests" |
 | 2026-11-11 ~18:30 | A1 roadmap audit (wp0), mode wait | `cu-a1-roadmap-audit-261112` | codex / hyds/deepseek-v4.1-flash / reasoningEffort=high | failed: "exceeded retry limit, last status: 429 Too Many Requests"; host CPU 98% |
+| 2026-11-11 ~18:40 | wp1 architect proposal, mode wait | `cu-wp1-architect-261112` | codex / hyds/deepseek-v4.1-flash / reasoningEffort=high | failed: "exceeded retry limit, last status: 429 Too Many Requests" |
+| 2026-11-11 ~18:42 | wp1 plan audit, mode wait | `cu-wp1-audit-261112` | codex / hyds/deepseek-v4.1-flash / reasoningEffort=high | failed: "exceeded retry limit, last status: 429 Too Many Requests" |
 
 The lead produced 001–003 directly after these failures.
