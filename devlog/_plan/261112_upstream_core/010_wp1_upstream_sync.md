@@ -305,6 +305,27 @@ cua-agent-setup/cua-home dropped): exit 0, "bans ok, licenses ok, sources ok" (/
 | (goat/compat) `python3 -m unittest -v test_check_protocol` | 0 | 23 OK |
 | Linux / Windows type checks (stand-in C tools; see above) | 0 | platform-linux, platform-windows, core, cursor-overlay |
 
+## D — wp1 closed (2026-11-11 20:55 UTC)
+
+| Ref | SHA |
+|---|---|
+| base goat-cu `origin/main` (fetched at D) | `40c6f6ebf824bccbbbfe1d68cbd17a2085701167` (unchanged) |
+| head (local commit, not pushed) | `1feaeffba34f79cd9ab263e456156ff61937a09c` |
+| upstream synced | trycua/cua `566a4ce655905c0d28065f4f534e221e92916e24` → `c0d3b919fc4621b494353e5a594cd36cd4e125f0` |
+| upstream `main` at D | `e51f57407cac353702d166f24ac776875bbd0b02` (wp1b target; 9e7256bf..e51f5740 is release metadata only) |
+| agent-desktop `main` | `54855b6225aec00da4ac65e2d0362fd41cd9fcb3` (unchanged) |
+
+C receipt: `cxc receipt test -- /tmp/goat-cu-sync/receipt-wp1.sh` exit 0, failures=0
+(`.codexclaw/evidence/01a1cbb2-fe9c-7e60-ba5c-bbe64a2a2346/test-receipt.json`, checkEpoch c-20261111205332-9563b4): kache doctor;
+broad macOS check; core lib 1811; core int 93 (24 binaries); cursor-overlay 153; platform-macos lib 2000 (48 ignored);
+platform-windows host 203; cargo deny; cargo build; check_protocol.py; proto_delta vs 0.40.1-goat.1 (65 = 65, problems 0).
+Linux and Windows target type checks: exit 0 (stand-in C tools).
+
+Unresolved / not applicable: upstream `connect`, release-profile strip/LTO, macOS type_text tail retype and 500 ms give-up,
+web-focus request retries (reasons above); review A2/A3/A5/A6 residuals (above).
+NOT RUN: Linux/Windows linking and tests, clippy for those targets, live macOS fixture runs (no GOAT-owned fixture run in wp1).
+Next: wp1b (011), then wp2/wp3 per 012.
+
 ## Pre-D stale check (2026-11-11 ~18:50 UTC)
 
 `git fetch origin main`: `origin/main` still `40c6f6ebf824bccbbbfe1d68cbd17a2085701167`. vercel-labs/agent-desktop `main` still

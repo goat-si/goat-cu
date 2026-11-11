@@ -1,4 +1,9 @@
-# 011 — wp1b: Sync libs/cua-driver c0d3b919 → 9e7256bf (upstream moved during wp1)
+# 011 — wp1b: Sync libs/cua-driver c0d3b919 → e51f5740 (upstream moved during wp1)
+
+Retargeted at wp1 D (2026-11-11 20:55 UTC): trycua/cua `main` = `e51f57407cac353702d166f24ac776875bbd0b02`. 9e7256bf..e51f5740 is
+4 commits of release metadata (cua-driver-rs 0.47.14 version bump, installer feed pins 0.47.12/0.47.13, a release CI guard);
+in libs/cua-driver only version files, CHANGELOG, Cargo.lock/toml, SKILL.md version line, scripts/_install-rust.sh and install.ps1
+pins change. Version lines stay GOAT; CHANGELOG gains the 0.47.13/0.47.14 entries; installer pins follow the rule used in wp1.
 
 Added at the wp1 pre-D stale check (010 §Pre-D stale check). Same method as 010 B1: synthetic commits from the two extracted
 archives (`/tmp/goat-cu-upstream/<sha>/libs/cua-driver`), `git cherry-pick --no-commit` on top of the committed wp1 merge.
