@@ -44,6 +44,7 @@ use crate::focus_guard;
 use crate::window_change_detector::WindowChangeDetector;
 use core_foundation::base::CFRelease;
 use cua_driver_core::background_input::BackgroundRefusal;
+use cua_driver_core::security_prompt::PromptInput;
 
 use super::ToolState;
 
@@ -89,7 +90,7 @@ fn def() -> &'static ToolDef {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 200,
-                    "description": "Ms between characters in the CGEvent fallback. Default 30."
+                    "description": "Ms between characters in the CGEvent fallback. Default 30 (0 for a terminal): one paced key per character. 0 sends characters in batched key events, fast, which some native fields take only the first character of."
                 },
                 "scope": { "type": "string", "enum": ["window", "desktop"], "default": "window", "description": "\"desktop\" with no pid/window_id types into the frontmost app." },
                 "delivery_mode": {
@@ -158,7 +159,7 @@ impl Tool for TypeTextTool {
             let text =
                 cua_driver_core::text_sanitize::strip_trailing_agent_protocol_tags(&input.text)
                     .into_owned();
-            let delay_ms = args.u64_or("delay_ms", 30).min(200);
+            let delay_ms = args.u64_or("delay_ms", DEFAULT_DELAY_MS).min(200);
             if let Some(refusal) = synthesis_preflight(
                 TextDeliveryRoute::UnicodeSynthesis,
                 text.chars().count(),
@@ -199,9 +200,11 @@ impl Tool for TypeTextTool {
             let posted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let posted_ref = posted.clone();
 
+            let prompt = PromptInput::from_args(&args);
             let result = latency::spawn_action_blocking(move || {
                 super::not_editable::desktop_dispatch_guard(checked_pid, true)?;
                 crate::input::keyboard::type_text_global_with_guard(
+                    prompt,
                     &text,
                     delay_ms,
                     || {
@@ -287,10 +290,13 @@ impl Tool for TypeTextTool {
                         "path": "hid",
                         "effect": "unverifiable"
                     })),
-                Ok(Err(error)) => super::not_editable::account_focus_receipt(
-                    text_delivery_failure("desktop type_text failed", &error),
-                    None,
-                ),
+                Ok(Err(error)) => match crate::security_prompt::tool_result(&error) {
+                    Some(refusal) => refusal,
+                    None => super::not_editable::account_focus_receipt(
+                        text_delivery_failure("desktop type_text failed", &error),
+                        None,
+                    ),
+                },
                 Err(error) => ToolResult::text(format!(
                     "The desktop typing task failed ({error}); it may have posted input before                      failing. Read fresh state before retrying."
                 ))
@@ -345,7 +351,7 @@ impl Tool for TypeTextTool {
             if crate::terminal::is_terminal_pid(pid) {
                 0
             } else {
-                30
+                DEFAULT_DELAY_MS
             }
         });
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
@@ -621,6 +627,7 @@ impl Tool for TypeTextTool {
         let is_terminal_target = crate::terminal::is_terminal_pid(pid);
 
         let blocking_policy = keyboard_policy.clone();
+        let prompt = PromptInput::from_args(&args);
         let native_guard = element_guard.clone();
         let result = focus_guard::with_focus_suppressed(
             Some(pid),
@@ -648,6 +655,7 @@ impl Tool for TypeTextTool {
                             focused_key_route: !delivery_mode.is_foreground()
                                 && element_ptr.is_some()
                                 && crate::input::skylight::is_focus_without_raise_available(),
+                            prompt,
                         },
                     )
                 })
@@ -877,6 +885,9 @@ fn type_text_outcome_result(
 /// Cmd+V went out may already be in the field: it says so as
 /// `effect:"unverifiable"`, so the caller reads the field before typing again.
 pub(crate) fn text_delivery_failure(prefix: &str, error: &anyhow::Error) -> ToolResult {
+    if let Some(refusal) = crate::security_prompt::tool_result(error) {
+        return refusal;
+    }
     let message = format!("{prefix}: {error:#}");
     if let Some(write) = error.downcast_ref::<TextWriteError>() {
         let effect = if write.chain.no_input() {
@@ -1131,8 +1142,15 @@ fn valid_chromium_native_submission(text: &str) -> bool {
     body.is_some_and(|body| !body.contains(['\n', '\r', '\t']))
 }
 
+/// Default `delay_ms`: per-character pacing. Zero selects batched key events
+/// (see `keyboard::type_text_batched`), which a native field can take only
+/// the first character of; upstream (#6884) pairs its zero default with a
+/// retype of the undelivered tail, which GOAT does not adopt (it would resend
+/// after an unconfirmed delivery), so the default stays paced.
+const DEFAULT_DELAY_MS: u64 = 30;
+
 const DELIVERY_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-const DELIVERY_DRAIN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+const DELIVERY_DRAIN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Keyboard-rung policy for one window-addressed background insert, decided
 /// once by the pure exact-target core before any input is posted.
@@ -2618,6 +2636,8 @@ struct KeyboardRoute {
     chromium_native_candidate: bool,
     focused_key_route: bool,
     prior: cua_driver_core::mutation::PriorInput,
+    /// Whether keys may reach an OS security or consent prompt (upstream #7338).
+    prompt: PromptInput,
 }
 
 fn combine_prior(
@@ -2772,6 +2792,7 @@ fn type_text_in_key_window(
         chromium_native_candidate,
         focused_key_route,
         prior,
+        prompt,
     } = route;
     // Original field value before any rung drives read-back verification only.
     // An unreadable value is not evidence that the field is empty — and for a
@@ -2906,7 +2927,17 @@ fn type_text_in_key_window(
         // dropped. 200ms covers that re-grab without penalizing an already
         // armed interactive stream on every text chunk.
         let foreground_settle_ms = foreground_settle_ms(pid, apps::frontmost_pid());
+        // The caller's early AXEnabled read skips a foreground call into a
+        // background app; read it here, after activation, before any key.
+        let ensure_enabled = || match element_ptr_and_idx {
+            Some((ptr, _)) => crate::input::ax_actions::ensure_ax_action_enabled_after_activation(
+                ptr,
+                "type_text",
+            ),
+            None => Ok(()),
+        };
         let do_type = |element: Option<(usize, Option<usize>)>, focus_already_written: bool| {
+            ensure_enabled()?;
             cgevent_type_verified(
                 KeyReceiver {
                     pid,
@@ -2946,6 +2977,7 @@ fn type_text_in_key_window(
                     wid,
                     || {
                         late_fg_cell_check(pid, Some(wid), late_fg_targeted)?;
+                        ensure_enabled()?;
                         if let Some((ptr, _)) = element_ptr_and_idx {
                             let settable = unsafe {
                                 crate::ax::write_outcome::query_settable(
@@ -2972,7 +3004,7 @@ fn type_text_in_key_window(
                                 )
                             }
                         }
-                        crate::input::keyboard::type_text_physical_global(text, delay_ms)
+                        crate::input::keyboard::type_text_physical_global(prompt, text, delay_ms)
                     },
                 )?;
                 (
@@ -4199,6 +4231,7 @@ mod tests {
                 chromium_native_candidate: false,
                 focused_key_route: false,
                 prior: cua_driver_core::mutation::PriorInput::None,
+                prompt: PromptInput::Refuse,
             },
         );
         match r {
@@ -4229,6 +4262,7 @@ mod tests {
                 chromium_native_candidate: false,
                 focused_key_route: false,
                 prior: cua_driver_core::mutation::PriorInput::None,
+                prompt: PromptInput::Refuse,
             },
         )
         .expect("the refusal is a delivery outcome");
@@ -4278,6 +4312,7 @@ mod tests {
                 chromium_native_candidate: false,
                 focused_key_route: false,
                 prior: cua_driver_core::mutation::PriorInput::None,
+                prompt: PromptInput::Refuse,
             },
         )
         .expect("preflight refusal must not attempt the invalid pid");
@@ -4400,6 +4435,14 @@ mod tests {
             || false,
         );
         assert_eq!(delivery, (false, Some(5)));
+    }
+
+    #[test]
+    fn the_default_delay_paces_each_character() {
+        // Batched key events (delay_ms 0) can leave a native field with only
+        // the first character of a batch; GOAT keeps per-character pacing as
+        // the default on every scope and does not retype an unconfirmed tail.
+        assert_eq!(DEFAULT_DELAY_MS, 30);
     }
 
     #[test]

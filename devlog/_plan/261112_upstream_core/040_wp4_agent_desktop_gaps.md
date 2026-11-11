@@ -1,5 +1,7 @@
 # 040 — wp4: agent-desktop core gaps (AD-G1 → #272, AD-G8)
 
+> Re-validated on the merged tree in 012: §A's guard is incomplete — at `Scope::WindowInternal` (semantic.rs:150) `offscreen` is Unknown when clipping is unreadable and evaluate.rs:139-144 still waits out the budget; decide unknown-offscreen for strictly semantic delivery (known hidden/offscreen keeps refusing).
+
 Stale check at wp4 P: re-read `cua-driver-core/src/actionability/evaluate.rs` and the macOS adapter after wp1–wp3.
 
 ## §A — AD-G1 / #272 (+#258 overlap): headless semantic delivery does not need pointer visibility

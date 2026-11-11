@@ -1,5 +1,7 @@
 # 020 — wp2: process identity and session scope (#299, AD-G2, AD-G3, #288)
 
+> Re-validated on the merged tree in 012: §B is wiring only (store already has `publish_*_with_instance` and `resolve_for_instance`), must also cover `refresh_screenshot_for_session` (get_window_state.rs:937), and the ten resolve sites are listed there with current lines.
+
 Stale check at wp2 P: re-locate every cited symbol on the synced tree (wp1 merged `apps/mod.rs`, `get_window_state.rs`,
 `tools/mod.rs`). Class C3 (protocol-additive field + cross-session state).
 

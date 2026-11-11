@@ -187,8 +187,9 @@ impl ScrollTool {
                 {
                     return refusal;
                 }
+                let prompt = cua_driver_core::security_prompt::PromptInput::from_args(&args);
                 let result = latency::spawn_action_blocking(move || {
-                    crate::input::mouse::scroll_wheel_desktop(x, y, delta_y, delta_x, amount)
+                    crate::input::mouse::scroll_wheel_desktop(prompt, x, y, delta_y, delta_x, amount)
                 })
                 .await;
                 match result {
@@ -200,7 +201,9 @@ impl ScrollTool {
                         "path": "hid",
                         "effect": "unverifiable"
                     })),
-                    Ok(Err(error)) => ToolResult::error(format!("desktop scroll failed: {error}")),
+                    Ok(Err(error)) => crate::security_prompt::tool_result(&error).unwrap_or_else(|| {
+                        ToolResult::error(format!("desktop scroll failed: {error}"))
+                    }),
                     Err(error) => ToolResult::error(format!("desktop scroll task failed: {error}")),
                 }
             })

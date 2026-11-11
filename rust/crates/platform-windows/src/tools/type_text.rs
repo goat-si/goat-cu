@@ -11,12 +11,12 @@ use cua_driver_core::{
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use super::click::acquire_uia_pattern;
 use super::impl_::{
     element_target_rect, focus_by_pixel, focus_cached_element_for_foreground,
     overlay_glide_to_target, pin_overlay_above, position_keyboard_cursor, resolve_cursor_key,
     resolve_onscreen_point_with_scroll, ToolState,
 };
-use super::click::acquire_uia_pattern;
 use super::impl_::{keyboard_dispatch_error, keyboard_join_error, FocusUncertain};
 
 // ── type_text ─────────────────────────────────────────────────────────────────
@@ -61,9 +61,13 @@ impl Tool for TypeTextTool {
                 accept synthesized Unicode events without delivering them; use a process \
                 or PTY setup channel instead. Legacy Win32 apps still use the PostMessage \
                 path, preserving the no-focus-steal property.\n\n\
-                `delay_ms` (0–200, default 30) spaces successive characters on the \
-                PostMessage path so autocomplete and IME can keep up. Ignored on the \
-                UIA path (SetValue is atomic).".into(),
+                `delay_ms` (0–200, default 0) sets the pace on the PostMessage and \
+                SendInput paths. 0 sends text in batches of up to 16 UTF-16 units; Return \
+                and Tab stay real key presses. A positive value sends one key per \
+                character with that pause, for debounced search boxes and \
+                autocomplete. If a target takes only part of a batch, the rest is \
+                retyped one paced key at a time. Ignored on the UIA path (SetValue is \
+                atomic).".into(),
             input_schema: json!({
                 "type":"object","required":["text"],"properties":{
                     "session": cua_driver_core::tool_schema::session_schema(),
@@ -74,7 +78,7 @@ impl Tool for TypeTextTool {
                     "element_token":{"type":"string","pattern":"^s[0-9a-f]{8}:[0-9]+$","description":"Opaque element handle from get_window_state. When supplied, type_text writes through UIA ValuePattern and reads that exact element back by handle. The shared ActionResult is confirmed only when the complete expected value is synchronously visible. If SetValue succeeds but read-back is stale or unavailable, the result is unverifiable with no escalation; take a fresh snapshot before retrying because deferred providers may publish only after this call returns."},
                     "x":{"type":"number","description":"Window-local screenshot-pixel X of the field to type into — the element px action form. Pass x,y (no element_token) and the tool pixel-clicks there to establish real renderer focus, then types. Use for Chromium/Electron inputs the UIA/WM_CHAR path can't reach. Read straight off the get_window_state PNG, same convention as click."},
                     "y":{"type":"number","description":"Window-local screenshot-pixel Y of the field (see x)."},
-                    "delay_ms":{"type":"integer","minimum":0,"maximum":200,"description":"Milliseconds between characters. Default 30."},
+                    "delay_ms":{"type":"integer","minimum":0,"maximum":200,"description":"Milliseconds between characters. Default 0 sends batched key events; a positive value sends one key per character with this pause."},
                     "delivery_mode": crate::input::delivery::delivery_mode_schema()
                 },"additionalProperties":false
             }),
@@ -123,7 +127,10 @@ impl Tool for TypeTextTool {
                     "scope": "desktop", "path": "SendInput", "characters": text_len,
                     "effect": "unverifiable"
                 })),
-                Ok(Err(error)) => ToolResult::error(error.to_string()),
+                Ok(Err(error)) if crate::input::keyboard::is_foreground_envelope(&error) => {
+                    crate::input::keyboard::foreground_input_error(error)
+                }
+                Ok(Err(error)) => keyboard_dispatch_error(error),
                 Err(error) => ToolResult::error(format!("desktop type task failed: {error}")),
             };
         }
@@ -209,7 +216,7 @@ impl Tool for TypeTextTool {
             }
             _ => None,
         };
-        let _delay_ms = args.u64_or("delay_ms", 30).min(200);
+        let _delay_ms = cua_driver_core::type_pacing::delay_from_args(&args);
         let hwnd = match hwnd_opt {
             Some(h) => h,
             None => {
@@ -317,7 +324,7 @@ impl Tool for TypeTextTool {
                 let (cx, cy) = match resolve_onscreen_point_with_scroll(
                     &admitted,
                     hwnd,
-                    idx as usize,
+                    idx,
                     cx,
                     cy,
                     "foreground typing",
@@ -325,21 +332,32 @@ impl Tool for TypeTextTool {
                     Ok(point) => point,
                     Err(result) => return result,
                 };
-                Some((idx as usize, (cx, cy)))
+                Some((idx, (cx, cy)))
             } else {
                 None
             };
             let text_fg = text.clone();
+            let fg_delay_ms = _delay_ms;
             let r = tokio::task::spawn_blocking({
                 let admitted = admitted.clone();
                 move || {
                     let _admission = &admitted;
-                    crate::input::send_text_synthesized_after_focus(hwnd, &text_fg, || {
-                        if let Some((idx, point)) = focus_target {
-                            focus_cached_element_for_foreground(&admitted, hwnd, idx, Some(point))?;
-                        }
-                        Ok(())
-                    })
+                    crate::input::send_text_synthesized_paced_after_focus(
+                        hwnd,
+                        &text_fg,
+                        fg_delay_ms,
+                        || {
+                            if let Some((idx, point)) = focus_target {
+                                focus_cached_element_for_foreground(
+                                    &admitted,
+                                    hwnd,
+                                    idx,
+                                    Some(point),
+                                )?;
+                            }
+                            Ok(())
+                        },
+                    )
                 }
             })
             .await;
@@ -358,6 +376,7 @@ impl Tool for TypeTextTool {
                 Ok(Err(e)) if e.downcast_ref::<FocusUncertain>().is_some() => crate::uia_mutation::chain_error(e.to_string(),
                     json!({"path":"uia", "verified":false}),
                     [cua_driver_core::mutation::WriteOutcome::StopUncertain(cua_driver_core::mutation::Reason::Unknown)], true),
+                Ok(Err(e)) if crate::input::keyboard::is_foreground_envelope(&e) => crate::input::keyboard::foreground_input_error(e),
                 Ok(Err(e)) => keyboard_dispatch_error(e),
                 Err(e)     => keyboard_join_error(e),
             };
@@ -609,7 +628,7 @@ impl Tool for TypeTextTool {
         // can't confirm (conservative: under-claim rather than false-succeed).
         let text_for_post = text.clone();
         let verify_pid = pid;
-        let verify_idx = elem_idx.map(|i| i as usize);
+        let verify_idx = elem_idx;
         let delay_ms = _delay_ms;
         let result = tokio::task::spawn_blocking({
             let admitted = admitted.clone();
@@ -642,8 +661,13 @@ impl Tool for TypeTextTool {
                     };
                     match plan_tail_retry(b, a, &text_for_post) {
                         TailPlan::Retype(tail) => {
-                            post_res =
-                                crate::input::post_type_text_with_delay(hwnd, &tail, delay_ms);
+                            // A target that took only part of the batch gets
+                            // the rest one paced key at a time.
+                            post_res = crate::input::post_type_text_with_delay(
+                                hwnd,
+                                &tail,
+                                delay_ms.max(cua_driver_core::type_pacing::TAIL_DELAY_MS),
+                            );
                             std::thread::sleep(std::time::Duration::from_millis(40));
                             after = read(verify_idx);
                         }

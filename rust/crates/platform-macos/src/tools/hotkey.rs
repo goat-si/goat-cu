@@ -17,6 +17,7 @@ use std::sync::Arc;
 use crate::apps;
 use crate::focus_guard;
 use crate::window_change_detector::WindowChangeDetector;
+use cua_driver_core::security_prompt::PromptInput;
 
 use super::ToolState;
 
@@ -279,6 +280,7 @@ impl Tool for HotkeyTool {
                 );
             };
             let display = raw_keys.join("+");
+            let prompt = PromptInput::from_args(&args);
             let control = Arc::new(crate::input::key_hold::HoldControl::default());
             #[cfg(test)]
             let test_delivery = self.test_delivery.clone();
@@ -291,6 +293,7 @@ impl Tool for HotkeyTool {
                 if let Some(delivery) = test_delivery {
                     return delivery(&key, &modifier_refs, duration, &control);
                 }
+                crate::security_prompt::refuse_frontmost_keys(prompt)?;
                 crate::input::key_hold::deliver(
                     crate::input::key_hold::KeyRoute::Global(None),
                     &key,
@@ -307,7 +310,11 @@ impl Tool for HotkeyTool {
                         "path": "hid",
                         "effect": "unverifiable"
                     })),
-                Ok(Err(error)) => ToolResult::error(format!("desktop hotkey failed: {error}")),
+                Ok(Err(error)) => {
+                    crate::security_prompt::tool_result(&error).unwrap_or_else(|| {
+                        ToolResult::error(format!("desktop hotkey failed: {error}"))
+                    })
+                }
                 Err(error) => ToolResult::error(format!("desktop hotkey task failed: {error}")),
             };
         }
@@ -662,6 +669,7 @@ impl Tool for HotkeyTool {
         // and the prior frontmost is restored if the activation lingers.
         let prior_front = apps::frontmost_pid();
         let snapshot = WindowChangeDetector::snapshot(prior_front);
+        let prompt = PromptInput::from_args(&args);
 
         let control = Arc::new(crate::input::key_hold::HoldControl::default());
         let result = focus_guard::with_focus_suppressed(
@@ -702,9 +710,9 @@ impl Tool for HotkeyTool {
                                 wid,
                                 || {
                                     if screen_sharing_target {
-                                        crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control)
+                                        { crate::security_prompt::refuse_frontmost_keys(prompt)?; crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control) }
                                     } else {
-                                        crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Global(Some(pid)), &key, &m, duration, &control)
+                                        { crate::security_prompt::refuse_frontmost_keys(prompt)?; crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Global(Some(pid)), &key, &m, duration, &control) }
                                     }
                                 },
                             )?;
@@ -720,7 +728,7 @@ impl Tool for HotkeyTool {
                                 wid,
                                 || {
                                     focus_hotkey_element(pid, ptr)?;
-                                    crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control)
+                                    { crate::security_prompt::refuse_frontmost_keys(prompt)?; crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control) }
                                 },
                             )?;
                             Ok(())
@@ -730,7 +738,7 @@ impl Tool for HotkeyTool {
                                 pid as libc::pid_t,
                                 wid,
                                 || {
-                                    crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control)
+                                    { crate::security_prompt::refuse_frontmost_keys(prompt)?; crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control) }
                                 },
                             )?;
                             Ok(())
@@ -767,7 +775,8 @@ impl Tool for HotkeyTool {
             Ok(Err(e)) if e.is::<super::press_key::WindowFocusConflictError>() => {
                 super::press_key::delivery_failed(e)
             }
-            Ok(Err(e)) => ToolResult::error(format!("hotkey failed: {e}")),
+            Ok(Err(e)) => crate::security_prompt::tool_result(&e)
+                .unwrap_or_else(|| ToolResult::error(format!("hotkey failed: {e}"))),
             Err(e) => ToolResult::error(format!("Task error: {e}")),
         }
     }

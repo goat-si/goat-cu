@@ -1483,7 +1483,13 @@ impl ToolRegistry {
                     identities.clear_for_session(session_id);
                 }
                 crate::agent_cursor::forget_input_origin(session_id);
-                if let Some(ownership) = weak_ownership.upgrade() {
+                // An idle sweep only pauses a session: the same label can be
+                // started again and still owns what it launched. A later
+                // terminal end reruns this hook and drops it.
+                if let Some(ownership) = weak_ownership.upgrade().filter(|_| {
+                    crate::session::session_end_reason(session_id)
+                        != Some(crate::session::SessionEndReason::IdleTimeout)
+                }) {
                     ownership.remove_session(session_id);
                 }
                 if let Some(captures) = weak_captures.upgrade() {
@@ -2061,6 +2067,10 @@ impl ToolRegistry {
         evidence: &TrustedInvocationEvidence,
     ) -> ToolResult {
         let seed = crate::recovery_hint::Seed::from_args(&args);
+        let nudge_args = serde_json::json!({
+            "pid": args.get("pid"),
+            "window_id": args.get("window_id"),
+        });
         let session = args
             .get("session")
             .and_then(Value::as_str)
@@ -2125,7 +2135,7 @@ impl ToolRegistry {
             crate::fast_path::wire::attach_delta(&mut result, delta);
         }
         crate::recovery_hint::annotate(tool, &seed, &mut result);
-        crate::batch_nudge::annotate(tool, session.as_deref(), in_batch, &mut result);
+        crate::batch_nudge::annotate(tool, session.as_deref(), in_batch, &nudge_args, &mut result);
         let read_only = self
             .tools
             .get(tool)
@@ -2329,9 +2339,11 @@ impl ToolRegistry {
                 .get("_transport_session_id")
                 .and_then(Value::as_str)
                 .unwrap_or(session);
-            // An unnamed session reclaimed by the idle sweep is recreated at
-            // lifecycle admission below; every other ended episode refuses
-            // with the recovery that actually applies to its identity.
+            // An unnamed session reclaimed by the idle sweep, or a label its
+            // closed owner transport released without `end_session`, is
+            // recreated at lifecycle admission below; every other ended
+            // episode refuses with the recovery that actually applies to its
+            // identity.
             if !matches!(resolved_name, "start_session" | "end_session")
                 && crate::session::is_session_ended(session)
                 && !crate::session::recreates_on_next_call(session, owner)
@@ -2908,6 +2920,11 @@ impl ToolRegistry {
         // Desktop pixels read off a capped get_desktop_state image are mapped
         // back to the uncapped capture before any platform interprets them.
         crate::desktop_capture_scale::map_desktop_args(&mut args);
+        // The platform refuses input that would reach an OS security or
+        // consent prompt unless the adapter lifts it for this call's mode.
+        if has_adapter(crate::security_prompt::ADAPTER_ID) {
+            crate::security_prompt::PromptInput::for_mode(context.mode()).stamp(&mut args);
+        }
         crate::tool_activity::note_tool_activity();
         // A desktop lane refusal never reached the tool.
         *dispatched = lane_refusal.is_none();
@@ -3092,18 +3109,15 @@ impl ToolRegistry {
         // entirely to avoid wasted capture work). We push for the same set
         // of action tools the recording pipeline cares about (non-read-only,
         // not the recording-control meta-tools) so the live view matches
-        // what the recorder would have captured for the turn.
+        // what the recorder would have captured for the turn. The frame is
+        // only a preview, so it is captured off the request path: capturing
+        // and encoding a large window held the result back for up to 2 s.
         if pip_hook::pip_enabled() && should_record && !private_consent_turn {
-            let window_id = args.opt_u64("window_id");
-            let pid = args.opt_i64("pid");
-            if let Some(png_bytes) = screenshot_for(window_id, pid) {
-                let label = synthesize_action_label(name, &public_args);
-                pip_hook::push_pip_frame(pip_hook::PipHookFrame {
-                    png_bytes,
-                    action_label: label,
-                    timestamp_ms: now_ms(),
-                });
-            }
+            push_pip_frame_in_background(
+                args.opt_u64("window_id"),
+                args.opt_i64("pid"),
+                synthesize_action_label(name, &public_args),
+            );
         }
 
         if renamed_tool(original_name).is_some() {
@@ -7127,6 +7141,63 @@ allow:
         assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
+    /// The platform lets input reach an OS security or consent prompt only
+    /// when the dispatch boundary stamped the call. Only unrestricted mode
+    /// stamps it, and a caller cannot forge the stamp.
+    #[tokio::test]
+    async fn only_unrestricted_dispatch_lets_input_reach_an_os_security_prompt() {
+        use crate::security_prompt::{PromptInput, ALLOW_ARG};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let last_args = Arc::new(Mutex::new(None));
+        let mut registry = super::ToolRegistry::new();
+        for name in ["click", "move_cursor"] {
+            registry.register(Box::new(ArgumentProbe {
+                hits: hits.clone(),
+                last_args: last_args.clone(),
+                def: super::ToolDef {
+                    name: name.into(),
+                    description: "test input".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    read_only: false,
+                    destructive: false,
+                    idempotent: false,
+                    open_world: false,
+                },
+            }));
+        }
+        let registry = Arc::new(registry);
+        let received = |tool: &'static str, context| {
+            let registry = registry.clone();
+            let last_args = last_args.clone();
+            async move {
+                let result = registry
+                    .invoke_with_context(
+                        tool,
+                        serde_json::json!({"scope": "desktop", "x": 1, "y": 1, ALLOW_ARG: true}),
+                        context,
+                    )
+                    .await;
+                assert_ne!(result.is_error, Some(true), "{result:?}");
+                let args = last_args.lock().unwrap().take().expect("arguments");
+                PromptInput::from_args(&args)
+            }
+        };
+        assert_eq!(
+            received("click", standard_context()).await,
+            PromptInput::Refuse,
+            "a forged stamp must not survive the boundary"
+        );
+        assert_eq!(
+            received("click", unrestricted_context()).await,
+            PromptInput::Allow
+        );
+        assert_eq!(
+            received("move_cursor", unrestricted_context()).await,
+            PromptInput::Refuse,
+            "only tools the adapter covers are stamped"
+        );
+    }
+
     #[tokio::test]
     async fn os_permission_prompt_is_never_agent_controllable() {
         let hits = Arc::new(AtomicUsize::new(0));
@@ -7616,6 +7687,208 @@ resources:
             .await;
         assert_ne!(result.is_error, Some(true));
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_idle_ended_session_keeps_its_launches_for_its_own_label_only() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let mut registry = attested_registry("kill_app", None, hits.clone(), false);
+        let tools = Arc::get_mut(&mut registry).unwrap();
+        tools.register(Box::new(crate::session_tools::StartSessionTool));
+        tools.register(Box::new(crate::session_tools::EndSessionTool));
+        let context = standard_context();
+        let prefix = format!("__cua_runtime_{}:", context.runtime_scope_key());
+        let call = |name: &'static str, session: &'static str| {
+            let registry = registry.clone();
+            let context = context.clone();
+            async move {
+                registry
+                    .invoke_with_context(
+                        name,
+                        serde_json::json!({"pid": 424242, "session": session}),
+                        context,
+                    )
+                    .await
+            }
+        };
+        let refusal_code = |result: &ToolResult| {
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.pointer("/refusal/code"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        let launched = || {
+            registry
+                .protected_resource_ownership()
+                .mark_driver_owned_process(
+                    &context.runtime_session_key("run"),
+                    crate::browser::ProcessFingerprint {
+                        pid: 424242,
+                        start_time: Some(7),
+                        executable: Some(fixture_executable()),
+                    },
+                );
+        };
+
+        // launch_app under "run", then the run idles past the sweep and the
+        // client starts "run" again.
+        assert_ne!(call("start_session", "run").await.is_error, Some(true));
+        launched();
+        assert_eq!(
+            crate::session::evict_idle_with_prefix(Duration::ZERO, &prefix).len(),
+            1
+        );
+        assert_ne!(call("start_session", "run").await.is_error, Some(true));
+
+        // Another session still cannot kill the process.
+        assert_ne!(call("start_session", "other").await.is_error, Some(true));
+        assert_eq!(
+            refusal_code(&call("kill_app", "other").await).as_deref(),
+            Some("foreign_process_termination_denied")
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        let killed = call("kill_app", "run").await;
+        assert_ne!(killed.is_error, Some(true), "{killed:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // Every terminal end drops the launch records, whether the session
+        // was live or had already idled out: end_session, transport
+        // teardown, and revocation.
+        let run = context.runtime_session_key("run");
+        for terminal in ["end_session", "transport", "revoke"] {
+            for idle_first in [false, true] {
+                launched();
+                if idle_first {
+                    crate::session::evict_idle_with_prefix(Duration::ZERO, &prefix);
+                }
+                match terminal {
+                    "end_session" => {
+                        assert_ne!(call("end_session", "run").await.is_error, Some(true));
+                    }
+                    "transport" => {
+                        assert_eq!(
+                            crate::session::end_sessions_for_owner(
+                                &run,
+                                crate::session::SessionEndReason::ProcessExit
+                            ),
+                            1
+                        );
+                    }
+                    _ => {
+                        assert!(crate::session::revoke_sessions_with_prefix(&prefix) >= 1);
+                    }
+                }
+                assert!(
+                    !registry
+                        .protected_resource_ownership()
+                        .is_driver_owned_pid(&run, 424242),
+                    "{terminal} idle_first={idle_first}"
+                );
+                assert_ne!(call("start_session", "run").await.is_error, Some(true));
+                assert_eq!(
+                    refusal_code(&call("kill_app", "run").await).as_deref(),
+                    Some("foreign_process_termination_denied"),
+                    "{terminal} idle_first={idle_first}"
+                );
+            }
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        crate::session::revoke_sessions_with_prefix(&prefix);
+        crate::session::forget_ended_sessions_with_prefix(&prefix);
+    }
+
+    #[tokio::test]
+    async fn ending_an_idled_session_keeps_the_launches_of_its_next_episode() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let mut registry = attested_registry("kill_app", None, hits.clone(), false);
+        let tools = Arc::get_mut(&mut registry).unwrap();
+        tools.register(Box::new(crate::session_tools::StartSessionTool));
+        tools.register(Box::new(crate::session_tools::EndSessionTool));
+        let context = standard_context();
+        let prefix = format!("__cua_runtime_{}:", context.runtime_scope_key());
+        let run = context.runtime_session_key("revived");
+        let call = |name: &'static str| {
+            let registry = registry.clone();
+            let context = context.clone();
+            async move {
+                registry
+                    .invoke_with_context(
+                        name,
+                        serde_json::json!({"pid": 424242, "session": "revived"}),
+                        context,
+                    )
+                    .await
+            }
+        };
+        let fingerprint = crate::browser::ProcessFingerprint {
+            pid: 424242,
+            start_time: Some(7),
+            executable: Some(fixture_executable()),
+        };
+        assert_ne!(call("start_session").await.is_error, Some(true));
+        registry
+            .protected_resource_ownership()
+            .mark_driver_owned_process(&run, fingerprint.clone());
+        crate::session::evict_idle_with_prefix(Duration::ZERO, &prefix);
+
+        // A revival racing the explicit end lands while its cleanup runs and
+        // records a launch for the next episode if it is admitted.
+        let ownership = Arc::downgrade(&registry.protected_resource_ownership());
+        let observed = run.clone();
+        let raced = Arc::new(std::sync::Mutex::new(None));
+        let raced_in_hook = raced.clone();
+        let _race = crate::session::register_scoped_session_end_hook(move |ended| {
+            if ended != observed
+                || crate::session::session_end_reason(ended)
+                    == Some(crate::session::SessionEndReason::IdleTimeout)
+            {
+                return;
+            }
+            let revived = crate::session::activate_or_revive_session_for_owner(
+                ended,
+                Some("revived"),
+                ended,
+                false,
+                crate::session::SessionTransport::Daemon,
+                crate::session::SessionClientKind::Cli,
+                None,
+            );
+            if revived.is_ok() {
+                if let Some(ownership) = ownership.upgrade() {
+                    ownership.mark_driver_owned_process(ended, fingerprint.clone());
+                }
+            }
+            raced_in_hook.lock().unwrap().replace(revived.is_ok());
+        });
+        assert_ne!(call("end_session").await.is_error, Some(true));
+        assert_eq!(
+            *raced.lock().unwrap(),
+            Some(false),
+            "the end ran its cleanup and refused the revival meanwhile"
+        );
+
+        // The next episode starts after cleanup, and its launch stays.
+        assert_ne!(call("start_session").await.is_error, Some(true));
+        registry
+            .protected_resource_ownership()
+            .mark_driver_owned_process(
+                &run,
+                crate::browser::ProcessFingerprint {
+                    pid: 424242,
+                    start_time: Some(7),
+                    executable: Some(fixture_executable()),
+                },
+            );
+        let killed = call("kill_app").await;
+        assert_ne!(killed.is_error, Some(true), "{killed:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        crate::session::revoke_sessions_with_prefix(&prefix);
+        crate::session::forget_ended_sessions_with_prefix(&prefix);
     }
 
     #[tokio::test]
@@ -9810,6 +10083,40 @@ impl Default for ToolRegistry {
     }
 }
 
+/// A PiP frame capture is running; a newer request waits for the next action
+/// instead of queueing behind it.
+static PIP_CAPTURE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Capture the action's window for the PiP preview on its own thread, so the
+/// tool result does not wait for it. At most one capture runs at a time.
+fn push_pip_frame_in_background(window_id: Option<u64>, pid: Option<i64>, label: String) {
+    use std::sync::atomic::Ordering;
+    struct Busy;
+    impl Drop for Busy {
+        fn drop(&mut self) {
+            PIP_CAPTURE_BUSY.store(false, Ordering::Release);
+        }
+    }
+    if PIP_CAPTURE_BUSY.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("pip-frame".into())
+        .spawn(move || {
+            let _busy = Busy;
+            if let Some(png_bytes) = screenshot_for(window_id, pid) {
+                pip_hook::push_pip_frame(pip_hook::PipHookFrame {
+                    png_bytes,
+                    action_label: label,
+                    timestamp_ms: now_ms(),
+                });
+            }
+        });
+    if spawned.is_err() {
+        PIP_CAPTURE_BUSY.store(false, Ordering::Release);
+    }
+}
+
 /// Build a short, human-friendly label for the PiP overlay from the
 /// tool name + raw args. Kept under ~60 chars so the macOS NSTextField
 /// has room without truncation at default geometry.
@@ -10493,7 +10800,13 @@ mod capability_tests {
         // Keys old consumers (Swift Hermes, the .NET driver, etc.)
         // already read — must still be present.
         assert_eq!(entry["name"], "click");
-        assert_eq!(entry["description"], "Click an element.");
+        // `click` also carries the one-line batching pointer.
+        let description = entry["description"].as_str().unwrap();
+        assert!(
+            description.starts_with("Click an element."),
+            "{description}"
+        );
+        assert!(description.contains("run_steps"), "{description}");
         assert!(entry["inputSchema"].is_object());
         assert_eq!(entry["annotations"]["readOnlyHint"], false);
         assert_eq!(entry["annotations"]["destructiveHint"], true);

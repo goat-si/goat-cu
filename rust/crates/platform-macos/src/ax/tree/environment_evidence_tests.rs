@@ -865,7 +865,7 @@ fn scope_candidate_reads_preserve_unknown_and_absent() {
             });
             let role_present = name != "AXRole" || case == 1;
             assert_eq!(id_calls.get(), usize::from(role_present));
-            let decision = decide_window_scope(&[observed.legacy], 42, || WindowOwner::SamePid);
+            let decision = decide_window_scope(&[observed.legacy], 42, None, || WindowOwner::SamePid);
             if role_present {
                 assert_eq!(decision.scope, WindowScope::Matched);
             } else {

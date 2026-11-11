@@ -126,6 +126,7 @@ pub mod image_utils;
 pub mod input_resource;
 #[cfg(test)]
 mod input_resource_tests;
+pub mod input_pacing;
 pub mod interactive_input;
 pub mod key_cancellation;
 pub mod key_pacing;
@@ -150,6 +151,7 @@ pub mod recording_zoom;
 pub mod recovery_hint;
 #[cfg(feature = "script")]
 pub mod script_tool;
+pub mod security_prompt;
 pub mod server;
 pub mod session;
 pub mod session_authorization;
@@ -169,6 +171,7 @@ pub mod tool_activity;
 pub mod tool_args;
 pub mod tool_schema;
 pub mod tree_boundary;
+pub mod type_pacing;
 pub mod video;
 pub mod video_ffmpeg;
 pub mod walk_budget;

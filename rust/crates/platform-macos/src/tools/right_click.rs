@@ -606,6 +606,7 @@ impl RightClickTool {
             target_element: None,
             click: Some((screen_x, screen_y)),
         };
+        let prompt = cua_driver_core::security_prompt::PromptInput::from_args(&args);
         let result = latency::spawn_blocking(move || -> anyhow::Result<_> {
             let _action = latency::span(latency::Stage::ActionBlocking);
             let do_it =
@@ -621,7 +622,7 @@ impl RightClickTool {
                         // Warp the hardware pointer and post at the HID tap; see
                         // `pixel_route` for the cross-platform foreground contract.
                         crate::input::mouse::click_at_xy_desktop_with_modifiers(
-                            screen_x, screen_y, 1, "right", &m,
+                            prompt, screen_x, screen_y, 1, "right", &m,
                         )
                     } else if let Some(wid) = window_id {
                         crate::input::mouse::right_click_at_xy_with_window_local(
@@ -696,14 +697,17 @@ impl RightClickTool {
                 fg,
                 Some(ownership),
             ),
-            Ok(Err(e)) if route == super::pixel_route::PixelClickRoute::ForegroundHid => {
-                super::pixel_route::foreground_unavailable(
-                    "Right-click",
-                    window_id.unwrap_or_default(),
-                    &e.to_string(),
-                )
-            }
-            Ok(Err(e)) => ToolResult::error(format!("Right-click failed: {e}")),
+            Ok(Err(e)) => match crate::security_prompt::tool_result(&e) {
+                Some(refusal) => refusal,
+                None if route == super::pixel_route::PixelClickRoute::ForegroundHid => {
+                    super::pixel_route::foreground_unavailable(
+                        "Right-click",
+                        window_id.unwrap_or_default(),
+                        &e.to_string(),
+                    )
+                }
+                None => ToolResult::error(format!("Right-click failed: {e}")),
+            },
             Err(e) => ToolResult::error(format!("Task error: {e}")),
         }
     }

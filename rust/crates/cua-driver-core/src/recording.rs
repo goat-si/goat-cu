@@ -163,26 +163,26 @@ pub fn set_budgeted_ax_snapshot_fn(
     let _ = AX_SNAPSHOT_FN.set(Arc::new(f));
 }
 
-/// Hooks abandoned at their backstop and still running, per target pid. While
-/// one is outstanding the recorder does not start another walk of the same
-/// application, so a hung accessibility provider cannot accumulate threads.
-static ABANDONED_STATE_CAPTURES: OnceLock<Mutex<HashMap<i64, usize>>> = OnceLock::new();
+/// A state walk in flight for one target pid. At most one exists per pid, so
+/// a hung accessibility provider cannot accumulate threads and two turns
+/// cannot walk the same application at once.
+#[derive(Debug, Clone, Copy)]
+enum Worker {
+    /// The turn that started the walk is still waiting for it.
+    Running,
+    /// The turn gave up at its backstop; the thread is left to finish.
+    Abandoned { since: Instant },
+}
 
-fn abandoned_state_captures() -> std::sync::MutexGuard<'static, HashMap<i64, usize>> {
-    ABANDONED_STATE_CAPTURES
+/// Per-pid state workers. Every check, insert, transition and removal holds
+/// this lock, which guards nothing else.
+static STATE_CAPTURE_WORKERS: OnceLock<Mutex<HashMap<i64, Worker>>> = OnceLock::new();
+
+fn state_capture_workers() -> std::sync::MutexGuard<'static, HashMap<i64, Worker>> {
+    STATE_CAPTURE_WORKERS
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn release_abandoned_state_capture(key: i64) {
-    let mut abandoned = abandoned_state_captures();
-    if let Some(count) = abandoned.get_mut(&key) {
-        *count = count.saturating_sub(1);
-        if *count == 0 {
-            abandoned.remove(&key);
-        }
-    }
 }
 
 /// Outcome of one phase's application-state capture.
@@ -256,50 +256,74 @@ fn run_state_hook(
     pid: Option<i64>,
     budget: StateCaptureBudget,
 ) -> StateCapture {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::collections::hash_map::Entry;
     let key = pid.unwrap_or(-1);
-    if abandoned_state_captures()
-        .get(&key)
-        .is_some_and(|count| *count > 0)
-    {
+    let busy = match state_capture_workers().entry(key) {
+        Entry::Occupied(worker) => Some(*worker.get()),
+        Entry::Vacant(slot) => {
+            slot.insert(Worker::Running);
+            None
+        }
+    };
+    if let Some(worker) = busy {
+        if let Worker::Abandoned { since } = worker {
+            tracing::debug!(
+                target: "recording",
+                "application-state capture for pid {key} skipped; a walk abandoned {} ms ago \
+                 is still running",
+                since.elapsed().as_millis()
+            );
+        }
         return StateCapture::unavailable("state_capture_busy");
     }
-    let abandoned = Arc::new(AtomicBool::new(false));
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    let worker_abandoned = abandoned.clone();
     let spawned = std::thread::Builder::new()
         .name("cua-recording-state".into())
         .spawn(move || {
-            let result = hook(window_id, pid, budget);
-            if worker_abandoned.swap(true, Ordering::SeqCst) {
-                release_abandoned_state_capture(key);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                hook(window_id, pid, budget)
+            }))
+            .unwrap_or(None);
+            let mut workers = state_capture_workers();
+            if let Some(Worker::Abandoned { .. }) = workers.get(&key) {
+                workers.remove(&key);
             } else {
                 let _ = sender.send(result);
             }
         });
     if spawned.is_err() {
+        state_capture_workers().remove(&key);
         return StateCapture::unavailable("capture_failed");
     }
     let received = match receiver.recv_timeout(budget.backstop()) {
         Ok(result) => Some(result),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            *abandoned_state_captures().entry(key).or_insert(0) += 1;
-            if abandoned.swap(true, Ordering::SeqCst) {
-                // The worker finished between the timeout and the mark.
-                release_abandoned_state_capture(key);
-                receiver.try_recv().ok()
-            } else {
-                tracing::warn!(
-                    target: "recording",
-                    "application-state capture for pid {key} exceeded its {} ms budget; \
-                     recording the turn without state",
-                    budget.timeout_ms
-                );
-                return StateCapture::unavailable("state_capture_timeout");
+            let mut workers = state_capture_workers();
+            // The worker sends under this lock, so a result is either here
+            // now or the worker will see `Abandoned` and clean up itself.
+            match receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(_) => {
+                    workers.insert(
+                        key,
+                        Worker::Abandoned {
+                            since: Instant::now(),
+                        },
+                    );
+                    drop(workers);
+                    tracing::warn!(
+                        target: "recording",
+                        "application-state capture for pid {key} exceeded its {} ms budget; \
+                         recording the turn without state",
+                        budget.timeout_ms
+                    );
+                    return StateCapture::unavailable("state_capture_timeout");
+                }
             }
         }
     };
+    state_capture_workers().remove(&key);
     match received.flatten() {
         Some(bytes) => StateCapture::captured(bytes),
         None => StateCapture::unavailable("capture_failed"),
@@ -329,6 +353,8 @@ enum StatePlan {
 /// Classification for application state that was not walked because the
 /// action was refused before any input was dispatched.
 pub const STATE_SKIPPED_REFUSED: &str = "action_refused_before_dispatch";
+/// Classification for a turn whose pid has no window to photograph or walk.
+pub const TARGET_UNAVAILABLE: &str = "target_unavailable";
 /// Classification for application state disabled by `start_recording`.
 pub const STATE_SKIPPED_DISABLED: &str = "state_capture_disabled";
 /// Classification for before-state skipped on a predicted refusal that the
@@ -580,6 +606,19 @@ impl RecordingCaller<'_> {
     }
 }
 
+/// Which recording a stop applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopBy<'a> {
+    /// Manual stop and runtime shutdown: whatever recording is live.
+    Anyone,
+    /// Session end: only a recording this session owns. An anonymous
+    /// recording is owned by nobody, so only [`StopBy::Anyone`] reaches it.
+    Owner(&'a str),
+    /// Idle TTL: only the generation the caller read from
+    /// [`RecordingState::generation`], never a recording started after it.
+    Generation(u64),
+}
+
 /// Persistent recording session state owned by one tool registry.
 pub struct RecordingSession {
     inner: Mutex<RecordingInner>,
@@ -587,50 +626,110 @@ pub struct RecordingSession {
 }
 
 struct RecordingInner {
-    enabled: bool,
+    /// Bumped by every start; a turn or idle stop names the one it read.
     generation: u64,
-    /// Session that owns the live recording, stamped on every successful
-    /// `start()` from the daemon-injected `_session_id`. The daemon-global
-    /// recorder is a singleton, so when session A starts a recording and
-    /// session B later starts another (clobbering A's), A's disconnect must
-    /// NOT stop B's recording. The proxy-exit `session_end` hook passes its
-    /// own session id to `stop_owner()`, which no-ops when the live owner has
-    /// moved on. `None` means the recording was started anonymously (CLI
-    /// one-shot) and is owned by nobody — only an
-    /// unconditional `stop_owner(None)` can tear it down. Supersedes the
-    /// #1775 generation token: a session id is a stable owner identity rather
-    /// than a monotonic counter, and it doubles as the config-override key.
-    owner: Option<String>,
-    output_dir: Option<PathBuf>,
-    #[cfg(any(unix, windows))]
-    private_dir: Option<crate::private_artifact::PrivateDir>,
+    recorder: Recorder,
     /// Per-turn application-state budget, or `None` when the caller disabled
     /// state capture with `include_accessibility_tree: false`.
     state_budget: Option<StateCaptureBudget>,
-    next_turn: u32,
-    session_start_ms: u64,
-    /// Monotonic clock anchor for the cursor sampler so its `t_ms`
-    /// matches the action-timeline anchor in `action.json`.
-    session_monotonic_start: Option<Instant>,
     last_error: Option<String>,
-    /// Live video backend when capture is active. Recreated per
-    /// session. The concrete type is platform-determined (SCKit on
-    /// macOS, ffmpeg subprocess elsewhere).
+}
+
+enum Recorder {
+    /// `last_video` is the finalized video of the previous recording, if any.
+    Idle {
+        last_video: Option<VideoMetadata>,
+    },
+    Live(Live),
+}
+
+struct Live {
+    /// Session that owns the recording, from the daemon-injected
+    /// `_session_id`; `None` for an anonymous (CLI one-shot) start. The
+    /// recorder is shared, so the latest start owns it and an earlier owner's
+    /// session end no-ops in [`RecordingSession::stop`].
+    owner: Option<String>,
+    dir: PathBuf,
+    next_turn: u32,
+    started_at_ms: u64,
+    /// SCKit on macOS, an ffmpeg subprocess elsewhere.
     video: Option<Box<dyn VideoBackend>>,
-    /// Recorded after `stop()` until the next start — exposed in
-    /// `current_state()` so callers can read the finalized video info
-    /// after stopping.
-    last_video: Option<VideoMetadata>,
-    /// Cursor sampler thread. Runs alongside video so the renderer has
-    /// per-frame cursor positions for smooth pan-between-clicks
-    /// behavior. Stopped on `stop()` along with video.
     cursor: Option<CursorSampler>,
-    /// Sample count from the last finalized cursor sampler; exposed in
-    /// `session.json` after stop so the renderer can confirm the
-    /// sampler ran.
-    last_cursor_samples: usize,
-    /// Secret values scrubbed from every turn of the live recording.
+    /// Secret values scrubbed from every turn of this recording.
     redactions: Redactions,
+    /// GOAT: the recording directory opened (and verified) at start; every
+    /// artifact of this recording, `session.json` included, is written through it.
+    #[cfg(any(unix, windows))]
+    private_dir: crate::private_artifact::PrivateDir,
+}
+
+impl RecordingInner {
+    fn is_live(&self, generation: u64) -> bool {
+        matches!(self.recorder, Recorder::Live(_)) && self.generation == generation
+    }
+
+    /// Stop the live recording's media and rewrite its `session.json` with
+    /// what landed. Leaves the recorder idle; a no-op when already idle.
+    fn finalize(&mut self) -> anyhow::Result<()> {
+        let idle = Recorder::Idle { last_video: None };
+        let Recorder::Live(live) = std::mem::replace(&mut self.recorder, idle) else {
+            return Ok(());
+        };
+        let (video_meta, stop_error) = match live.video.map(|rec| rec.stop()) {
+            Some(Ok(meta)) => match validate_video_metadata(meta) {
+                Ok(meta) => (Some(meta), None),
+                Err(error) => (None, Some(error.to_string())),
+            },
+            Some(Err(error)) => (None, Some(error.to_string())),
+            None => (None, None),
+        };
+        let cursor_samples = live.cursor.map(|c| c.stop()).unwrap_or(0);
+        if let Some(error) = &stop_error {
+            self.last_error = Some(error.clone());
+        } else if video_meta.is_some() {
+            self.last_error = None;
+        }
+        let video_block = match &video_meta {
+            Some(meta) => video_session_payload(true, None, Some(meta)),
+            None => video_session_payload(false, self.last_error.as_deref(), None),
+        };
+        let session_payload = serde_json::json!({
+            "schema_version": 1,
+            "started_at_monotonic_ms": live.started_at_ms,
+            "video": video_block,
+            "cursor": { "present": cursor_samples > 0, "sample_count": cursor_samples }
+        });
+        self.recorder = Recorder::Idle {
+            last_video: video_meta,
+        };
+        // GOAT: the final session.json goes through the directory start
+        // opened, after checking it is still that directory.
+        #[cfg(any(unix, windows))]
+        let session_write = live
+            .private_dir
+            .verify()
+            .map_err(anyhow::Error::from)
+            .and_then(|()| {
+                write_json_atomic(
+                    &live.dir.join("session.json"),
+                    &live.private_dir,
+                    &session_payload,
+                )
+            });
+        #[cfg(not(any(unix, windows)))]
+        let session_write = write_json_atomic(&live.dir.join("session.json"), &session_payload);
+        match stop_error {
+            Some(error) => anyhow::bail!("video finalization failed: {error}"),
+            None => {
+                // A caller reading state, not only stop's return, learns the
+                // final session.json was refused.
+                if let Err(error) = &session_write {
+                    self.last_error = Some(format!("session.json was not written: {error:#}"));
+                }
+                session_write
+            }
+        }
+    }
 }
 
 /// Snapshot of the current recording state (cheap to clone).
@@ -645,13 +744,12 @@ pub struct RecordingState {
     /// Path to the most recently finalized video file, if any. Populated
     /// after a stop; cleared on next start.
     pub last_video_path: Option<String>,
-    /// Session id that owns the current (or most recent) recording, stamped on
-    /// `start()` from the daemon-injected `_session_id`. `None` for an
-    /// anonymously-started recording (CLI one-shot). Surfaced so
-    /// callers can see who owns the live recording; the proxy-exit teardown
-    /// drives ownership via `session_end` (it already knows its own id) rather
-    /// than reading this back.
+    /// Session id that owns the live recording, stamped on `start()` from the
+    /// daemon-injected `_session_id`. `None` for an anonymous recording (CLI
+    /// one-shot) or when idle.
     pub owner: Option<String>,
+    /// Generation of the live recording, for [`StopBy::Generation`].
+    pub generation: Option<u64>,
 }
 
 impl RecordingSession {
@@ -659,22 +757,10 @@ impl RecordingSession {
         Self {
             pixel_point_fn: OnceLock::new(),
             inner: Mutex::new(RecordingInner {
-                enabled: false,
                 generation: 0,
-                owner: None,
-                output_dir: None,
-                #[cfg(any(unix, windows))]
-                private_dir: None,
+                recorder: Recorder::Idle { last_video: None },
                 state_budget: Some(StateCaptureBudget::default()),
-                next_turn: 1,
-                session_start_ms: 0,
-                session_monotonic_start: None,
                 last_error: None,
-                video: None,
-                last_video: None,
-                cursor: None,
-                last_cursor_samples: 0,
-                redactions: Redactions::default(),
             }),
         }
     }
@@ -692,7 +778,7 @@ impl RecordingSession {
     }
 
     /// Enable recording at `output_dir`, optionally with video capture.
-    /// Counterpart to `stop()`. Returns the resulting state.
+    /// Counterpart to [`Self::stop`]. Returns the resulting state.
     ///
     /// `record_video=true` spawns ffmpeg writing `<output_dir>/recording.mp4`
     /// for the lifetime of the session. NOTE: the MCP `start_recording` tool
@@ -704,8 +790,9 @@ impl RecordingSession {
     /// the caller can surface it.
     ///
     /// `owner` stamps the session that owns this recording (the daemon-injected
-    /// `_session_id`). `None` marks an anonymous start (CLI one-shot) owned by nobody. See `stop_owner()` for how this
-    /// gates teardown.
+    /// `_session_id`). `None` marks an anonymous start (CLI one-shot) owned by nobody. See [`StopBy`] for how this
+    /// gates teardown. A start over a live recording finalizes that recording
+    /// first, as [`Self::stop`] does.
     pub fn start(
         &self,
         output_dir: &str,
@@ -752,13 +839,13 @@ impl RecordingSession {
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().unwrap();
         // Write-boundary resurrection guard — checked INSIDE the lock so the
-        // is_session_ended test is atomic with the enabled/owner write below.
+        // is_session_ended test is atomic with the recorder write below.
         // An in-flight start_recording that lands after its owning session ended
         // (passed the dispatch gate, then the proxy died) must not create a
         // recording owned by a dead session — a leaked ffmpeg/SCStream. The
         // teardown sites call `fire_session_end` (which marks ENDED_SESSIONS)
-        // BEFORE `stop_owner`, so either the mark is already set and we bail
-        // here, or we win the lock first and the reaper's later stop_owner(owner)
+        // BEFORE `stop(StopBy::Owner)`, so either the mark is already set and we bail
+        // here, or we win the lock first and the reaper's later stop
         // reaps what we started. Anonymous starts (owner = None: CLI one-shot) are never gated.
         if let Some(o) = owner {
             if crate::session::is_session_ended(o) {
@@ -767,30 +854,17 @@ impl RecordingSession {
                 );
             }
         }
-        // If a previous session is still open, gracefully tear it down
-        // first so the caller doesn't accidentally leak an ffmpeg process.
-        if let Some(rec) = inner.video.take() {
-            let _ = rec.stop();
-        }
-        if let Some(cur) = inner.cursor.take() {
-            let _ = cur.stop();
-        }
-        inner.enabled = false;
-        inner.owner = None;
-        inner.output_dir = None;
-        inner.generation = inner.generation.wrapping_add(1);
-        inner.session_monotonic_start = None;
-        #[cfg(any(unix, windows))]
-        {
-            inner.private_dir = None;
-        }
-
         let dir = expand_tilde(output_dir);
+        // Create the new directory while the live recording still runs, so a
+        // failure leaves it untouched.
         #[cfg(any(unix, windows))]
         let private_dir = crate::private_artifact::PrivateDir::open(&dir)
             .map_err(|e| anyhow::anyhow!("unsafe_recording_destination: {e}"))?;
         #[cfg(not(any(unix, windows)))]
         std::fs::create_dir_all(&dir)?;
+        // Finalize the recording this start replaces; its error stays in
+        // `last_error` and does not fail the new start.
+        let _ = inner.finalize();
 
         // Single monotonic anchor shared by video, cursor sampler, and
         // per-turn `t_ms_from_session_start` math in `finish_turn()` — so all
@@ -802,17 +876,14 @@ impl RecordingSession {
         #[cfg(not(any(unix, windows)))]
         let cursor_file = std::fs::File::create(&cursor_path)?;
 
-        let mut video_present = false;
+        let mut video = None;
         let mut video_error: Option<String> = None;
         if record_video {
             let path = dir.join("recording.mp4");
             #[cfg(any(unix, windows))]
             crate::video_ffmpeg::precreate_output(&private_dir)?;
             match video::start_video(&path) {
-                Ok(rec) => {
-                    inner.video = Some(rec);
-                    video_present = true;
-                }
+                Ok(rec) => video = Some(rec),
                 Err(e) => {
                     #[cfg(any(unix, windows))]
                     private_dir
@@ -834,15 +905,11 @@ impl RecordingSession {
         // off (record_video=false), the sampler is still useful for
         // post-hoc analysis, so we run it anyway — the cost is one
         // background thread + a small jsonl file.
-        match CursorSampler::start(cursor_path, cursor_file, monotonic_start) {
-            Ok(s) => {
-                inner.cursor = Some(s);
-            }
-            Err(e) => {
-                tracing::warn!(target: "recording",
-                    "Cursor sampler failed to start: {e}");
-            }
-        }
+        let cursor = CursorSampler::start(cursor_path, cursor_file, monotonic_start)
+            .inspect_err(
+                |e| tracing::warn!(target: "recording", "Cursor sampler failed to start: {e}"),
+            )
+            .ok();
 
         // Write initial session.json — final video metadata is rewritten on
         // stop. We mark `present` based on whether ffmpeg actually started,
@@ -851,8 +918,8 @@ impl RecordingSession {
         let session_payload = serde_json::json!({
             "schema_version": 1,
             "started_at_monotonic_ms": started_at_ms,
-            "video": video_session_payload(video_present, video_error.as_deref(), None),
-            "cursor": { "present": inner.cursor.is_some(), "sample_count": 0 }
+            "video": video_session_payload(video.is_some(), video_error.as_deref(), None),
+            "cursor": { "present": cursor.is_some(), "sample_count": 0 }
         });
         let session_write = (|| -> anyhow::Result<()> {
             #[cfg(any(unix, windows))]
@@ -865,10 +932,10 @@ impl RecordingSession {
             Ok(())
         })();
         if let Err(error) = session_write {
-            if let Some(cursor) = inner.cursor.take() {
+            if let Some(cursor) = cursor {
                 cursor.stop();
             }
-            if let Some(video) = inner.video.take() {
+            if let Some(video) = video {
                 if let Err(stop_error) = video.stop() {
                     return Err(error.context(format!("video cleanup failed: {stop_error}")));
                 }
@@ -876,145 +943,60 @@ impl RecordingSession {
             return Err(error);
         }
 
-        // Stamp the owning session on every successful start (reached only on
-        // the success path — start() returns early via `?` on `create_dir_all`
-        // failure above). `owner` clobbers any previous owner, which is correct:
-        // the daemon-global recorder is a singleton, so the latest start() owns
-        // it. The previous owner's disconnect then no-ops in stop_owner().
-        inner.owner = owner.map(str::to_owned);
         inner.generation = inner.generation.wrapping_add(1);
-        inner.enabled = true;
-        inner.output_dir = Some(dir);
-        #[cfg(any(unix, windows))]
-        {
-            inner.private_dir = Some(private_dir);
-        }
         inner.state_budget = state_budget;
-        inner.redactions = redactions;
-        inner.next_turn = 1;
-        inner.session_start_ms = started_at_ms;
-        inner.session_monotonic_start = Some(monotonic_start);
         inner.last_error = video_error;
-        inner.last_video = None;
-        inner.last_cursor_samples = 0;
+        inner.recorder = Recorder::Live(Live {
+            owner: owner.map(str::to_owned),
+            dir,
+            next_turn: 1,
+            started_at_ms,
+            video,
+            cursor,
+            redactions,
+            #[cfg(any(unix, windows))]
+            private_dir,
+        });
         Ok(())
     }
 
-    /// Disable recording. Idempotent — calling stop on an already-stopped
-    /// session is a no-op. If a video subprocess is running, it's
-    /// gracefully terminated and the finalized metadata is folded into
-    /// `session.json`.
-    ///
-    /// `requester` is the ownership guard for session-driven teardown
-    /// (`session_end` / proxy-exit). Semantics:
-    ///   - `None` — unconditional stop. Manual `stop_recording`, the CLI
-    ///     one-shot path, and the idle-TTL backstop all pass `None` to preserve today's manual-stop behavior.
-    ///   - `Some(sid)` where `sid` owns the live recording — stop + clear owner.
-    ///   - `Some(sid)` where `sid` does NOT own it (a disconnecting session
-    ///     whose recording was already clobbered by a newer `start()`, or which
-    ///     never started a recording) — silent no-op, leaving the current
-    ///     owner's recording running.
-    ///
-    /// The guard lives inside the lock so it is race-free against a concurrent
-    /// `start()`. Supersedes the #1775 generation-token `stop()`.
-    pub fn stop_owner(&self, requester: Option<&str>) -> anyhow::Result<()> {
+    /// Finalize the recording `by` selects: stop its video and cursor sampler
+    /// and rewrite `session.json` with what landed. A no-op when idle or when
+    /// `by` selects a recording other than the live one, so a stale session
+    /// end or idle check never stops a newer recording. The check runs under
+    /// the lock, so it is race-free against a concurrent `start()`.
+    pub fn stop(&self, by: StopBy<'_>) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        if !inner.enabled {
+        let Recorder::Live(live) = &inner.recorder else {
+            return Ok(());
+        };
+        let selected = match by {
+            StopBy::Anyone => true,
+            StopBy::Owner(session) => live.owner.as_deref() == Some(session),
+            StopBy::Generation(generation) => inner.generation == generation,
+        };
+        if !selected {
             return Ok(());
         }
-        if let Some(req) = requester {
-            // A targeted stop only acts when the requester owns the live
-            // recording. An anonymously-owned recording (owner == None) is
-            // never torn down by a session-scoped stop — only an unconditional
-            // `stop_owner(None)` reaches it.
-            if inner.owner.as_deref() != Some(req) {
-                return Ok(());
-            }
-        }
-        inner.owner = None;
-        let dir = inner.output_dir.clone();
-        let started_at_ms = inner.session_start_ms;
-        let (video_meta, stop_error) = match inner.video.take().map(|rec| rec.stop()) {
-            Some(Ok(meta)) => match validate_video_metadata(meta) {
-                Ok(meta) => (Some(meta), None),
-                Err(error) => (None, Some(error.to_string())),
-            },
-            Some(Err(error)) => (None, Some(error.to_string())),
-            None => (None, None),
-        };
-        let cursor_samples = inner.cursor.take().map(|c| c.stop()).unwrap_or(0);
-
-        inner.enabled = false;
-        inner.output_dir = None;
-        inner.redactions = Redactions::default();
-        inner.next_turn = 1;
-        inner.session_start_ms = 0;
-        inner.session_monotonic_start = None;
-        if let Some(error) = &stop_error {
-            inner.last_error = Some(error.clone());
-        } else if video_meta.is_some() {
-            inner.last_error = None;
-        }
-        inner.last_video = video_meta.clone();
-        inner.last_cursor_samples = cursor_samples;
-        let final_video_error = inner.last_error.clone();
-
-        #[cfg(any(unix, windows))]
-        let private_dir = inner
-            .private_dir
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("missing recording directory"))?;
-        #[cfg(any(unix, windows))]
-        private_dir.verify()?;
-
-        // Rewrite session.json with final video metadata + cursor count
-        // so the renderer (and any external analysis) sees what actually
-        // landed.
-        if let Some(dir) = dir {
-            #[cfg(any(unix, windows))]
-            let _ = &dir;
-            let video_block = if let Some(ref m) = video_meta {
-                video_session_payload(true, None, Some(m))
-            } else {
-                video_session_payload(false, final_video_error.as_deref(), None)
-            };
-            let session_payload = serde_json::json!({
-                "schema_version": 1,
-                "started_at_monotonic_ms": started_at_ms,
-                "video": video_block,
-                "cursor": { "present": cursor_samples > 0, "sample_count": cursor_samples }
-            });
-            #[cfg(any(unix, windows))]
-            private_dir.create(
-                std::ffi::OsStr::new("session.json"),
-                &serde_json::to_vec_pretty(&session_payload)?,
-            )?;
-            #[cfg(not(any(unix, windows)))]
-            write_json_atomic(&dir.join("session.json"), &session_payload)?;
-        }
-        if let Some(error) = stop_error {
-            anyhow::bail!("video finalization failed: {error}");
-        }
-        Ok(())
+        inner.finalize()
     }
 
     /// Return a snapshot of the current state (non-blocking).
     pub fn current_state(&self) -> RecordingState {
         let inner = self.inner.lock().unwrap();
+        let (live, last_video) = match &inner.recorder {
+            Recorder::Live(live) => (Some(live), None),
+            Recorder::Idle { last_video } => (None, last_video.as_ref()),
+        };
         RecordingState {
-            enabled: inner.enabled,
-            output_dir: inner
-                .output_dir
-                .as_ref()
-                .map(|p| p.to_string_lossy().into_owned()),
-            next_turn: inner.next_turn,
+            enabled: live.is_some(),
+            output_dir: live.map(|l| l.dir.to_string_lossy().into_owned()),
+            next_turn: live.map_or(1, |l| l.next_turn),
             last_error: inner.last_error.clone(),
-            video_active: inner.video.is_some(),
-            last_video_path: inner
-                .last_video
-                .as_ref()
-                .map(|m| m.path.to_string_lossy().into_owned()),
-            owner: inner.owner.clone(),
+            video_active: live.is_some_and(|l| l.video.is_some()),
+            last_video_path: last_video.map(|m| m.path.to_string_lossy().into_owned()),
+            owner: live.and_then(|l| l.owner.clone()),
+            generation: live.map(|_| inner.generation),
         }
     }
 
@@ -1079,23 +1061,23 @@ impl RecordingSession {
     ) -> Option<PendingTurn> {
         let (turn_dir, session_start_ms, generation, state_budget, redactions) = {
             let mut inner = self.inner.lock().unwrap();
-            if !inner.enabled {
+            let (generation, state_budget) = (inner.generation, inner.state_budget);
+            let Recorder::Live(live) = &mut inner.recorder else {
                 return None;
-            }
-            if let Some(owner) = inner.owner.as_deref() {
+            };
+            if let Some(owner) = live.owner.as_deref() {
                 if !caller.within(owner) {
                     return None;
                 }
             }
-            let out = inner.output_dir.clone()?;
-            let idx = inner.next_turn;
-            inner.next_turn += 1;
+            let idx = live.next_turn;
+            live.next_turn += 1;
             (
-                out.join(format!("turn-{idx:05}")),
-                inner.session_start_ms,
-                inner.generation,
-                inner.state_budget,
-                inner.redactions.clone(),
+                live.dir.join(format!("turn-{idx:05}")),
+                live.started_at_ms,
+                generation,
+                state_budget,
+                live.redactions.clone(),
             )
         };
 
@@ -1160,16 +1142,17 @@ impl RecordingSession {
         };
 
         let mut inner = self.inner.lock().unwrap();
-        if !inner.enabled || inner.generation != generation {
+        if !inner.is_live(generation) {
             return None;
         }
         if let Some(state) = before.state.bytes.as_mut() {
             redactions.scrub_bytes(state);
         }
         #[cfg(any(unix, windows))]
-        let private_dir = match inner
-            .private_dir
-            .as_ref()
+        let private_dir = match match &inner.recorder {
+            Recorder::Live(live) => Some(&live.private_dir),
+            Recorder::Idle { .. } => None,
+        }
             .ok_or_else(|| std::io::Error::other("missing recording directory"))
             .and_then(|dir| dir.subdir(turn_dir.file_name().expect("turn has a name")))
         {
@@ -1255,7 +1238,7 @@ impl RecordingSession {
         result_is_error: bool,
     ) {
         let is_live = |inner: &RecordingInner| {
-            let live = inner.enabled && inner.generation == pending.generation;
+            let live = inner.is_live(pending.generation);
             if !live {
                 tracing::warn!(
                     target: "recording",
@@ -1305,10 +1288,16 @@ fn capture_turn(window_id: Option<u64>, pid: Option<i64>, state: StatePlan) -> T
         .get()
         .map(|capture| capture(window_id, pid))
         .unwrap_or_else(|| ScreenshotCapture::unavailable("capture_hook_unavailable"));
+    // The platform found no window for the pid, so there is no tree to walk
+    // either. Say so instead of letting the walk fail as `capture_failed`.
+    let no_target_window = window_id.is_none()
+        && pid.is_some()
+        && screenshot.classification == Some(TARGET_UNAVAILABLE);
     TurnCapture {
         state: match state {
             // No target application: there is no state to walk.
             _ if pid.is_none() => StateCapture::default(),
+            _ if no_target_window => StateCapture::skipped(TARGET_UNAVAILABLE),
             StatePlan::Capture(budget) => capture_state(window_id, pid, budget),
             StatePlan::Skip(classification) => StateCapture::skipped(classification),
         },
@@ -1998,15 +1987,20 @@ mod tests {
         assert!(session
             .start(root.path().to_str().unwrap(), false, None)
             .is_err());
-        let inner = session.inner.lock().unwrap();
-        assert!(!inner.enabled);
-        assert!(inner.cursor.is_none());
+        // The started sampler and the half-built recording are dropped; the
+        // recorder is idle.
+        assert!(!session.current_state().enabled);
         assert_eq!(std::fs::read(target).unwrap(), b"unchanged");
     }
 
+    /// Upstream #6794 changed restart semantics: the new destination is
+    /// opened while the live recording still runs, so a refused destination
+    /// leaves that recording live and consistent (directory, cursor, private
+    /// directory) instead of half torn down. GOAT keeps the invariant this
+    /// test guarded: no enabled recording without its directory.
     #[cfg(unix)]
     #[test]
-    fn failed_restart_does_not_leave_old_recording_enabled() {
+    fn failed_restart_keeps_the_live_recording_consistent() {
         use std::os::unix::fs::symlink;
         let root = tempfile::tempdir().unwrap();
         let session = RecordingSession::new();
@@ -2016,13 +2010,30 @@ mod tests {
         let link = root.path().join("link");
         symlink(root.path(), &link).unwrap();
         assert!(session.start(link.to_str().unwrap(), false, None).is_err());
+        let state = session.current_state();
+        assert!(state.enabled);
+        assert_eq!(state.output_dir.as_deref(), root.path().to_str());
         let inner = session.inner.lock().unwrap();
-        assert!(!inner.enabled);
-        assert!(inner.output_dir.is_none());
-        assert!(inner.private_dir.is_none());
-        assert!(inner.cursor.is_none());
+        let Recorder::Live(live) = &inner.recorder else {
+            panic!("the previous recording must stay live");
+        };
+        live.private_dir.verify().unwrap();
     }
     use super::*;
+
+    fn live_at(dir: &Path) -> Live {
+        Live {
+            owner: None,
+            dir: dir.to_path_buf(),
+            next_turn: 1,
+            started_at_ms: now_ms(),
+            video: None,
+            cursor: None,
+            redactions: Redactions::default(),
+            #[cfg(any(unix, windows))]
+            private_dir: crate::private_artifact::PrivateDir::open(dir).unwrap(),
+        }
+    }
 
     #[test]
     fn pixel_mappers_follow_registry_lifetimes_and_concurrent_runtime_state() {
@@ -2034,13 +2045,7 @@ mod tests {
             let output = tempfile::tempdir().unwrap();
             {
                 let mut inner = registry.recording.inner.lock().unwrap();
-                inner.enabled = true;
-                inner.output_dir = Some(output.path().to_owned());
-                #[cfg(any(unix, windows))]
-                {
-                    inner.private_dir =
-                        Some(crate::private_artifact::PrivateDir::open(output.path()).unwrap());
-                }
+                inner.recorder = Recorder::Live(live_at(output.path()));
             }
             let ratio = Arc::downgrade(ratio);
             registry.recording.set_pixel_point_fn(move |_, _, _, x, y| {
@@ -2225,7 +2230,10 @@ mod tests {
         let turn_path = root.path().join("turn-00001");
         {
             let inner = session.inner.lock().unwrap();
-            let dir = inner.private_dir.as_ref().unwrap();
+            let Recorder::Live(live) = &inner.recorder else {
+                panic!("recording is live");
+            };
+            let dir = &live.private_dir;
             crate::video_ffmpeg::precreate_output(dir).unwrap();
             dir.subdir(std::ffi::OsStr::new("turn-00001")).unwrap();
         }
@@ -2247,7 +2255,7 @@ mod tests {
             screenshot_classification: None,
         };
         write_turn_with_after(pending, after, "ok", None, false).unwrap();
-        session.stop_owner(None).unwrap();
+        session.stop(StopBy::Anyone).unwrap();
         for name in ["session.json", "cursor.jsonl", "recording.mp4"] {
             assert_eq!(
                 std::fs::metadata(root.path().join(name)).unwrap().mode() & 0o777,
@@ -2310,13 +2318,7 @@ mod tests {
             .is_none());
         {
             let mut inner = session.inner.lock().unwrap();
-            inner.enabled = true;
-            inner.output_dir = Some(root.path().to_path_buf());
-            #[cfg(any(unix, windows))]
-            {
-                inner.private_dir =
-                    Some(crate::private_artifact::PrivateDir::open(root.path()).unwrap());
-            }
+            inner.recorder = Recorder::Live(live_at(root.path()));
         }
         let private = session
             .begin_private_turn("click", &pending.args, 0, RecordingCaller::default())
@@ -2394,13 +2396,7 @@ mod tests {
         let session = RecordingSession::new();
         {
             let mut inner = session.inner.lock().unwrap();
-            inner.enabled = true;
-            inner.output_dir = Some(root.path().to_path_buf());
-            #[cfg(any(unix, windows))]
-            {
-                inner.private_dir =
-                    Some(crate::private_artifact::PrivateDir::open(root.path()).unwrap());
-            }
+            inner.recorder = Recorder::Live(live_at(root.path()));
         }
         let pending = session
             .begin_turn(
@@ -2908,14 +2904,7 @@ mod tests {
         let session = RecordingSession::new();
         {
             let mut inner = session.inner.lock().expect("recording lock");
-            inner.enabled = true;
-            inner.output_dir = Some(output_dir.clone());
-            #[cfg(any(unix, windows))]
-            {
-                inner.private_dir =
-                    Some(crate::private_artifact::PrivateDir::open(&output_dir).unwrap());
-            }
-            inner.session_start_ms = now_ms();
+            inner.recorder = Recorder::Live(live_at(&output_dir));
         }
         let pending = session
             .begin_turn(
@@ -3137,15 +3126,8 @@ mod tests {
         let session = RecordingSession::new();
         {
             let mut inner = session.inner.lock().expect("recording lock");
-            inner.enabled = true;
             inner.generation = 1;
-            inner.output_dir = Some(output_dir.clone());
-            #[cfg(any(unix, windows))]
-            {
-                inner.private_dir =
-                    Some(crate::private_artifact::PrivateDir::open(&output_dir).unwrap());
-            }
-            inner.session_start_ms = now_ms();
+            inner.recorder = Recorder::Live(live_at(&output_dir));
         }
         let pending = session
             .begin_turn(
@@ -3256,7 +3238,7 @@ mod tests {
 
         release.send(()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while abandoned_state_captures().contains_key(&PID) {
+        while state_capture_workers().contains_key(&PID) {
             assert!(Instant::now() < deadline, "abandoned walk never released");
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -3266,6 +3248,42 @@ mod tests {
             serde_json::json!(50),
             "the hook receives the configured budget"
         );
+    }
+
+    #[test]
+    fn state_hook_admits_one_running_walk_per_pid() {
+        const PID: i64 = 990_101;
+        let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let entered_tx = Mutex::new(entered_tx);
+        let gate = Mutex::new(gate);
+        let slow: AxSnapshotFn = Arc::new(move |_, _, _| {
+            let _ = entered_tx.lock().unwrap().send(());
+            let _ = gate.lock().unwrap().recv();
+            Some(b"{}".to_vec())
+        });
+        let budget = StateCaptureBudget { timeout_ms: 10_000 };
+        let first = std::thread::spawn(move || run_state_hook(slow, None, Some(PID), budget));
+        entered.recv().unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counting_calls = calls.clone();
+        let fast: AxSnapshotFn = Arc::new(move |_, _, _| {
+            counting_calls.fetch_add(1, Ordering::SeqCst);
+            Some(b"{}".to_vec())
+        });
+        let second = run_state_hook(fast.clone(), None, Some(PID), budget);
+        assert_eq!(second.classification, Some("state_capture_busy"));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "one walk per app at a time"
+        );
+
+        release.send(()).unwrap();
+        assert!(first.join().unwrap().bytes.is_some());
+        let after = run_state_hook(fast, None, Some(PID), budget);
+        assert!(after.bytes.is_some(), "a finished walk frees its pid");
     }
 
     #[test]
@@ -3380,17 +3398,10 @@ mod tests {
         let session = RecordingSession::new();
         {
             let mut inner = session.inner.lock().unwrap();
-            inner.enabled = true;
-            inner.output_dir = Some(root.path().join("session"));
-            #[cfg(any(unix, windows))]
-            {
-                inner.private_dir = Some(
-                    crate::private_artifact::PrivateDir::open(&root.path().join("session"))
-                        .unwrap(),
-                );
-            }
-            inner.session_start_ms = now_ms();
-            inner.redactions = redactions.clone();
+            inner.recorder = Recorder::Live(Live {
+                redactions: redactions.clone(),
+                ..live_at(&root.path().join("session"))
+            });
         }
         let pending = session
             .begin_private_turn(
@@ -3426,8 +3437,8 @@ mod tests {
         assert!(action.get("redacted").is_none());
 
         // Stopping forgets the values.
-        session.stop_owner(None).unwrap();
-        assert!(session.inner.lock().unwrap().redactions.is_empty());
+        session.stop(StopBy::Anyone).unwrap();
+        assert!(!session.current_state().enabled);
 
         // Before/after accessibility state, including JSON-escaped values.
         let state = serde_json::to_vec(&serde_json::json!({
@@ -3492,14 +3503,7 @@ mod tests {
         let session = RecordingSession::new();
         {
             let mut inner = session.inner.lock().expect("recording lock");
-            inner.enabled = true;
-            inner.output_dir = Some(output_dir.clone());
-            #[cfg(any(unix, windows))]
-            {
-                inner.private_dir =
-                    Some(crate::private_artifact::PrivateDir::open(&output_dir).unwrap());
-            }
-            inner.session_start_ms = now_ms();
+            inner.recorder = Recorder::Live(live_at(&output_dir));
         }
         let pending = session
             .begin_private_turn(
@@ -3545,7 +3549,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_owner_surfaces_video_finalization_failure() {
+    fn stop_surfaces_video_finalization_failure() {
         let output_dir = std::env::temp_dir().join(format!(
             "cua-recording-stop-failure-{}-{}",
             std::process::id(),
@@ -3555,18 +3559,14 @@ mod tests {
         let session = RecordingSession::new();
         {
             let mut inner = session.inner.lock().expect("recording lock");
-            inner.enabled = true;
-            inner.output_dir = Some(output_dir.clone());
-            #[cfg(any(unix, windows))]
-            {
-                inner.private_dir =
-                    Some(crate::private_artifact::PrivateDir::open(&output_dir).unwrap());
-            }
-            inner.video = Some(Box::new(FailingVideo));
+            inner.recorder = Recorder::Live(Live {
+                video: Some(Box::new(FailingVideo)),
+                ..live_at(&output_dir)
+            });
         }
 
         let error = session
-            .stop_owner(None)
+            .stop(StopBy::Anyone)
             .expect_err("video finalization failure must reach the caller");
         assert!(error.to_string().contains("recorder did not finalize"));
         let state = session.current_state();
@@ -3672,7 +3672,7 @@ mod tests {
             )
             .expect("the owning session's call reserves a turn");
         session.finish_turn(pending, "clicked");
-        session.stop_owner(None).expect("stop owned recording");
+        session.stop(StopBy::Anyone).expect("stop owned recording");
 
         let action: Value = serde_json::from_slice(
             &std::fs::read(output_dir.join("turn-00001").join("action.json"))
@@ -3706,7 +3706,7 @@ mod tests {
             .expect("start timestamp is an integer");
 
         std::thread::sleep(Duration::from_millis(100));
-        session.stop_owner(None).expect("stop recording");
+        session.stop(StopBy::Anyone).expect("stop recording");
 
         assert_eq!(
             read_manifest()["started_at_monotonic_ms"],
@@ -3758,7 +3758,7 @@ mod tests {
             .expect("a named session on the owning transport reserves a turn");
         session.finish_turn(pending, "clicked");
         session
-            .stop_owner(None)
+            .stop(StopBy::Anyone)
             .expect("stop transport-owned recording");
 
         assert!(output_dir.join("turn-00001").join("action.json").exists());
@@ -3788,7 +3788,9 @@ mod tests {
                 .expect("an anonymous recording records every caller");
             session.finish_turn(pending, "clicked");
         }
-        session.stop_owner(None).expect("stop anonymous recording");
+        session
+            .stop(StopBy::Anyone)
+            .expect("stop anonymous recording");
 
         assert!(output_dir.join("turn-00001").join("action.json").exists());
         assert!(output_dir.join("turn-00002").join("action.json").exists());

@@ -509,7 +509,7 @@ impl Tool for BrowserFillSecretTool {
         args: &Value,
     ) -> ProtectedResourceOwnership {
         if adapter_id == "browser_bound_input" {
-            super::tools::browser_resource_ownership(&self.engine, args)
+            super::tools::browser_resource_ownership(&self.engine, args).await
         } else {
             ProtectedResourceOwnership::UserOwned
         }

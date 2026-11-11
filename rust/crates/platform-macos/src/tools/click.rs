@@ -8,8 +8,8 @@
 //! * **AX path** (`element_token`): performs AXAction on the cached
 //!   element. Fires via AX RPC — the target app never needs to be frontmost.
 //!   Extra behaviors vs. the naive dispatch:
-//!   - AXTextField / AXTextArea inside web content (AXWebArea): 800 ms post-click delay
-//!     for DOM focus settle. Native text inputs return without it.
+//!   - AXTextField / AXTextArea inside web content (AXWebArea): wait for DOM focus
+//!     (event driven, capped at 800 ms by `CUA_DRIVER_WEBKIT_SETTLE_MS`). Native text inputs return without it.
 //!   - AXPopUpButton: appends the list of available options and redirects to set_value.
 //!   - Advertised-action warning if the element didn't list the requested action.
 //!
@@ -38,6 +38,7 @@ use crate::ax::bindings::{
 use crate::focus_guard;
 use crate::window_change_detector::{Changes, WindowChangeDetector};
 use core_foundation::base::{CFEqual, CFRelease, CFTypeRef, TCFType};
+use cua_driver_core::security_prompt::PromptInput;
 
 use super::pixel_route::PixelClickRoute;
 use super::ToolState;
@@ -1472,6 +1473,7 @@ impl ClickTool {
 
             let btn = button.clone();
             let desktop_modifiers: Vec<String> = args.str_array("modifier");
+            let prompt = PromptInput::from_args(&args);
             let result =
                 latency::spawn_action_blocking(move || -> anyhow::Result<Option<Value>> {
                     // The element under the point in the window there, read
@@ -1489,6 +1491,7 @@ impl ClickTool {
                     let modifier_refs: Vec<&str> =
                         desktop_modifiers.iter().map(String::as_str).collect();
                     crate::input::mouse::click_at_xy_desktop_with_modifiers(
+                        prompt,
                         sx,
                         sy,
                         count,
@@ -1516,7 +1519,9 @@ impl ClickTool {
                     ))
                     .with_structured(structured)
                 }
-                Ok(Err(e)) => ToolResult::error(format!("desktop-scope click failed: {e}")),
+                Ok(Err(e)) => crate::security_prompt::tool_result(&e).unwrap_or_else(|| {
+                    ToolResult::error(format!("desktop-scope click failed: {e}"))
+                }),
                 Err(e) => ToolResult::error(format!("task error: {e}")),
             }
                 },
@@ -1849,20 +1854,59 @@ impl ClickTool {
 
                 let mods_owned = modifiers.clone();
                 let foreground = delivery_mode.is_foreground();
+                let middle_guard = element_guard.clone();
+                let prompt = PromptInput::from_args(&args);
                 let result = latency::spawn_action_blocking(move || {
                     let m: Vec<&str> = mods_owned.iter().map(String::as_str).collect();
+                    // AppKit hit-tests the window-local stamp, so an unrouted
+                    // post never reaches the control (CUA-3797). Same as the
+                    // pixel path.
+                    let routed_middle_click = || {
+                        let (wx, wy) = crate::windows::window_bounds_by_id(wid)
+                            .map(|b| (cx - b.x, cy - b.y))
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("cannot resolve bounds for window_id {wid}")
+                            })?;
+                        crate::input::mouse::middle_click_at_xy_with_window_local(
+                            pid, cx, cy, wx, wy, wid, &m,
+                        )
+                    };
+                    // Re-read after any activation: the early read skips a
+                    // foreground call into a background app.
+                    let ensure_enabled = || {
+                        if foreground {
+                            crate::input::ax_actions::ensure_ax_action_enabled_after_activation(
+                                middle_guard.as_ptr(),
+                                "middle_click",
+                            )
+                        } else {
+                            crate::input::ax_actions::ensure_ax_action_enabled(middle_guard.as_ptr(), "middle_click", false)
+                        }
+                    };
                     if foreground && !m.is_empty() {
                         crate::input::skylight::with_foreground_hid_activation(
                             pid as libc::pid_t,
                             wid,
                             || {
+                                ensure_enabled()?;
                                 crate::input::mouse::click_at_xy_desktop_with_modifiers_preserving_cursor(
-                                    cx, cy, 1, "middle", &m,
+                                    prompt, cx, cy, 1, "middle", &m,
                                 )
                             },
                         )
+                    } else if foreground {
+                        crate::input::skylight::with_foreground_assist(
+                            pid as libc::pid_t,
+                            wid,
+                            || {
+                                ensure_enabled()?;
+                                routed_middle_click()
+                            },
+                        )
+                        .map(|_| ())
                     } else {
-                        crate::input::mouse::middle_click_at_xy(pid, cx, cy, &m)
+                        ensure_enabled()?;
+                        routed_middle_click()
                     }
                 })
                 .await;
@@ -1872,7 +1916,9 @@ impl ClickTool {
                          (background CGEvent; not driver-verified — confirm via screenshot)."
                     ))
                     .with_structured(serde_json::json!({ "path": "cgevent", "verified": false, "effect": "unverifiable" })),
-                    Ok(Err(e)) => ToolResult::error(format!("Middle-click failed: {e}")),
+                    Ok(Err(e)) => crate::security_prompt::tool_result(&e)
+                        .or_else(|| super::element_disabled_error(pid, wid, &e, foreground))
+                        .unwrap_or_else(|| ToolResult::error(format!("Middle-click failed: {e}"))),
                     Err(e)     => ToolResult::error(format!("Task error: {e}")),
                 };
             }
@@ -2145,6 +2191,7 @@ impl ClickTool {
                 click_semantic_intent(&resolved_action),
                 super::actionability::semantic::SemanticIntent::Click
             );
+            let prompt = PromptInput::from_args(&args);
             let perform = |action_lease| async move {
                 let prior_front = apps::frontmost_pid();
                 let snapshot = if foreground {
@@ -2181,6 +2228,7 @@ impl ClickTool {
                                             } else {
                                                 cua_driver_core::mutation::PriorInput::None
                                             },
+                                            prompt,
                                         )?);
                                         Ok(())
                                     };
@@ -2222,6 +2270,7 @@ impl ClickTool {
                                         false,
                                         read_back,
                                         cua_driver_core::mutation::PriorInput::None,
+                                        prompt,
                                     )
                                     .map(|outcome| (outcome, false))
                                 }
@@ -2320,7 +2369,8 @@ impl ClickTool {
                         disabled,
                         delivery_mode.is_foreground(),
                     ),
-                    None => element_click_failure(&e),
+                    None => crate::security_prompt::tool_result(&e)
+                        .unwrap_or_else(|| element_click_failure(&e)),
                 },
                 Err(e) => click_task_failure(format!(
                     "The accessibility click task failed ({e}); the action may have run. Read \
@@ -2571,8 +2621,8 @@ impl ClickTool {
             if let Some(select_wid) = window_id.filter(|_| !delivery_mode.is_foreground()) {
                 let refusal = latency::spawn_action_blocking(move || unsafe {
                     let element = element_at_screen_position(pid, screen_x, screen_y)?;
-                    let refusal = (crate::ax::exact_target::element_window_id(element)
-                        == Some(select_wid)
+                    let refusal = (crate::ax::exact_target::element_window_ids(element)
+                        .is_some_and(|window| window.is(select_wid))
                         && super::set_value::is_chromium_web_select(pid, select_wid, element))
                     .then(|| {
                         super::set_value::chromium_select_open_refusal(
@@ -2683,7 +2733,9 @@ impl ClickTool {
                     // Require proven ancestry in the requested window before
                     // acting; otherwise fall through to the routed pixel path
                     // (already gated for this exact window).
-                    if crate::ax::exact_target::element_window_id(element) != Some(hit_test_wid) {
+                    if !crate::ax::exact_target::element_window_ids(element)
+                        .is_some_and(|window| window.is(hit_test_wid))
+                    {
                         CFRelease(element as _);
                         return Ok(PxAxPress::FallThrough);
                     }
@@ -3044,6 +3096,7 @@ impl ClickTool {
             );
 
             let mods_owned = modifiers.clone();
+            let prompt = PromptInput::from_args(&args);
             // Surface 5: route to the right/middle CGEvent primitives when
             // button != left. Left-button path stays on the existing Chromium-
             // routed `click_at_xy_with_window_local` for back-compat.
@@ -3101,6 +3154,7 @@ impl ClickTool {
                                 // at the target, as on Windows and X11, so apps that
                                 // read the pointer when handling the event see it.
                                 return crate::input::mouse::click_at_xy_desktop_with_modifiers(
+                                    prompt,
                                     screen_x,
                                     screen_y,
                                     count,
@@ -3285,14 +3339,17 @@ impl ClickTool {
                         ),
                     )
                 }
-                Ok(Err(e)) if route == PixelClickRoute::ForegroundHid => {
-                    super::pixel_route::foreground_unavailable(
-                        button_label,
-                        window_id.unwrap_or_default(),
-                        &e.to_string(),
-                    )
-                }
-                Ok(Err(e)) => ToolResult::error(format!("{button_label} failed: {e}")),
+                Ok(Err(e)) => match crate::security_prompt::tool_result(&e) {
+                    Some(refusal) => refusal,
+                    None if route == PixelClickRoute::ForegroundHid => {
+                        super::pixel_route::foreground_unavailable(
+                            button_label,
+                            window_id.unwrap_or_default(),
+                            &e.to_string(),
+                        )
+                    }
+                    None => ToolResult::error(format!("{button_label} failed: {e}")),
+                },
                 Err(e) => click_task_failure(format!(
                     "The {button_label} task failed ({e}); the click may have been posted. Read \
                      fresh state before clicking again."
@@ -6420,7 +6477,8 @@ fn text_focus_evidence(focused_before: Option<bool>, input_quiet: bool) -> Optio
 }
 
 /// Whether an AX press on a text input must wait for the page to move DOM
-/// focus (800 ms). Only text inputs inside web content (an `AXWebArea`
+/// focus (watched for up to [`CLICK_OBSERVATION`], returning as soon as it
+/// reads focused). Only text inputs inside web content (an `AXWebArea`
 /// ancestor) have a DOM focus to settle; waiting on a native field only
 /// delays the result. `ancestor_roles` is read only for a text input pressed
 /// with `AXPress`.
@@ -6559,6 +6617,7 @@ fn perform_ax_click(
     foreground: bool,
     read_back: bool,
     mut prior: cua_driver_core::mutation::PriorInput,
+    prompt: PromptInput,
 ) -> anyhow::Result<AxClickStep> {
     let (element_ptr, idx) = element;
     let (pid, window_id) = window;
@@ -6607,6 +6666,7 @@ fn perform_ax_click(
             let modifier_refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
             if foreground && !modifier_refs.is_empty() {
                 crate::input::mouse::click_at_xy_desktop_with_modifiers_preserving_cursor(
+                    prompt,
                     target.screen_x,
                     target.screen_y,
                     1,

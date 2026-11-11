@@ -1,5 +1,7 @@
 # 030 — wp3: macOS click ordering, cursor rest parking, gate follow-ups (#286, #287, #279, #281, #283)
 
+> Re-validated on the merged tree in 012: §A line refs moved; §B's "restore" test was deleted in #290, add the parking assertion instead; §C #279.2 is a real defect at click.rs:6966-6968 (inverted predicate use, pre-merge), #283.2 cleanup is click.rs:6819 only.
+
 Stale check at wp3 P: `tools/click.rs` (20 trial conflict hunks) and `tools/hotkey.rs` move in wp1; re-locate every block.
 
 ## §A — #286: re-check a relocated background point (click ordering)

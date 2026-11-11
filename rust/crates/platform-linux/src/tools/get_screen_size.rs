@@ -57,6 +57,14 @@ impl Tool for GetScreenSizeTool {
                 let (frame, monitors) = crate::wayland::niri::screen_report()?;
                 return Ok((frame.width, frame.height, frame.scale, Some(monitors)));
             }
+            if crate::wayland::is_wayland() {
+                // KWin: its logical layout, the frame desktop capture and
+                // input use. The scale is the largest output's, like the frame
+                // get_desktop_state reports.
+                if let Some((frame, monitors)) = crate::wayland::kwin_layout::screen_report()? {
+                    return Ok((frame.width, frame.height, frame.scale, Some(monitors)));
+                }
+            }
             if crate::wayland::is_wayland() && std::env::var_os("DISPLAY").is_none() {
                 // GNOME publishes its monitor layout on D-Bus; consent needs this content-free
                 // geometry for listing calls, which otherwise fail here (trycua/cua#1922). Other

@@ -713,7 +713,7 @@ fn pen_taps(sx: i32, sy: i32, barrel: bool, count: usize) -> Result<()> {
                 sleep(Duration::from_millis(70));
             }
         }
-        let _ = DestroySyntheticPointerDevice(dev);
+        DestroySyntheticPointerDevice(dev);
         result?;
     }
     Ok(())
@@ -1094,7 +1094,7 @@ fn pen_drag(sx0: i32, sy0: i32, sx1: i32, sy1: i32, steps: usize, barrel: bool) 
         sleep(Duration::from_millis(8));
         let up = mk(POINTER_FLAG_UP, sx1, sy1);
         res = res.and(inject_pointer(dev, &[up]));
-        let _ = DestroySyntheticPointerDevice(dev);
+        DestroySyntheticPointerDevice(dev);
         res.map_err(|e| anyhow::anyhow!("InjectSyntheticPointerInput(pen drag): {e}"))?;
     }
     Ok(())

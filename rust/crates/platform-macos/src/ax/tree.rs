@@ -1322,8 +1322,10 @@ where
                     walk: budget.outcome(),
                     // No application AX element at all, so a requested window
                     // certainly did not resolve.
-                    window_scope: window_id
-                        .map(|_| WindowScope::AxUnresolved { ax_window_count: 0 }),
+                    window_scope: window_id.map(|_| WindowScope::AxUnresolved {
+                        ax_window_count: 0,
+                        ax_windows_error: None,
+                    }),
                 },
                 None,
             );
@@ -2168,7 +2170,9 @@ fn scope_top_level_with<E: AxWalkEnvironment>(
         .iter()
         .map(|&child| environment.scope_candidate(child).into_walk_legacy())
         .collect();
-    decide_window_scope(&candidates, wid, || environment.window_owner(pid, wid))
+    // GOAT's walk keeps the AXWindows read in its evidence; the AX error
+    // name (upstream #7192) is not threaded into the scope decision.
+    decide_window_scope(&candidates, wid, None, || environment.window_owner(pid, wid))
 }
 
 fn scope_candidate_with<S: AxTreeSource>(
@@ -4456,6 +4460,7 @@ mod tests {
         assert_eq!(live, Some(1));
         assert_eq!(calls.get(), 1);
     }
+
 }
 
 #[cfg(test)]

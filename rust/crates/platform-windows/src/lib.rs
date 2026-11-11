@@ -114,6 +114,9 @@ mod value_append;
 #[cfg(any(target_os = "windows", test))]
 mod secure_field;
 
+// Pure restore rule for foreground input turns; runs its table test on any host.
+#[cfg(any(target_os = "windows", test))]
+mod typing_turn;
 #[cfg(target_os = "windows")]
 pub mod win32;
 

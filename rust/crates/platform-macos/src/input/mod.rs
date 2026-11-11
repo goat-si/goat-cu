@@ -16,6 +16,7 @@ pub mod electron_drag;
 pub(crate) mod gesture;
 pub(crate) mod hid_history;
 pub mod hover;
+pub mod input_source;
 pub mod interactive;
 mod key_belief;
 mod key_belief_ax;

@@ -23,6 +23,7 @@ use crate::apps;
 use crate::ax::bindings::{copy_bool_attr, copy_string_attr, AXUIElementRef};
 use crate::focus_guard;
 use crate::window_change_detector::{Changes, WindowChangeDetector};
+use cua_driver_core::security_prompt::PromptInput;
 
 use super::ToolState;
 
@@ -518,6 +519,9 @@ pub(super) fn invalid_key(error: anyhow::Error) -> ToolResult {
 }
 
 pub(super) fn delivery_failed(error: anyhow::Error) -> ToolResult {
+    if let Some(refusal) = crate::security_prompt::tool_result(&error) {
+        return refusal;
+    }
     if let Some(conflict) = error.downcast_ref::<WindowFocusConflictError>() {
         return match *conflict {
             WindowFocusConflictError::AddressedElementOutsideWindow {
@@ -679,6 +683,7 @@ impl Tool for PressKeyTool {
             }
             let checked_pid = early_front_pid.unwrap_or_default();
             let printable_desktop = printable_request(&key, &modifiers);
+            let prompt = PromptInput::from_args(&args);
             let control = Arc::new(crate::input::key_hold::HoldControl::default());
             let result =
                 super::key_delivery_guard::run_owned((), (), control, move |control, _scope| {
@@ -686,6 +691,7 @@ impl Tool for PressKeyTool {
                         anyhow::bail!("key delivery cancelled");
                     }
                     super::not_editable::desktop_dispatch_guard(checked_pid, printable_desktop)?;
+                    crate::security_prompt::refuse_frontmost_keys(prompt)?;
                     let modifier_refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
                     crate::input::key_hold::deliver(
                         crate::input::key_hold::KeyRoute::Global(None),
@@ -703,10 +709,13 @@ impl Tool for PressKeyTool {
                         "path": "hid",
                         "effect": "unverifiable"
                     })),
-                Ok(Err(error)) => super::not_editable::account_focus_receipt(
-                    ToolResult::error(format!("desktop press_key failed: {error}")),
-                    None,
-                ),
+                Ok(Err(error)) => match crate::security_prompt::tool_result(&error) {
+                    Some(refusal) => refusal,
+                    None => super::not_editable::account_focus_receipt(
+                        ToolResult::error(format!("desktop press_key failed: {error}")),
+                        None,
+                    ),
+                },
                 Err(error) => super::not_editable::account_focus_receipt(
                     ToolResult::error(format!("desktop press_key task failed: {error}")),
                     None,
@@ -1135,6 +1144,7 @@ impl Tool for PressKeyTool {
             }
             _ => None,
         };
+        let prompt = PromptInput::from_args(&args);
 
         // When the background key post returned: the sheet watch counts from it.
         let posted_at = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
@@ -1194,6 +1204,8 @@ impl Tool for PressKeyTool {
                                         || {
                                 verify_raw_key_target(pid, Some(wid), pre_focus_ptr, false)?;
                                 late_cell_refusal(pid, Some(wid), printable, pre_focus_ptr.is_some())?;
+                                // Upstream #7338: global HID keys reach the frontmost process.
+                                crate::security_prompt::refuse_frontmost_keys(prompt)?;
                                 crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control)
                             },
                                     )
@@ -1297,11 +1309,12 @@ impl Tool for PressKeyTool {
                 } else {
                     ""
                 };
-                let structured = serde_json::json!({
+                let mut structured = serde_json::json!({
                     "path": if fg { "key_events_fg" } else { "key_events" },
                     "verified": confirmed,
                     "effect": if confirmed { "confirmed" } else { "unverifiable" },
                 });
+                changes.add_window_identity(&mut structured);
                 ToolResult::text(format!(
                     "✅ Pressed {display_key} on pid {pid}{label}.{}",
                     changes.result_suffix()

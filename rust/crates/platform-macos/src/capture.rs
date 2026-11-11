@@ -65,7 +65,7 @@ use objc2::rc::autoreleasepool;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -521,7 +521,7 @@ impl WindowCaptureIdentity {
 }
 
 fn current_window_capture_identity(window_id: u32) -> anyhow::Result<WindowCaptureIdentity> {
-    let info = crate::windows::window_info_by_id(window_id)
+    let info = crate::windows::describe_window(window_id)
         .ok_or_else(|| anyhow::anyhow!("WindowServer no longer lists window id {window_id}"))?;
     let stamp = crate::ax::enablement::process_start_stamp(info.pid)
         .ok_or_else(|| generation_error(window_id))?;
@@ -1530,7 +1530,7 @@ fn screencapture_disabled() -> bool {
 
 /// Set once for the life of a runtime a host app owns without `--embedded`:
 /// the SDK's private worker, whose cleared environment has no embedded marker.
-static HOST_OWNED_RUNTIME: AtomicBool = AtomicBool::new(false);
+static HOST_OWNED_RUNTIME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Gives this process the embedded default for `screencapture` (off unless the
 /// host sets `CUA_DRIVER_DISABLE_SCREENCAPTURE=0`), without the rest of
@@ -1667,8 +1667,8 @@ impl cursor_overlay::capture_exclusion::OverlayCaptureExcluder for OverlayExclud
 /// Capture the main display for the agent with the Driver's cursor overlay
 /// window left out, and report how that went.
 ///
-/// `screencapture` cannot leave a window out, so it is only used when the
-/// overlay shows nothing, or as a fallback that reports `not_excluded`.
+/// `screencapture` cannot leave a window out and costs a process and a file,
+/// so it is only the fallback when ScreenCaptureKit fails.
 pub fn screenshot_display_bytes_excluding_overlay() -> anyhow::Result<(
     Vec<u8>,
     cursor_overlay::capture_exclusion::AgentOverlayCapture,
@@ -1677,7 +1677,17 @@ pub fn screenshot_display_bytes_excluding_overlay() -> anyhow::Result<(
     refuse_without_direct_capture_consent()?;
     capture_excluding_overlays(&OverlayExcluder, |overlay| {
         let Some(&overlay_window_id) = overlay else {
-            return Ok((screenshot_display_bytes()?, ResidualCheck::Clean));
+            return match run_native_capture_worker(
+                display_capture_gate(),
+                DISPLAY_CAPTURE_NATIVE_TIMEOUT,
+                screenshot_main_display_sck,
+            ) {
+                Ok(bytes) => Ok((bytes, ResidualCheck::Clean)),
+                Err(error) => {
+                    tracing::warn!("ScreenCaptureKit display capture failed: {error:#}");
+                    Ok((screenshot_display_bytes()?, ResidualCheck::Clean))
+                }
+            };
         };
         match run_native_capture_worker(
             display_capture_gate(),
@@ -1703,6 +1713,22 @@ pub fn screenshot_display_bytes_excluding_overlay() -> anyhow::Result<(
             }
         }
     })
+}
+
+/// Main display through `SCScreenshotManager.captureImage(in:)`, which needs
+/// macOS 15.2 and skips the shareable-content query and the content filter.
+fn screenshot_main_display_sck() -> anyhow::Result<Vec<u8>> {
+    use screencapturekit::screenshot_manager::SCScreenshotManager;
+
+    let bounds = core_graphics::display::CGDisplay::main().bounds();
+    let image = SCScreenshotManager::capture_image_in_rect(screencapturekit::cg::CGRect::new(
+        bounds.origin.x,
+        bounds.origin.y,
+        bounds.size.width,
+        bounds.size.height,
+    ))
+    .map_err(|e| anyhow::anyhow!("SCScreenshotManager::capture_image_in_rect failed: {e}"))?;
+    cgimage_to_png(&image, "main display")
 }
 
 /// Main display at native pixel size through ScreenCaptureKit, with at most

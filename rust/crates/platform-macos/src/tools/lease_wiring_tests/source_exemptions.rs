@@ -34,6 +34,24 @@ impl Entry {
 
 pub(super) const ENTRIES: &[Entry] = &[
     Entry {
+        file: "permissions/gate.rs",
+        item: "request_in_helper",
+        primitive: ".spawn",
+        fingerprint: 18055387372649062197,
+        occurrence: 1,
+        category: Category::Read,
+        reason: "permission guide registers the helper with TCC off the UI thread; no target app input",
+    },
+    Entry {
+        file: "permissions/status.rs",
+        item: "register_with_screen_capture_kit",
+        primitive: ".spawn",
+        fingerprint: 16199852207515866237,
+        occurrence: 1,
+        category: Category::Read,
+        reason: "bounded SCShareableContent query that registers Screen Recording; no input",
+    },
+    Entry {
         file: "apple_events.rs",
         item: "run_script",
         primitive: ".spawn",
