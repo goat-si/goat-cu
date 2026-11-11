@@ -203,10 +203,10 @@ pub fn returns_delta(tool: &str) -> bool {
 
 /// The window a direct action's delta is read from, when the mode is `on`.
 /// From `pid`/`window_id`, or from the snapshot an `element_token` names.
-/// It runs on the call's arguments before dispatch names the runtime
-/// session, and the delta is attached only after the action succeeded, so
-/// the token already resolved in the caller's session (#288 review).
-pub fn delta_target(args: &Value) -> Option<(i32, u64)> {
+/// `session` is the runtime session the caller's reads run as (the caller
+/// derives it, since these arguments are read before dispatch names it): a
+/// token only maps to a window this session read (#288 review).
+pub fn delta_target(args: &Value, session: Option<&str>) -> Option<(i32, u64)> {
     if !mode().deltas() {
         return None;
     }
@@ -215,11 +215,13 @@ pub fn delta_target(args: &Value) -> Option<(i32, u64)> {
     if let (Some(pid), Some(window)) = (pid, window) {
         return Some((pid, window));
     }
-    let (snapshot, _index) = args
+    let (snapshot, index) = args
         .get("element_token")
         .and_then(Value::as_str)
         .and_then(crate::element_token::parse_token)?;
-    super::store::global().snapshot_window(snapshot)
+    super::store::global()
+        .element(snapshot, index, session)
+        .map(|(pid, window, _)| (pid, window))
 }
 
 /// Append a delta read to an action result: its text after the action's,
@@ -320,12 +322,10 @@ mod tests {
         assert_eq!(result.content.len(), 2);
     }
 
-    /// #288 review: `delta_target` runs on the call's arguments before
-    /// dispatch names the runtime session, while `get_window_state` records
-    /// under that named session. The snapshot an element token names still
-    /// maps to its window, so a direct element action keeps its delta.
+    /// #288 review: a token maps to its window only for the session that
+    /// recorded the snapshot, and only for an element it listed.
     #[test]
-    fn an_element_token_delta_finds_its_window_before_the_session_is_named() {
+    fn an_element_token_delta_maps_only_its_sessions_snapshot() {
         let _guard = crate::fast_path::tests_lock();
         let snapshot = 3_900_000_123;
         super::super::store::global().put_snapshot(
@@ -340,10 +340,25 @@ mod tests {
             },
         );
         let args = json!({ "element_token": crate::element_token::token_for(snapshot, 0) });
+        let session = Some("__cua_runtime_x:implicit-direct");
         apply_config_args(&json!({"fast_path": "on"})).unwrap();
-        let target = delta_target(&args);
+        let own = delta_target(&args, session);
+        let foreign = delta_target(&args, Some("__cua_runtime_x:other"));
+        let unnamed = delta_target(&args, None);
+        let past_the_list = delta_target(
+            &json!({ "element_token": crate::element_token::token_for(snapshot, 1) }),
+            session,
+        );
+        let absent = delta_target(
+            &json!({ "element_token": crate::element_token::token_for(snapshot + 1, 0) }),
+            session,
+        );
         apply_config_args(&json!({"fast_path": "off"})).unwrap();
-        assert_eq!(target, Some((77, 9)));
+        assert_eq!(own, Some((77, 9)));
+        assert_eq!(
+            (foreign, unnamed, past_the_list, absent),
+            (None, None, None, None)
+        );
     }
 
     #[test]

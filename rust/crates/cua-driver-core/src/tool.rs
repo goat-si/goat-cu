@@ -2103,7 +2103,10 @@ impl ToolRegistry {
             Ok(crate::post_action_wait::PostActionWait::Default)
         };
         let delta_target = (!in_batch && crate::fast_path::wire::returns_delta(tool))
-            .then(|| crate::fast_path::wire::delta_target(&args))
+            .then(|| {
+                let session = runtime_read_session(&args, context, evidence);
+                crate::fast_path::wire::delta_target(&args, Some(&session))
+            })
             .flatten();
         let mut result = match wait {
             Ok(wait) => {
@@ -2321,11 +2324,7 @@ impl ToolRegistry {
         if session_selecting_tool(resolved_name)
             && args.get("_session_id").and_then(Value::as_str).is_none()
         {
-            let implicit = args
-                .get("_transport_session_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("{runtime_prefix}implicit-direct"));
+            let implicit = default_runtime_session(&args, &runtime_prefix);
             args["_session_id"] = Value::String(implicit.clone());
             args["_transport_session_id"] = Value::String(implicit);
         }
@@ -4095,6 +4094,35 @@ fn process_ownership_key(runtime_session: Option<&str>, runtime_prefix: &str) ->
         Some(session) => session.to_owned(),
         None => format!("{runtime_prefix}\u{0}anonymous-launch"),
     }
+}
+
+/// The runtime session a session-selecting call without one is dispatched
+/// as: the transport's session, else the runtime's implicit direct session.
+fn default_runtime_session(args: &Value, runtime_prefix: &str) -> String {
+    args.get("_transport_session_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{runtime_prefix}implicit-direct"))
+}
+
+/// The runtime session this caller's window reads run as, derived from the
+/// public arguments exactly as `invoke_authorized_dispatch` derives it for a
+/// session-selecting call (`get_window_state` records its fast-path
+/// snapshot under it). Used before dispatch, where the arguments do not
+/// carry it yet (#288 review).
+fn runtime_read_session(
+    args: &Value,
+    context: &crate::session_authorization::EffectiveAuthorizationContext,
+    evidence: &TrustedInvocationEvidence,
+) -> String {
+    let mut probe = args.clone();
+    crate::tool_args::sanitize_reserved_args(&mut probe);
+    let runtime_prefix = namespace_runtime_args(&mut probe, context, evidence);
+    probe
+        .get("_session_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| default_runtime_session(&probe, &runtime_prefix))
 }
 
 fn namespace_runtime_args(
@@ -6446,6 +6474,67 @@ allow:
             }
             assert_eq!(hits.load(Ordering::SeqCst), 2);
         }
+    }
+
+    /// #288 review round 2: `delta_target` runs before dispatch, so the
+    /// registry derives the session the caller's reads run as from the public
+    /// arguments (`runtime_read_session`). It must equal the `_session_id` a
+    /// dispatched `get_window_state` receives (and records its fast-path
+    /// snapshot under) for a public label, an unnamed call and a trusted
+    /// transport session alike; otherwise a token would map to no window, or
+    /// to another session's. The daemon-wide fast-path mode is not touched.
+    #[tokio::test]
+    async fn the_pre_dispatch_read_session_is_the_one_reads_run_as() {
+        let read_args = Arc::new(Mutex::new(None));
+        let mut registry = super::ToolRegistry::new();
+        registry.register(Box::new(ArgumentProbe {
+            hits: Arc::new(AtomicUsize::new(0)),
+            last_args: read_args.clone(),
+            def: super::ToolDef {
+                name: "get_window_state".into(),
+                description: "probe".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                read_only: true,
+                destructive: false,
+                idempotent: true,
+                open_world: false,
+            },
+        }));
+        let registry = Arc::new(registry);
+        let context = crate::session_authorization::configured_registry()
+            .and_then(|registry| registry.legacy_context())
+            .expect("test authorization context");
+        let dispatched = || {
+            read_args.lock().unwrap().clone().expect("read ran")["_session_id"]
+                .as_str()
+                .expect("the read's runtime session")
+                .to_owned()
+        };
+
+        for args in [
+            serde_json::json!({"pid": 77, "window_id": 9, "session": "delta-owner"}),
+            serde_json::json!({"pid": 77, "window_id": 9}),
+        ] {
+            registry.invoke("get_window_state", args.clone()).await;
+            let derived = super::runtime_read_session(
+                &args,
+                &context,
+                &super::TrustedInvocationEvidence::default(),
+            );
+            assert_eq!(derived, dispatched(), "{args}");
+        }
+
+        let adapter_args =
+            serde_json::json!({"pid": 77, "window_id": 9, "_session_id": "transport-7"});
+        registry
+            .invoke_from_trusted_adapter("get_window_state", adapter_args.clone())
+            .await;
+        let mut public = adapter_args;
+        let evidence = super::TrustedInvocationEvidence::extract_from_adapter_args(&mut public);
+        assert_eq!(
+            super::runtime_read_session(&public, &context, &evidence),
+            dispatched()
+        );
     }
 
     /// A trusted host relaying a human's input (a Cua Spaces viewer) marks

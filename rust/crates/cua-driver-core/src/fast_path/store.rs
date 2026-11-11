@@ -110,16 +110,6 @@ impl GuardStore {
             .map(|f| (f.element_count, f.thin_frames))
     }
 
-    /// The window a snapshot was read from, whichever session read it. Only
-    /// for choosing the window a direct action's delta re-reads: that action
-    /// already resolved the token in its own session's snapshot store, and
-    /// snapshot ids are unique daemon-wide, so this names the same snapshot.
-    /// Fingerprints are never returned across sessions.
-    pub fn snapshot_window(&self, snapshot_id: u32) -> Option<(i32, u64)> {
-        let s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        s.snapshots.get(&snapshot_id).map(|f| (f.pid, f.window_id))
-    }
-
     pub fn latest_stats(
         &self,
         pid: i32,

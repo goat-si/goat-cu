@@ -186,5 +186,26 @@ as a follow-up commit with its own failing-first test, and the recorded C receip
 | `cargo test -p platform-macos --lib fast_path_guard` | 0 | 1 passed |
 | `cargo check -p cua-driver-core -p platform-macos --all-targets` | 0 | no warnings |
 
+### #288 review round 2 (`cu-wp2-review-288-r2-s24-261112`, on 0d163dd1) — NEAR-PASS
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | P2 | 0d163dd1's `snapshot_window` was session-agnostic on the premise that a delta follows only a resolved token; desktop-scope branches of click/type_text/press_key/hotkey/scroll succeed without resolving `element_token`, so `click(scope:"desktop", x, y, element_token:<other session's snapshot>)` got that window's (pid, window) and a delta read | ACCEPTED, fixed by restoring session scoping at the source: `tool.rs` `runtime_read_session` derives, from the pre-dispatch arguments, the runtime session a session-selecting read runs as (sanitize → `namespace_runtime_args` → `default_runtime_session`, the helper dispatch now also uses); `delta_target(args, session)` goes back to the session-filtered, index-bounded `element()`; `snapshot_window` removed |
+| 2 | P3 | the ordering test lacked negative cases | ACCEPTED: `an_element_token_delta_maps_only_its_sessions_snapshot` asserts foreign session, unnamed, out-of-list index and absent snapshot all map to none |
+
+Failing first (end-to-end through the registry with probe `get_window_state`/`click`, fast_path `on`):
+`cargo test -p cua-driver-core --lib -- an_element_token_delta_reads_only_the_callers_own_snapshot` on 0d163dd1 → exit 101, tool.rs:6531
+"another session's snapshot: no delta read" (left 3, right 2). That test switched the daemon-wide fast-path mode and made a concurrent
+registry test (`canonical_dispatch_replaces_legacy_action_payload_with_the_closed_outcome`) fail in 3 of 3 `tool::` runs, so it is
+replaced by `the_pre_dispatch_read_session_is_the_one_reads_run_as` (derived session == the `_session_id` a dispatched get_window_state
+receives, for a public label, an unnamed call and a trusted transport session; no global mode) plus the wire test above.
+
+| Command (rust/) | Exit | Result |
+|---|---|---|
+| `cargo test -p cua-driver-core --lib -- an_element_token_delta fast_path` | 0 | 58 passed |
+| `cargo test -p cua-driver-core --lib tool::` ×3 | 0 | 171 passed each run |
+| `cargo test -p cua-driver-core --lib` | 0 | 1823 passed, 3 ignored |
+| `cargo check -p cua-driver-core -p platform-macos -p cua-driver --all-targets` | 0 | no warnings |
+
 `cargo test -p cua-driver-core --lib fast_path`, `cargo test -p platform-macos --lib process_identity list_apps list_windows`,
 `cargo check -p platform-macos --all-targets`, protocol check (B4 of 010) listing `process_instance` as additive output.
