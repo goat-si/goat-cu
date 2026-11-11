@@ -18,6 +18,21 @@ upstream release binaries. The repository was named goat-si/cua-driver until 202
 - GOAT fixes, each linked to an issue here or in goat-si/goat. Every fix that is not GOAT-specific is also
   sent upstream as a separate pull request against trycua/cua `main`, and driver bugs are reported upstream.
 
+## macOS click and focus refusals
+
+Some macOS click paths refuse instead of guessing, by design. These show up as refusals in live runs:
+
+- A click whose target's accessibility action list cannot be read is refused before any selection
+  write, AX action or pixel click (goat-si/goat-cu#278, #281). Before, it went through the selection route.
+- A native text field whose AXFocused is not settable, or whose AXPress target reads AXEnabled=false,
+  is refused instead of attempted (#280, #283). Read the window again and use another route.
+- A list item whose AXSelected reads fine but is not settable is reported as "exposes AXSelected but
+  it is not settable", not as a target that changed (#281).
+- After an AX press was sent, IllegalArgument and InvalidUIElement are unverifiable ("may have
+  acted"), not failures: a press can tear its element down before the reply (#277, #279).
+- A background pixel click that the fast-path check moves outside the window frame is refused with
+  the moved point; nothing is sent (#286).
+
 ## Signing
 
 Release artifacts here are unsigned. GOAT signs the driver when it builds its helper app, so the helper

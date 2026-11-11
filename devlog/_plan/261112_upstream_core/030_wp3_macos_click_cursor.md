@@ -66,3 +66,44 @@ if background_point_outside_frame(win_local_x + dx, win_local_y + dy, &frame.bou
 ## Verification
 
 `cargo test -p platform-macos --lib click:: hotkey::`, `cargo test -p cursor-overlay --lib`, `cargo check -p platform-macos --all-targets`.
+
+## wp3 B/C evidence — §A and §C (lead), on HEAD ef7a3646
+
+**#279.2 — corrected diagnosis.** 012 called `click.rs` "Sent … it may have acted" for a "proves nothing was sent" error an inverted
+predicate. History says otherwise: dd5fc6db (#277) added that branch on purpose — its PR body: "IllegalArgument after a state change
+stays uncertain and never claims a safe retry" — and the core write-outcome rule (`ax/write_outcome.rs` `native_write_outcome`)
+classes a Perform's IllegalArgument/InvalidUIElement as `StopUncertain(Unknown)`. The real defect was the contradiction the issue names:
+the same helper meant "never reached the app" in `unresolved_perform_error` (whose `bail!` branch was then unreachable from production
+while two tests asserted it) and "may have acted" at the press site. Fix: `perform_outcome(err)` (click.rs:6049) wraps the core rule;
+`unresolved_perform_error` (:6526) fails only on `StopNotDelivered` (accessibility disabled) and reports every other code unverifiable;
+the press site's helper branch is removed, so production behaviour is unchanged and the helper keeps one meaning (its doc now names its
+remaining users). `post_press_should_select` uses the same `perform_outcome`.
+Follow-up (not one of the 8 issues, not changed here): press_key.rs:1903/:2211, right_click.rs:1624 and double_click.rs:351 still use
+`perform_error_proves_nothing_was_sent` to choose a fallback after IllegalArgument/InvalidUIElement; under #277's rule that fallback can
+follow an action that already ran. Needs its own failing-first change per tool.
+
+**#279.1** hotkey.rs: `focus_with_retry` (:184) with `focus_retry_allowed` (:168) — a FocusWriteError other than InvalidUIElement,
+APIDisabled or IllegalArgument keeps polling to `HOTKEY_FOCUS_TIMEOUT` (rewriting AXFocused=true is idempotent and the hotkey still waits
+for the focus read); at the deadline the last write error is returned. `focus_hotkey_element` (:152) passes the live closures.
+
+**#286** click.rs: `point_outside_frame` (:3435) shared by the requested-point check and `relocated_point` (:3443); the frame size is kept
+from `frame_or_resolve` and the fast-path relocation (:2595) is refused in background when the moved window-local point leaves the frame
+("… relocated the window-local point to (x, y) pt, outside window …; background delivery refused. Nothing was sent."). Foreground keeps
+the moved point. `guard_pixel` has one caller; right_click/double_click do not relocate (012).
+
+**#281.2** click.rs: `SelectionUnavailable { Changed, NotSettable }` (:4227); the live re-check returns `NotSettable` when AXSelected reads
+but `settable` is Known(false) (:4499); the projection maps it to "selection target exposes AXSelected but it is not settable". No new
+protocol code (message only). **#281.3**: `dispatch_post_press_selection` → `dispatch_gated_write` (:3472; it gates first-selection,
+post-press, native-focus and hit-focus writes) and `site` is logged when a gate refuses (:3507). **#283.2**: dead `hand_back` in the
+text-input focus path removed (`focus_step()?` :7003); the live hand-back (:4642-4683) is untouched. **#281.1 / #283.1**: fail-closed
+refusals confirmed intended (#278, #280) and documented in GOAT.md "macOS click and focus refusals"; live smoke NOT RUN (no GOAT AppKit
+fixture build in this lane).
+
+| Command (rust/) | Exit | Result |
+|---|---|---|
+| `cargo test -p platform-macos --lib -- a_transient_focus_write_error_keeps_polling_until_the_deadline a_selection_target_that_is_not_settable_says_so a_relocated_background_point_outside_the_frame_is_refused perform_error_after_dispatch_is_unverifiable_unless_nothing_was_sent` (helpers mirroring today's behaviour) | 101 | 4 failed: click.rs:5623 relocation `left == right`; hotkey.rs:893 `-25204: Err(AXSetAttribute(AXFocused) returned -25204 …)`; click.rs:7918 `-25201 must not fail`; click.rs:5597 "…selection target changed or became unavailable" (/tmp/goat-cu-sync/wp3-red.log) |
+| same + `an_ax_error_that_proves_nothing_was_sent_stays_a_plain_failure post_press_changed_target_after_gate_never_writes`, after the fixes | 0 | 6 passed |
+| `cargo check -p platform-macos --all-targets` | 0 | no warnings |
+| `cargo test -p platform-macos --lib -- tools::click:: tools::hotkey::` | 0 | 125 passed, 2 ignored |
+| `cargo test -p platform-macos --lib lease_wiring` | 0 | 22 passed |
+| `rustfmt --edition 2021 --check` click.rs / hotkey.rs vs the same on HEAD | — | identical remaining diffs (pre-existing only) |

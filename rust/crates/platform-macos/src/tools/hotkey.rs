@@ -151,15 +151,60 @@ where
 
 fn focus_hotkey_element(pid: i32, element_ptr: usize) -> anyhow::Result<()> {
     let deadline = std::time::Instant::now() + HOTKEY_FOCUS_TIMEOUT;
+    focus_with_retry(
+        || crate::input::ax_actions::focus_element(element_ptr),
+        || crate::input::ax_actions::is_element_focused(pid, element_ptr),
+        || std::time::Instant::now() >= deadline,
+        || std::thread::sleep(HOTKEY_FOCUS_POLL_INTERVAL),
+    )
+}
+
+/// #279.1: a focus write that came back with an error the app may clear on
+/// its own (busy, a transient failure) is retried until the deadline, like a
+/// write that did not stick. Rewriting AXFocused=true is idempotent, and the
+/// hotkey is sent only after the focus read confirms it. A dead element,
+/// accessibility turned off and a bad argument repeat on every write, so
+/// they stop at once.
+fn focus_retry_allowed(error: &anyhow::Error) -> bool {
+    use crate::ax::bindings::{
+        kAXErrorAPIDisabled, kAXErrorIllegalArgument, kAXErrorInvalidUIElement,
+    };
+    error
+        .downcast_ref::<crate::input::ax_actions::FocusWriteError>()
+        .is_some_and(|failure| {
+            ![
+                kAXErrorInvalidUIElement,
+                kAXErrorAPIDisabled,
+                kAXErrorIllegalArgument,
+            ]
+            .contains(&failure.error)
+        })
+}
+
+fn focus_with_retry(
+    mut focus: impl FnMut() -> anyhow::Result<()>,
+    mut focused: impl FnMut() -> bool,
+    mut expired: impl FnMut() -> bool,
+    mut pause: impl FnMut(),
+) -> anyhow::Result<()> {
     loop {
-        crate::input::ax_actions::focus_element(element_ptr)?;
-        if crate::input::ax_actions::is_element_focused(pid, element_ptr) {
+        let write = focus();
+        if let Err(error) = &write {
+            if !focus_retry_allowed(error) {
+                return write;
+            }
+        }
+        if focused() {
             return Ok(());
         }
-        if std::time::Instant::now() >= deadline {
-            anyhow::bail!("requested hotkey element did not become focused");
+        if expired() {
+            return write.and_then(|()| {
+                Err(anyhow::anyhow!(
+                    "requested hotkey element did not become focused"
+                ))
+            });
         }
-        std::thread::sleep(HOTKEY_FOCUS_POLL_INTERVAL);
+        pause();
     }
 }
 
@@ -839,6 +884,85 @@ fn delivered_structured(foreground: bool) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// #279.1: an AXFocused write the app could not finish (busy, a transient
+    /// failure) is retried until the deadline like a write that did not
+    /// stick; the hotkey still goes only after the focus read confirms it.
+    /// Errors that repeat (a dead element, accessibility off, a bad
+    /// argument) stop at once.
+    #[test]
+    fn a_transient_focus_write_error_keeps_polling_until_the_deadline() {
+        use crate::ax::bindings::{
+            kAXErrorAPIDisabled, kAXErrorCannotComplete, kAXErrorFailure, kAXErrorIllegalArgument,
+            kAXErrorInvalidUIElement,
+        };
+        use crate::input::ax_actions::FocusWriteError;
+        use cua_driver_core::mutation::{Reason, WriteOutcome};
+        use std::cell::Cell;
+        let refused = |code| -> anyhow::Result<()> {
+            Err(FocusWriteError {
+                error: code,
+                outcome: WriteOutcome::StopUncertain(Reason::Unknown),
+            }
+            .into())
+        };
+
+        for busy in [kAXErrorCannotComplete, kAXErrorFailure] {
+            let writes = Cell::new(0);
+            let result = super::focus_with_retry(
+                || {
+                    writes.set(writes.get() + 1);
+                    if writes.get() < 3 {
+                        refused(busy)
+                    } else {
+                        Ok(())
+                    }
+                },
+                || writes.get() >= 3,
+                || false,
+                || {},
+            );
+            assert!(result.is_ok(), "{busy}: {result:?}");
+            assert_eq!(writes.get(), 3, "{busy}");
+
+            let polls = Cell::new(0);
+            let error = super::focus_with_retry(
+                || refused(busy),
+                || false,
+                || {
+                    polls.set(polls.get() + 1);
+                    polls.get() > 4
+                },
+                || {},
+            )
+            .expect_err("a busy app until the deadline stops");
+            assert_eq!(polls.get(), 5, "{busy}");
+            assert_eq!(
+                error.downcast_ref::<FocusWriteError>().map(|e| e.error),
+                Some(busy),
+                "the last write error is reported"
+            );
+        }
+
+        for repeats in [
+            kAXErrorInvalidUIElement,
+            kAXErrorAPIDisabled,
+            kAXErrorIllegalArgument,
+        ] {
+            let writes = Cell::new(0);
+            let result = super::focus_with_retry(
+                || {
+                    writes.set(writes.get() + 1);
+                    refused(repeats)
+                },
+                || panic!("{repeats}: no focus read after a write that will repeat"),
+                || false,
+                || {},
+            );
+            assert!(result.is_err(), "{repeats}");
+            assert_eq!(writes.get(), 1, "{repeats}");
+        }
+    }
+
     #[test]
     fn window_hotkey_reaches_frontmost_disabled_chord_decision() {
         let result = super::lookup_native_menu(true, || Some(())).and_then(|()| {
