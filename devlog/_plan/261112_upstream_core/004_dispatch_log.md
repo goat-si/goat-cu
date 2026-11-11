@@ -50,3 +50,12 @@ lease-wiring inventory fingerprints (020). `cu-wp2-review-ab-s24-261112` (#299 r
 still running at this entry.
 2026-11-12: wp2 #288 independent review dispatched — `cu-wp2-review-288-s24-261112`, role review, returned codex /
 system24/deepseek-v4.1-flash / reasoningEffort=high, status running.
+2026-11-12: wp2 committed e0851769 ahead of both wp2 reviews; both reviewers steered to read commit e0851769 (`git show`).
+2026-11-12: wp3 #287 implementation dispatched — `cu-wp3-287-s24-261112` (write scope cursor-overlay cursor_pose.rs / render_state.rs /
+render_map.rs), returned codex / system24/deepseek-v4.1-flash / reasoningEffort=high, status running.
+2026-11-12: wp3/wp4 review dispatched — `cu-wp34-review-s24-261112` (commits 393c49e2, 68771fdb), role review, returned codex /
+system24/deepseek-v4.1-flash / reasoningEffort=high, status running.
+2026-11-12: wp2b #299 Linux/Windows implementation dispatched — `cu-wp2b-299-lw-s24-261112`, returned codex /
+system24/deepseek-v4.1-flash / reasoningEffort=high, status running.
+2026-11-12: wp1b review dispatched — `cu-wp1b-review-s24-261112` (commit ef7a3646), role review, returned codex /
+system24/deepseek-v4.1-flash / reasoningEffort=high, status running.

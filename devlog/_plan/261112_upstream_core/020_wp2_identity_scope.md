@@ -154,5 +154,21 @@ as a follow-up commit with its own failing-first test, and the recorded C receip
 
 ## Verification
 
+## #299 independent review (`cu-wp2-review-ab-s24-261112`, on e0851769) — NEAR-PASS, 4 findings, all accepted
+
+| # | Sev | Finding | Fix (follow-up commit) |
+|---|---|---|---|
+| 1 | P2 | recording_hooks.rs:78 resolved the caller's token with `resolve` (= `NotChecked`); every snapshot now carries a capture, so element-addressed recordings silently lost click.png | `process_identity::resolve_now` (:103) reads live evidence on the calling thread; the hook (recording_hooks.rs:80) uses it |
+| 2 | P2 | list_windows labelled on the async runtime (and its whole listing, AX included, ran there) | enumeration, composition and labels in one `tokio::task::spawn_blocking` (list_windows.rs:65); lease-wiring exemption added (Read) |
+| 3 | P3 | a screenshot-only refresh of an old snapshot reported this read's label beside that snapshot's tokens | `reported_label` (:56): no label when the read refreshed an existing snapshot (get_window_state.rs uses `refreshed.is_some()`) |
+| 4 | P3 | labels were read once after the listing, so a pid reused between enumeration and labelling paired the old record with the new label | `labels_before` (:69, one start-stamp read per pid before the listing, all pids or the filtered pid) + `bracketed_label` (:77): label only when before == after; list_apps.rs:54 and list_windows.rs:65 |
+
+| Command (rust/) | Exit | Result |
+|---|---|---|
+| `cargo test -p platform-macos --lib -- a_synchronous_resolve_reads_live_evidence a_refreshed_snapshot_reports_no_new_label a_pid_that_restarts_during_a_listing_gets_no_label` (helpers mirroring the committed behaviour) | 101 | 3 failed: process_identity.rs:404 `resolve_now` not `Ok(Element)`; :427 `Some("1")` for a refreshed snapshot; :440 `Some("2")` across a restart |
+| `cargo test -p platform-macos --lib -- process_identity list_apps list_windows recording_hooks lease_wiring get_window_state` before the inventory update | 101 | 2 lease-wiring failures (list_apps fingerprint, new list_windows site) |
+| same, after | 0 | 152 passed, 1 ignored |
+| `cargo check -p platform-macos --all-targets` | 0 | no warnings |
+
 `cargo test -p cua-driver-core --lib fast_path`, `cargo test -p platform-macos --lib process_identity list_apps list_windows`,
 `cargo check -p platform-macos --all-targets`, protocol check (B4 of 010) listing `process_instance` as additive output.

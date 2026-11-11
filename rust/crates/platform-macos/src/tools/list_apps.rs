@@ -52,8 +52,17 @@ where
     F: FnOnce() -> Vec<crate::apps::AppInfo> + Send + 'static,
 {
     let apps = match tokio::task::spawn_blocking(move || {
+        // #299: a pid is labelled only when it names the same process start
+        // before and after the inventory.
+        let before = crate::process_identity::labels_before(&crate::apps::all_pids());
         let mut apps = inventory();
-        label_running_apps(&mut apps, crate::process_identity::instance_label);
+        label_running_apps(&mut apps, |pid| {
+            crate::process_identity::bracketed_label(
+                &before,
+                pid,
+                crate::process_identity::instance_label,
+            )
+        });
         apps
     })
     .await

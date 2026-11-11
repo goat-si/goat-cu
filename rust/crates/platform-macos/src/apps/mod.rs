@@ -83,7 +83,7 @@ pub fn list_running_apps() -> Vec<AppInfo> {
 
 /// Every pid the kernel currently has, via `proc_listallpids` (libproc, in
 /// libSystem — no entitlement, no extra dependency).
-fn all_pids() -> Vec<i32> {
+pub(crate) fn all_pids() -> Vec<i32> {
     extern "C" {
         fn proc_listallpids(buffer: *mut c_void, buffersize: i32) -> i32;
     }

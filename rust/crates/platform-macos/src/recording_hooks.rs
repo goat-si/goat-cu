@@ -75,7 +75,15 @@ pub fn element_window_local_xy(
     capture_point: bool,
 ) -> Option<(u64, Option<(f64, f64)>)> {
     let cache = current_runtime_store::<AxSnapshot>()?;
-    let target = cache.resolve(i32::try_from(pid).ok()?, args).ok()?;
+    // #299: snapshots carry their process instance, so the token resolves
+    // with live evidence read here (this hook is synchronous).
+    let target = crate::process_identity::resolve_now(
+        &cache,
+        i32::try_from(pid).ok()?,
+        args,
+        crate::process_identity::process_fingerprint,
+    )
+    .ok()?;
     let ResolvedElement::Element {
         window_id, element, ..
     } = target

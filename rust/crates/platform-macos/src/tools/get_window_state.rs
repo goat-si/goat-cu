@@ -973,8 +973,9 @@ impl Tool for GetWindowStateTool {
         let instance =
             crate::process_identity::instance_capture(pid, instance_before, instance_after);
         // #299: report the instance only when the read proved one process
-        // start throughout.
-        let process_instance = crate::process_identity::capture_label(&instance);
+        // start throughout and published the snapshot it describes.
+        let process_instance =
+            crate::process_identity::reported_label(&instance, refreshed.is_some());
         let (snapshot_id, replaced) = match refreshed {
             Some(id) => (Some(id), None),
             None => snapshot_payload
@@ -1003,11 +1004,7 @@ impl Tool for GetWindowStateTool {
                     session_id.as_deref(),
                 );
                 if screenshot.is_none() {
-                    crate::fast_path_guard::record_window(
-                        pid,
-                        window_id,
-                        session_id.as_deref(),
-                    );
+                    crate::fast_path_guard::record_window(pid, window_id, session_id.as_deref());
                 }
             }
         }

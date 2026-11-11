@@ -1,6 +1,8 @@
 //! Kernel-backed process instance identity for protected snapshots.
 
 use cua_driver_core::browser::ProcessFingerprint;
+use cua_driver_core::element_token::ResolvedElement;
+use cua_driver_core::protocol::ToolResult;
 use cua_driver_core::snapshot_store::{
     InstanceCapture, InstanceEvidence, SnapshotPayload, SnapshotStore,
 };
@@ -46,6 +48,73 @@ pub(crate) fn capture_label(capture: &InstanceCapture) -> Option<String> {
         }
         InstanceCapture::Failed(_) => None,
     }
+}
+
+/// The label a window read reports beside its snapshot. A screenshot-only
+/// read that refreshed an existing snapshot keeps that snapshot's tokens and
+/// their stored instance, so this read's capture does not describe them.
+pub(crate) fn reported_label(
+    capture: &InstanceCapture,
+    refreshed_snapshot: bool,
+) -> Option<String> {
+    if refreshed_snapshot {
+        return None;
+    }
+    capture_label(capture)
+}
+
+/// Labels of `pids` read before a listing (one start-stamp read each), so a
+/// record is labelled only when its pid named the same process start before
+/// and after the listing was taken.
+pub(crate) fn labels_before(pids: &[i32]) -> std::collections::HashMap<i32, String> {
+    pids.iter()
+        .filter_map(|&pid| start_label_with(pid, &KernelReader).map(|label| (pid, label)))
+        .collect()
+}
+
+/// The label to report for `pid` after a listing: the instance read now, only
+/// when it equals the one read before the listing.
+pub(crate) fn bracketed_label(
+    before: &std::collections::HashMap<i32, String>,
+    pid: i32,
+    after: impl FnOnce(i32) -> Option<String>,
+) -> Option<String> {
+    let after = after(pid)?;
+    (before.get(&pid) == Some(&after)).then_some(after)
+}
+
+fn start_label_with(pid: i32, reader: &impl ProcessReader) -> Option<String> {
+    let pid = Some(pid).filter(|pid| *pid > 0)?;
+    let (seconds, micros) = process_start_stamp_with(pid, |pid, info| reader.info(pid, info))?;
+    if micros >= 1_000_000 {
+        return None;
+    }
+    Some(
+        seconds
+            .checked_mul(1_000_000)?
+            .checked_add(micros)?
+            .to_string(),
+    )
+}
+
+/// Resolve an element token on a synchronous path (the recording hook) with
+/// live process evidence read on the calling thread: a protected snapshot
+/// refuses a token resolved without it.
+pub(crate) fn resolve_now<S: SnapshotPayload>(
+    store: &SnapshotStore<S>,
+    pid: i32,
+    args: &serde_json::Value,
+    fingerprint: impl FnOnce(i64) -> Option<ProcessFingerprint>,
+) -> Result<ResolvedElement<S::Element>, ToolResult> {
+    let live = if args.get("element_token").is_none() {
+        InstanceEvidence::NotChecked
+    } else {
+        match fingerprint(i64::from(pid)) {
+            Some(fingerprint) => InstanceEvidence::Live(fingerprint),
+            None => InstanceEvidence::Unavailable("process identity could not be read".into()),
+        }
+    };
+    store.resolve_for_instance(pid, args, live)
 }
 
 /// The process instance a read observed: the fingerprints taken before and
@@ -333,5 +402,72 @@ mod u33_identity_tests {
             instance_capture(42, Some(other_pid.clone()), Some(other_pid)),
             InstanceCapture::Failed(_)
         ));
+    }
+
+    /// #299 review: the recording hook resolves the caller's token on its own
+    /// thread. With live evidence a token from the current process start
+    /// resolves (so element clicks keep their click.png); a restarted or
+    /// unreadable process still refuses.
+    #[test]
+    fn a_synchronous_resolve_reads_live_evidence() {
+        let store = SnapshotStore::new();
+        let capture = instance_capture(42, Some(started(1)), Some(started(1)));
+        let (id, _) = publish_read(
+            &store,
+            42,
+            7,
+            Rows(vec![10]),
+            Some("s"),
+            None,
+            None,
+            capture,
+        )
+        .unwrap();
+        let args = serde_json::json!({
+            "element_token": cua_driver_core::element_token::token_for(id, 0),
+            "_session_id": "s",
+        });
+        assert!(matches!(
+            resolve_now(&store, 42, &args, |_| Some(started(1))),
+            Ok(ResolvedElement::Element { .. })
+        ));
+        for (case, live) in [("restarted", Some(started(2))), ("unreadable", None)] {
+            assert!(
+                resolve_now(&store, 42, &args, |_| live).is_err(),
+                "{case} process refuses"
+            );
+        }
+        let no_token = serde_json::json!({ "_session_id": "s" });
+        assert!(matches!(
+            resolve_now(&store, 42, &no_token, |_| panic!("no token, no read")),
+            Ok(ResolvedElement::None)
+        ));
+    }
+
+    /// #299 review: a screenshot-only read that refreshed an existing snapshot
+    /// reports no label, since its tokens keep the stored instance.
+    #[test]
+    fn a_refreshed_snapshot_reports_no_new_label() {
+        let capture = instance_capture(42, Some(started(1)), Some(started(1)));
+        assert_eq!(reported_label(&capture, false).as_deref(), Some("1"));
+        assert_eq!(reported_label(&capture, true), None);
+    }
+
+    /// #299 review: a listing labels a pid only when the start read before the
+    /// listing equals the one read after it; a pid reused in between, or one
+    /// not read before, gets none.
+    #[test]
+    fn a_pid_that_restarts_during_a_listing_gets_no_label() {
+        let before = std::collections::HashMap::from([(42, "1".to_owned())]);
+        assert_eq!(
+            bracketed_label(&before, 42, |_| Some("1".into())).as_deref(),
+            Some("1")
+        );
+        assert_eq!(bracketed_label(&before, 42, |_| Some("2".into())), None);
+        assert_eq!(bracketed_label(&before, 42, |_| None), None);
+        assert_eq!(bracketed_label(&before, 43, |_| Some("1".into())), None);
+        let reader = FakeReader::new(&[full(12, 1)], None);
+        assert_eq!(start_label_with(42, &reader).as_deref(), Some("12000001"));
+        assert_eq!(start_label_with(0, &FakeReader::new(&[], None)), None);
     }
 }
