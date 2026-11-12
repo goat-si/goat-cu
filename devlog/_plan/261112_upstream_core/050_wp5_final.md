@@ -57,6 +57,8 @@
 | 888d0811, 09a0e5dd, 495f9c31 | docs | review records (libei PASS, wp1c r2, CI/wp1d, wp1e) |
 | 83aeb256 | wp1c final review | a landed line sets its own hint (press Return with press_key, do not type again) over the seam's "read before typing again"; `completed_delivery` pins the delivery mapping |
 | 1f2060af | #287 round-2 review | macOS parked loop keeps the ~1 s repin of a revealed pinned cursor; SetMotion/ApplyMotion restart a parked float; docs |
+| 648ee8ec | docs | wp1c final-review and #287 round-2 decisions |
+| ff6658cc | wp3c delta review | coded undelivered AX refusals (right_click, double_click, press_key, non-fronted scroll) are typed NOT_DELIVERED, so a run_steps step that sent nothing counts as not delivered (was DeliveredUnverified / retry Unsafe); GOAT.md fronted-window exception; Linux fd test marker carries the spawning pid |
 
 ### Re-fetch before the last D (2026-11-12)
 

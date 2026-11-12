@@ -147,3 +147,13 @@ recovery_hint::annotate then green), delivery mapping unpinned (accepted → com
 counts residual (accepted). The pre-restart `cu-final-287-e354f982-s24` completed: NEAR-PASS, 5 P3: GNOME doc, parked repin,
 motion restart, doc residue accepted → 1f2060af (red first: set-motion case; repin test compile); macOS seam test rebutted as
 residual. `-r2` duplicate cancelled. Decisions recorded with review_findings.record.
+2026-11-12: `cu-delta-review-019c3858-s24-r2`: 0f0d4b70 NEAR-PASS, 019c3858 PASS. P2 accepted: the coded undelivered refusals carried
+code/effect/dispatched but no typed disposition, and `ToolResult::proves_no_input` reads only that, so a run_steps batch whose only
+step sent nothing was typed DeliveredUnverified / retry Unsafe → ff6658cc (`not_delivered_refusal` and scroll's non-fronted refusal
+typed NOT_DELIVERED; 3 red without it, including a batch-level run_steps test through the real constructor, then green;
+platform-macos --lib 2031 / 48, clippy -D warnings clean). P3 GOAT.md APIDisabled wording and P3 missing batch test accepted in the
+same commit. P3 Linux env marker accepted: the marker carries the spawning pid; in the container, with the marker leaked as 1 and a
+scratch typo in the child filter, the old check passed (no child) and the new one failed (child ran 0 tests); final code green with
+and without the leaked marker, platform-linux --lib 1170 / 15, clippy clean. The pre-restart original `cu-delta-review-019c3858-s24`
+had resumed as a second run; cancelled as a duplicate. Decisions recorded with review_findings.record. Still running after the
+11:2x UTC GOAT restart: `cu-review-wp1f-ci-b0c7a85a-s24`, `cu-final-83aeb256-1f2060af-s24`.
