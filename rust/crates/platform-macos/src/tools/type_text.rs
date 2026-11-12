@@ -741,10 +741,9 @@ fn completed_delivery(delivery: TypeTextDelivery) -> Option<(TypeTextOutcome, bo
 
 /// The next step a browser-tab result names when its AXValue read-back is not
 /// proof that the DOM saw the text.
-const BROWSER_TAB_NEXT_STEP: &str =
-    "Check the field before typing again: in a browser tab read it \
-     with get_browser_state and type with browser_type only if the text did not land; in an \
-     embedded web view re-type with the px form (x,y) only after the screenshot shows it missing.";
+const BROWSER_TAB_NEXT_STEP: &str = "In a browser tab check it with get_browser_state and type \
+     with browser_type only if the text did not land; in an embedded web view use the px form \
+     (x,y) only once the screenshot shows it missing.";
 
 /// The reason the `page` escalation gives for browser web content: `page` only
 /// reads, so acting on the tab goes through the typed browser tools.
@@ -867,14 +866,19 @@ fn type_text_outcome_result(
             "Read the window to check the text before sending it again."
         };
         let surface = if web {
-            "web-content surface (Chromium / WebKit / Electron): AXValue \
-                         read-back is not independent proof that the renderer/DOM observed \
-                         the input."
+            "Web content (Chromium / WebKit / Electron): its AXValue read-back is not \
+             independent proof that the renderer/DOM observed the input."
         } else {
-            "the window's focused element could not be read, so the AXValue \
-                         read-back cannot be tied to the target window."
+            "The window's focused element could not be read, so the AXValue read-back \
+             cannot be tied to the target window."
         };
-        ("📨 Sent (unverified)", format!(" — {surface} {next_step}"))
+        // The read-first rule leads, ahead of the char count and the variable
+        // detail (field title, document note), and the next step comes before
+        // the explanation, so run_steps' 300-character step message keeps them.
+        (
+            "📨 Sent (unverified), so read the field before typing again —",
+            format!(" {next_step} {surface}"),
+        )
     } else if path == PATH_KEY_EVENTS_FG {
         (
             "📨 Sent (unverified)",
@@ -914,11 +918,11 @@ fn type_text_outcome_result(
             // The next step is a Return via press_key (see the note above).
             s["hint"] = serde_json::json!(LINE_WITHOUT_RETURN_HINT);
         } else if untrusted_web_readback {
-            // Web-content AXValue read-back. A real browser TAB → the
-            // `page` tool (drives the DOM via CDP) is the reliable rung;
-            // an embedded web view (Electron, no CDP) → the element px
-            // action. It's a renderer/DOM-focus problem, never a
-            // foreground one.
+            // Web-content AXValue read-back. A real browser TAB → read it
+            // with get_browser_state, then browser_type if the text did not
+            // land (`page` only reads); an embedded web view (Electron, no
+            // CDP) → the element px action. It's a renderer/DOM-focus
+            // problem, never a foreground one.
             let escalation = match web_readback_next_rung(electron_web_content, used_pixel_focus) {
                 Some("px") => Some((
                     "px",
@@ -5064,6 +5068,56 @@ mod tests {
             }
             assert!(text.contains("browser_type"), "{text:?}");
         }
+        // After an unverified send the caller reads first and types again only
+        // if the text did not land.
+        for text in [BROWSER_TAB_NEXT_STEP, BROWSER_TAB_ESCALATION_REASON] {
+            let read = text.find("get_browser_state").expect("names the read");
+            let write = text.find("browser_type").expect("names the write");
+            assert!(read < write, "read before write: {text:?}");
+            assert!(text.contains("did not land"), "{text:?}");
+        }
+    }
+
+    /// run_steps keeps the first 300 characters of a step's first line
+    /// (batch_tools::bounded_message). The read-before-retyping rule leads the
+    /// line, so a long field title or document note cannot push it out; with no
+    /// such detail the whole browser-tab next step fits too.
+    #[test]
+    fn an_untrusted_web_readback_step_message_keeps_its_instruction() {
+        let step_message = |detail: String, char_count: usize| {
+            let result = type_text_outcome_result(
+                TypeTextOutcome {
+                    detail,
+                    path: PATH_AX,
+                    verified: true,
+                    delivered_chars: Some(char_count),
+                    web_area: WebAreaClassification::WebContent,
+                },
+                char_count,
+                false,
+                false,
+                "",
+                false,
+            );
+            let text = result
+                .content
+                .iter()
+                .find_map(|content| match content {
+                    cua_driver_core::protocol::Content::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .expect("text content");
+            let first_line = text.lines().next().unwrap_or("").to_owned();
+            first_line.chars().take(300).collect::<String>()
+        };
+        let long = format!(" into AXTextField \"{}\"", "x".repeat(240));
+        let bounded = step_message(long, 99_999);
+        assert!(
+            bounded.contains("read the field before typing again"),
+            "{bounded}"
+        );
+        let bounded = step_message(String::new(), 99_999);
+        assert!(bounded.contains(BROWSER_TAB_NEXT_STEP), "{bounded}");
     }
 
     #[test]

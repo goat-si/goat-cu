@@ -1179,7 +1179,8 @@ const ADDRESS_FIELD_ROUTE: &str = "This is Safari's address and search field. Sa
     invoke_menu [\"File\", \"Open Location...\"] on this window (the field starts editing), \
     then type_text the address into the field's element_token from a fresh get_window_state, \
     then press_key return on this window. Check the window title or the field in a fresh \
-    get_window_state. To read or act on the page itself use the page tool.";
+    get_window_state. To read the page itself use the page tool (get_text, query_dom); act on \
+    it through element actions from get_window_state.";
 
 /// Safari's address and search field: an `AXValue` write is read back while
 /// the field shows and keeps the page's address, and it never navigates.
@@ -2794,6 +2795,12 @@ mod tests {
         assert!(text.contains("Open Location"), "{text}");
         assert!(text.contains("type_text"), "{text}");
         assert!(text.contains("press_key return"), "{text}");
+        // `page` only reads since the wp1i sync; acting on a Safari page goes
+        // through element actions, which the typed browser tools do not cover.
+        assert!(
+            !text.contains("act on the page itself use the page tool"),
+            "{text}"
+        );
     }
 
     #[test]

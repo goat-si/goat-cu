@@ -360,8 +360,9 @@ pub fn decide_background_input(
                     format!(
                         "pid {} owns {} other eligible top-level window(s); process-scoped \
                          key events cannot be proven to reach window {} and could mutate a \
-                         sibling window. Use an exact element action, the page tool for \
-                         browser content, or delivery_mode:\"foreground\"",
+                         sibling window. Use an exact element action, get_browser_state and \
+                         the browser_* tools for Chromium browser content, or \
+                         delivery_mode:\"foreground\"",
                         target.pid, facts.competing_keyboard_destinations, target.window_id
                     ),
                     Some("accessibility"),
@@ -483,6 +484,19 @@ mod tests {
                 code_of(decide_background_input(TARGET, &facts, action)),
                 refusal_codes::SAME_PID_KEYBOARD_AMBIGUITY,
                 "{action:?} must refuse while a sibling keyboard destination exists"
+            );
+            // `page` only reads since the wp1i sync: the advice names the typed
+            // browser tools, not page.
+            let BackgroundInputDecision::Refuse(refusal) =
+                decide_background_input(TARGET, &facts, action)
+            else {
+                panic!("expected a refusal");
+            };
+            assert!(!refusal.reason.contains("page tool"), "{}", refusal.reason);
+            assert!(
+                refusal.reason.contains("get_browser_state"),
+                "{}",
+                refusal.reason
             );
         }
         // Semantic AX and the stamped window-local pointer remain available:
