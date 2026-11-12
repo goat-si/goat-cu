@@ -71,15 +71,6 @@ pub(super) const ENTRIES: &[Entry] = &[
         reason: "native window target lookup",
     },
     Entry {
-        file: "browser/browser_js.rs",
-        item: "BrowserJs::enable_javascript_apple_events",
-        primitive: ".spawn",
-        fingerprint: 364654489660849781,
-        occurrence: 1,
-        category: Category::Process,
-        reason: "open subprocess; async launcher ownership remains a follow-up",
-    },
-    Entry {
         file: "browser/consent_ui.rs",
         item: "handle",
         primitive: "tokio::task::spawn_blocking",

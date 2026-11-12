@@ -225,7 +225,9 @@ async fn unreadable_front_or_idle_defers_until_timeout() {
 }
 
 #[tokio::test]
-async fn page_connection_actions_are_tracked_without_tracking_plain_reads() {
+async fn page_actions_never_hold_the_restore_wait() {
+    // `page` only reads now; its removed page actions are refused before
+    // anything is sent, so none of them can reconnect or relaunch a browser.
     struct Probe {
         def: cua_driver_core::tool::ToolDef,
         fence: &'static Fence,
@@ -245,21 +247,23 @@ async fn page_connection_actions_are_tracked_without_tracking_plain_reads() {
         }
     }
     for (action, extra, expected) in [
-        ("insert_text", serde_json::json!({}), 1),
-        ("type_keystrokes", serde_json::json!({}), 1),
+        ("insert_text", serde_json::json!({}), 0),
+        ("type_keystrokes", serde_json::json!({}), 0),
         (
             "execute_javascript",
             serde_json::json!({"cdp_port":9222}),
-            1,
+            0,
         ),
         (
             "execute_javascript",
             serde_json::json!({"target_url_contains":"x"}),
-            1,
+            0,
         ),
         ("execute_javascript", serde_json::json!({}), 0),
         ("click_element", serde_json::json!({}), 0),
+        ("enable_javascript_apple_events", serde_json::json!({}), 0),
         ("get_text", serde_json::json!({}), 0),
+        ("query_dom", serde_json::json!({}), 0),
     ] {
         let fence: &'static Fence = Box::leak(Box::new(test_fence()));
         let seen = Arc::new(AtomicUsize::new(99));
@@ -278,7 +282,7 @@ async fn page_connection_actions_are_tracked_without_tracking_plain_reads() {
 }
 
 #[tokio::test]
-async fn focus_capable_browser_and_page_actions_are_tracked() {
+async fn focus_capable_browser_actions_are_tracked() {
     struct Probe {
         def: cua_driver_core::tool::ToolDef,
         fence: &'static Fence,
@@ -298,7 +302,6 @@ async fn focus_capable_browser_and_page_actions_are_tracked() {
         }
     }
     for (name, action) in [
-        ("page", "enable_javascript_apple_events"),
         ("browser_navigate", ""),
         ("browser_click", ""),
         ("browser_download", ""),

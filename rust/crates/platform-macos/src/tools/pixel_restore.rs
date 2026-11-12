@@ -337,18 +337,10 @@ async fn invoke_with_fence(
     args: serde_json::Value,
 ) -> cua_driver_core::protocol::ToolResult {
     let name = tool.def().name.clone();
-    // Browser tools may reconnect. Page text input and targeted evaluation
-    // can also open a connection; setup may quit and relaunch the browser.
-    let page_action = args.get("action").and_then(serde_json::Value::as_str);
-    let targeted = ["cdp_port", "target_url_contains"]
-        .iter()
-        .any(|key| args.get(*key).is_some_and(|value| !value.is_null()));
-    let tracked = name != "page"
-        || matches!(
-            page_action,
-            Some("enable_javascript_apple_events" | "insert_text" | "type_keystrokes")
-        )
-        || (page_action == Some("execute_javascript") && targeted);
+    // Every action but `page` is tracked; browser tools may also reconnect or
+    // launch a browser. `page` only reads: its removed page actions are
+    // refused before anything is sent.
+    let tracked = name != "page";
     let Ok((epoch, _in_flight)) = crate::goat::action_latency::timed(
         crate::goat::action_latency::Stage::PixelAdmission,
         tokio::time::timeout(

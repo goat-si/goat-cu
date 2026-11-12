@@ -110,6 +110,7 @@ pub mod cursor_sampler;
 pub mod cursor_shape;
 pub mod daemon;
 pub mod delivery;
+pub mod deprecation;
 pub mod desktop_capture_scale;
 pub mod desktop_lease;
 pub mod element_frame;

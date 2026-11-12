@@ -24,11 +24,8 @@ short gap between pairs. Delivery remains unverifiable unless read-back
 confirms an effect. Focus restoration runs separately and waits for tracked
 actions to finish and a 50 ms quiet interval. Browser tools and
 `get_browser_state` are tracked because they can reconnect or launch a
-browser; `page` setup (`enable_javascript_apple_events`) is tracked while it
-quits the browser and patches preferences, but the subsequent relaunch can
-outlive that call. `insert_text`, `type_keystrokes`, and targeted
-`execute_javascript` are tracked because they can open a connection. Other
-admitted `page` actions do not hold the wait open.
+browser. `page` only reads (`get_text`, `query_dom`), so it does not hold
+the wait open.
 Restoration retains the original app
 across later actions, and is abandoned on physical user input, a frontmost
 app other than the original or target, or a two-second timeout. A target
@@ -1052,8 +1049,8 @@ the only browser cursor displayed in that Chrome window.
 Browser chrome, permission prompts, downloads, file pickers, Safari, Firefox,
 and unbound embedded webviews remain native surfaces. Inspect them with
 `get_window_state` and use the AX/PX ladder in this file. The legacy `page`
-tool and Apple Events JavaScript bridge remain compatibility surfaces, not the
-starting point for new browser workflows.
+tool is read-only now (`get_text` and `query_dom`) and is not the starting point
+for new browser workflows.
 
 ## macOS common error patterns
 
