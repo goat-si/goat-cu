@@ -127,3 +127,6 @@ Invalid 'input[124].name': string does not match pattern"), the third long revie
 `cu-wp3-287-review-r2-s24-261112` (no activity since the 04:28 restart) cancelled. Replaced by three narrow fresh final-round reviews of
 the commits without a review of their final form: `cu-final-287-e354f982-s24`, `cu-final-wp1c-1ec667ea-s24`, `cu-final-ci-wp1d-s24`
 (d0e90760, 2a726372, 133b2ef9); all returned codex / system24/deepseek-v4.1-flash / reasoningEffort=high.
+2026-11-12 ~09:45 UTC: GOAT server restart cancelled all five (task.read: status cancelled), none had reported. Re-dispatched at b0c7a85a with
+the same narrow briefs (`-r2` ids), plus `cu-review-wp1f-ci-b0c7a85a-s24` for 3be03b46 (wp1f) and b0c7a85a (CI test fix); all six returned
+codex / system24/deepseek-v4.1-flash / reasoningEffort=high.

@@ -48,6 +48,8 @@
 | 068c9a00 | wp1e | sync 4cf88bae → 4f2aa028 (0.47.18): `invoke_menu` `delivery_mode` contract (manifest and UniFFI bindings regenerated), hyprland requalify channel, CHANGELOG, installer version, vendored cua-telemetry 0.25.2 |
 | e3dcec4d | docs | final record at 068c9a00 |
 | 3be03b46 | wp1f | sync 4f2aa028 → b9e38d1a: libxkbcommon 1.0 text functions resolved at run time (Linux; Ubuntu 20.04 loads the driver) |
+| c0205638 | docs | final re-fetch; unit wp1f |
+| b0c7a85a | CI fix | paused-clock batch pacing test runs on its own desktop lane (goat-ci run 43183852970) |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -121,6 +123,15 @@ helper safety harnesses. Logs: /tmp/goat-cu-sync/receipt-final/.
 
 ### CI after the receipt
 
+- PR #300 at 5c760643 (run 43183852970, Linux `cua-driver-core --lib`): `batch_tools::tests::pauses_between_steps_but_not_after_the_last`
+  failed at tests.rs:1400 with "2. click ERROR (time_budget): step exceeded its execution budget" (1825 passed). The test runs on a paused
+  tokio clock and replaces only step 1's deadline with a trigger (`deadline_override.take()`, batch_tools.rs:1037); step 2 keeps a real
+  budget timer. A click takes the process-wide `desktop_action_coordinator()` and `desktop_lane()` (tool.rs:148, :174), which other tests in
+  the binary hold; while step 2 waited for them the runtime idled and the paused clock jumped to the budget. Red (scratch hook, not
+  committed): another thread holding the process-wide lane between the steps reproduced the exact CI message in 0.04 s. Fix b0c7a85a: test-only
+  `ToolRegistry::isolate_desktop` (own coordinator and lane, as tool.rs's lane test does) and `Harness::isolated()`; the same scratch hold
+  then passes. `cua-driver-core --lib`: macOS 3x 1823 passed / 3 ignored (kache), Linux container 2x 1826 passed / 3 ignored; clippy
+  -D warnings (platform-linux, cua-driver-core) clean. It is the only `start_paused` test in batch_tools.
 - PR #300 at b54560e5 (run 43156456005, `PR Linux schema contract and platform unit`):
   `wayland::mutter_display::tests::a_socket_that_never_accepts_fails_at_once_and_leaves_nothing_open` failed 81 vs 79 at
   mutter_display.rs:523 with 1167 other tests passing. The socket path closes its descriptor on every error (`connect_bounded` owns
