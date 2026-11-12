@@ -59,10 +59,17 @@ explicit visibility; `Adapter::facts_with_hits` (actionability.rs:156) keeps cli
 for `semantic_facts`, uses `semantic_visibility` (:194): window hidden/minimized → false, window state unreadable → unknown, own frame
 empty → false, own frame absent/unreadable/invalid → unknown, else true; `offscreen` is `Absent` (macOS has no live offscreen state).
 Kept: hidden app / minimized window / unreadable window state / empty or unreadable own frame still wait and refuse; stability, enabled,
-affordance and token/exact-target checks unchanged; pointer clicks unchanged (clipping + hit). Tradeoff for review: the clipping walk
-also proved the target descends from the admitted window; semantic delivery now relies on the token's snapshot binding for that, which
-is what issue case 3 (sheets, popovers, menus whose window differs) asks for. Issue's live smoke (Safari/Chrome page button, Electron,
-sheet/popover, scrolled-out row, AppKit button): NOT RUN — those are not GOAT-owned fixtures.
+affordance and token/exact-target checks unchanged; pointer clicks unchanged (clipping + hit). The clipping walk no longer proves that the
+target sits in the admitted window; the exact binding does: every semantic route goes through `bind_exact_with`
+(tools/actionability/semantic.rs:71-89), which requires the target's PID, its `AXWindow`, and that window's id to equal the admitted
+`window_id`.
+Correction (wp3/wp4 review, finding 6): an earlier version of this paragraph said semantic delivery relies on the token's snapshot binding
+and that this covers issue case 3 (sheets, popovers, menus whose window differs). It does not: such an element reads a different
+`AXWindow` (or none), so `bind_exact_with` returns unknown and the call still waits out its budget and refuses. #272 is fixed for the
+clipping cases (1 and 5); case 3 stays refused and is a follow-up (admitting a same-pid child window of the admitted window needs its own
+safety argument). Commit 68771fdb's message repeats the earlier claim; this record supersedes it.
+Issue's live smoke (Safari/Chrome page button, Electron, sheet/popover, scrolled-out row, AppKit button): NOT RUN — those are not
+GOAT-owned fixtures.
 Test adjustment: `failed_action_names_block_custom_action` (actionability.rs:666) gives its semantic loop a target frame; it passed only
 because FakeScope claimed clipping visibility for a frameless target, which the native clipping read never did (scope.rs `clipping`
 returns unknown "target frame unavailable").

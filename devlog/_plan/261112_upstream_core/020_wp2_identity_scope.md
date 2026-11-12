@@ -114,8 +114,8 @@ windows.rs `process_instance_schema` on list_apps items, list_windows items, get
 | (repo) output-schema delta vs 0.40.1-goat.1 (/tmp/goat-cu-sync/wp2-output-delta.log) | 0 | both launch forms: list_apps items, list_windows items, get_window_state each add `process_instance`; nothing removed |
 
 Protocol record (c-3): additive output only — `process_instance` (string, optional) on three tools; no `allowed-changes.json` entry
-(check_protocol.py reports no non-additive change). Linux/Windows answers do not report it yet (Linux `proc_fs::process_instance_id`
-and Windows `process_instance::process_fingerprint` exist; wiring them is a follow-up, not claimed here).
+(check_protocol.py reports no non-additive change). At this macOS commit (e0851769) Linux/Windows answers did not report it yet; wp2b
+(0654beae, e894eabd, below) wires both.
 
 ## wp2 B/C evidence — §C (#288), child-implemented, lead-audited
 

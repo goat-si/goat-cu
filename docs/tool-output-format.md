@@ -66,10 +66,10 @@ Windows `GetProcessTimes` creation time), on each `list_apps` running app, each
 `list_windows` record and the `get_window_state` answer. Compare it for
 equality only; the same pid with a different label is a different process. It
 is reported only when the start time read before and after the answer agree,
-so a pid that was reused or unreadable mid-read gets none. On macOS
-`get_window_state` element tokens are also bound to that process (a
-screenshot-only read that refreshed an existing snapshot omits the label,
-since that snapshot's tokens keep the instance they were read from): once the pid
-names another process start, using them refuses with
+so a pid that was reused or unreadable mid-read gets none. A screenshot-only
+`get_window_state` that refreshed an existing snapshot also omits it, on every
+platform: that answer's rows belong to the earlier read. On macOS and Windows
+`get_window_state` element tokens are also bound to the process they were read
+from: once the pid names another process start, using them refuses with
 `process_instance_mismatch` (`process_instance_unverified` when the identity
-could not be read).
+could not be read). Linux tokens are not bound to the process yet.
