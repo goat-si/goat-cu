@@ -94,6 +94,11 @@
 | 7cab649b | wp1i review | macOS `type_text` browser-tab guidance names `get_browser_state` + `browser_type` instead of `page`'s removed actions; the removed-page-action test asserts both refusals |
 | b3a6a07e | docs | wp1i and wp1k review outcomes, receipt at 7cab649b |
 | af4e914b | wp1l | sync 52306ab4 → 228b5a4d (019d): release 0.47.23 CHANGELOG entry; GOAT versions kept |
+| 35755746 | docs | wp1l re-fetch and commit list |
+| 99de9504 | wp1m | sync 228b5a4d → 01596ffc (019e): upstream's test that every native-input tool publishes the `ActionResult` (passes on GOAT's surface, macOS and Linux) and the contract's audit table |
+| 1f1d4edd | final review of 7cab649b | the untrusted web read-back result leads with the read-first rule inside run_steps' 300-character step message; Safari's address-field refusal reads with `page` and acts through element actions; `same_pid_keyboard_ambiguity` names `get_browser_state` and the `browser_*` tools |
+| 5e172dbe | wp1n | sync 01596ffc → fd4505cf (019f): installer pin 0.47.22 (upstream's published version) |
+| 491904b1 | final review round 2 | the unverified mark carries the condition on typing again ("type again only if the text is missing"), so no cut can keep the write without it |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -120,6 +125,9 @@ Re-fetch after ffc428c2 (~19:00 UTC): origin/main `40c6f6eb` and agent-desktop `
 after `d17e70f5` (core `browser/platform.rs` only) → unit wp1k (019c), task wp6/t7.
 Re-fetch after b3a6a07e (~20:10 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged; trycua/cua main `228b5a4d`, the 0.47.23
 release (CHANGELOG and version files only) → unit wp1l (019d), task wp6/t8.
+Re-fetch after 35755746 (~19:55 UTC): trycua/cua main `01596ffc` (#7507, protocol_schema_test and the contract doc) → unit wp1m (019e), task wp6/t9.
+Re-fetch after 1f1d4edd (~20:15 UTC): trycua/cua main `fd4505cf` (#7509, published installer 0.47.22) → unit wp1n (019f), task wp6/t10.
+origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged at each.
 
 ### Follow-ups recorded, not done in this lane
 
@@ -206,6 +214,16 @@ release (CHANGELOG and version files only) → unit wp1l (019d), task wp6/t8.
   `page`. And the `deprecated` marker sits at the top level of each `tools/list` entry (`tool.rs:414-419`, forwarded by `proxy.rs`
   and `sdk_adapter.rs`), outside the MCP `Tool` shape: GOAT's readers (`check_protocol.py`, `AcpMcpStdioBridge.ts`,
   `McpNativeSession.swift`) tolerate it; a strict third-party validator might not.
+- wp1m review: GOAT's macOS-only `select_text` and `menu_bar_extras` are desktop input (`authorization.rs:292-293`) but advertise no
+  native-input capability (no arm in `default_capabilities_for`, `tool.rs:956`), so `every_native_input_tool_publishes_the_action_result`
+  skips them, and they return legacy `effect`/`verified` payloads (`select_text.rs:396-398`, `menu_bar_extras.rs:415-421`) instead of
+  the `ActionResult`. Follow-up: give both their capabilities and the action-result projection. The contract doc names the carve-out
+  (GOAT patch to keep on the next sync). Also stale: `tool.rs:990-999` says `type_text_chars` is registered on Linux; no roster
+  registers it.
+- Final review rounds 2-3 (informational): an embedded web view after pixel focus reads "do not repeat it" next to the mark's "type
+  again only if the text is missing" (the px rung is terminal); the non-web branch says "read the field" where the field could not be
+  read; with a field title over ~27 characters the browser-tab step's px clause falls past run_steps' 300-character cut (the read and
+  its condition always survive, and the cut ends in "...").
 
 ### Issue dispositions (path:line at the final head)
 
@@ -299,6 +317,11 @@ and a `deprecated` entry only). `contract/manifest.json` and both UniFFI binding
 | whole head | bc02a591 | `TMPDIR=/private/tmp`: the same 24 steps, failures=0: core-lib 1828 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2036 / 48, windows-host 200, linux-host 110, target checks, clippy macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol compatible, protocol delta problems 0, output delta adds only `process_instance`, helper tests |
 | review fixes | a2539a20, 7cab649b | `browser::platform` 4 passed; `browser_tab_guidance_names_the_typed_browser_tools` red (exit 101, type_text.rs:5065) then `tools::type_text` 62 / 1; `protocol_schema_test` 2 / 1 ignored after a probe run recorded both refusal texts |
 | whole head | 7cab649b | `TMPDIR=/private/tmp`: the same 24 steps, failures=0: core-lib 1828 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2037 / 48, windows-host 200, linux-host 110, Linux and Windows target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol compatible in every launch form (get_guide reworded, not protocol), protocol delta problems 0, output delta adds only `process_instance`, helper tests. No Linux code after 190a160e beyond core (Linux container core 1831 / 3 at bc02a591) |
+| wp1m | 99de9504 | `protocol_schema_test` 3 / 1 ignored (macOS), 5 passed (Linux container) |
+| final review fixes | 1f1d4edd | red first: `an_untrusted_web_readback_step_message_keeps_its_instruction` (type_text.rs:5111), set_value.rs:2799, background_input.rs:494; then platform-macos type_text + set_value 199 / 1, core background_input 21; Linux container core 1831 / 3, clippy core + platform-linux clean |
+| whole head | 1f1d4edd | `TMPDIR=/private/tmp`: the same 24 steps, failures=0: core-lib 1828 / 3, core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 200, linux-host 110, target checks, clippy macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol compatible, protocol delta problems 0, output delta adds only `process_instance`, helper tests |
+| wp1n | 5e172dbe | `bash -n`, connect-step 15, install version fallback 40 / 7 skipped (upstream layout) |
+| final review round 2 fix | 491904b1 | the sweep over detail lengths 0-300 red at type_text.rs:5118, then tools::type_text 63 / 1; platform-macos --lib 2038 / 48; clippy -p platform-macos --all-targets -D warnings clean. Only this file changed after the 1f1d4edd receipt |
 
 Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
 

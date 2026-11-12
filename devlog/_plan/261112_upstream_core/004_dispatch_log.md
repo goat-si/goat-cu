@@ -230,3 +230,12 @@ two informational notes → 050 follow-ups. wp1k round 2 (`continueFrom`, same r
 2026-11-12: wp1k round 2 `cu-review-wp1k-a2539a20-r2b-s24` PASS (both reasons accurate, text only); its two record nits (019c's
 byte-identical claim now stale, so the reason strings are registered as a GOAT patch to keep; 050's parser line restored to the
 false-failure / vacuous distinction) fixed in the records. Receipt at 7cab649b: 24/24.
+2026-11-12: wp1i round 2 (`continueFrom`) failed in provider compaction (invalid input name, as an earlier review did), so a fresh
+final review `cu-final-review-7cab649b-s24` covered 7cab649b and af4e914b (steered past its bound): NEAR-PASS on 7cab649b (M1: the
+browser-tab next step pushed the step message past run_steps' 300 characters and cut its condition; L1-L3, including two more texts
+sending callers to `page`) → 1f1d4edd; PASS on af4e914b. Fresh `cu-review-wp1m-99de9504-s24` dispatched for wp1m. Round 2
+(`cu-final-review-1f1d4edd-r2-s24`, same reviewer, also covering wp1n 5e172dbe): PASS on both; lows (a mid-length detail could still
+cut the condition, test band, em dash, non-web wording) → 491904b1; round 3 dispatched.
+2026-11-12: round 3 (`cu-final-review-491904b1-r3-s24`) PASS at 491904b1: the condition sits in the mark at offset 0 of every untrusted
+line; 3 612 composed combinations, none without it; three informational notes recorded. `cu-review-wp1m-99de9504-s24` (steered)
+NEAR-PASS: M1 `select_text`/`menu_bar_extras` carve-out → named in the contract doc and a 050 follow-up; L1, L2 fixed in 019e.

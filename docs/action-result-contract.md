@@ -60,6 +60,10 @@ Every tool that advertises a native pointer, keyboard, menu, or window-frame
 capability must be an action-result tool. `protocol_schema_test`
 (`every_native_input_tool_publishes_the_action_result`) checks that against the
 live `tools/list` in the macOS, Windows and Linux CI lanes.
+In goat-cu, the macOS-only `select_text` and `menu_bar_extras` act on the
+desktop without advertising one of those capabilities, so the check does not
+reach them: they still return their own payload with `effect` and `verified`
+instead of the `ActionResult`. Moving them onto it is a recorded follow-up.
 
 ### Modality-ladder audit outcome
 
