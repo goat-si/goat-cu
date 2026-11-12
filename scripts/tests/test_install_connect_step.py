@@ -198,3 +198,17 @@ def test_post_install_hints_name_mcp_config_not_connect() -> None:
     hints = (SCRIPTS / "post-install-hints.txt").read_text(encoding="utf-8")
     assert "{{BINARY}} connect" not in hints
     assert "mcp-config --client <name>" in hints
+
+
+def test_installer_fallback_hints_name_mcp_config_not_connect() -> None:
+    # When the hints fetch fails, each installer prints a one-line fallback;
+    # like the hints file, it must not advertise `connect`.
+    shell = INSTALLER.read_text(encoding="utf-8")
+    ps1 = (SCRIPTS / "install.ps1").read_text(encoding="utf-8-sig")
+    fallbacks = [
+        next(line for line in shell.splitlines() if 'echo "Next steps:' in line),
+        next(line for line in ps1.splitlines() if 'Write-Host "Next steps:' in line),
+    ]
+    for line in fallbacks:
+        assert " connect " not in line, line
+        assert "mcp-config --client <name>" in line, line

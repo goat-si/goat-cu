@@ -12,9 +12,12 @@ touch `libs/cua-driver`. Range `gh api repos/trycua/cua/compare/b9e38d1a...56a69
 No code moved, and the vendored inputs (`cua-telemetry`, `targets.json`, `sandbox-images.json`, `libs/cua/Cargo.toml`) are not in the
 range, so `vendor/` keeps `4f2aa028`.
 
-Checks: the top 60 lines of `rust/CHANGELOG.md` and the whole of `scripts/install.ps1` are byte-identical to 56a69039;
-`scripts/_install-rust.sh` differs from 56a69039 only at line 1721, GOAT's `mcp-config --client <name>` hint for the removed `connect`
-(wp1 review A), the same single difference it had from b9e38d1a. `bash -n scripts/_install-rust.sh` exit 0.
+Checks: the top 60 lines of `rust/CHANGELOG.md` are byte-identical to 56a69039. `scripts/_install-rust.sh` differs from 56a69039 only
+at line 1721, GOAT's `mcp-config --client <name>` hint for the removed `connect` (wp1 review A), the same single difference it had from
+b9e38d1a. `scripts/install.ps1` was byte-identical to 56a69039 at 8248c43b; the wp1g review found its network-failure fallback
+(line 2099) still advertised `connect`, so it now carries the same `mcp-config --client <name>` hint, its one difference from upstream,
+guarded with the shell line by `test_installer_fallback_hints_name_mcp_config_not_connect` (red on install.ps1, then green).
+`bash -n scripts/_install-rust.sh` exit 0.
 
 | Command | Exit | Result |
 |---|---|---|

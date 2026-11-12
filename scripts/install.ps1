@@ -2096,7 +2096,7 @@ if (-not $SkipHints) { try {
 catch {
     # Network fetch failed — print one-line essentials so users always
     # get enough to recover.
-    Write-Host "Next steps: $installedBinary --version  |  $installedBinary connect  |  $installedBinary skills install"
+    Write-Host "Next steps: $installedBinary --version  |  $installedBinary mcp-config --client <name>  |  $installedBinary skills install"
     Write-Host "Docs: https://github.com/trycua/cua/tree/main/libs/cua-driver/rust"
 } }
 
