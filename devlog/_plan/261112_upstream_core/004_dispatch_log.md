@@ -77,3 +77,35 @@ recorded before it. Retried split in two narrower reviews — `cu-wp1b-review-a-
 `cu-wp1b-review-b-s24-261112` (cursor release vs click ordering, Linux gates), both returned codex / system24/deepseek-v4.1-flash /
 reasoningEffort=high.
 2026-11-12: final receipt dry run (/tmp/goat-cu-sync/receipt-final.sh, not a recorded receipt) on ece9964a: failures=0.
+2026-11-12: `cu-wp3-287-review-s24-261112` (#287) NEAR-PASS, 5 findings accepted → e354f982 (macOS parks without frame ticks via
+an idle-fade deadline; a parked float restarts on a moving SnapTo, a re-show, a theme reselect). `cu-wp2-review-288-r3-s24-261112` (#288)
+PASS with 5 P3 → fd7ef859 (derivation gated on the mode, mode-free wire test, two more session shapes). `cu-wp1b-review-a-s24-261112` PASS
+with 3 P3 → 4fc4252b (Windows unused_mut); the other two recorded as follow-ups. Decisions recorded with review_findings.record.
+2026-11-12: continuation rounds dispatched — `cu-wp3-287-review-r2-s24-261112`, `cu-wp2-review-ab-r4-s24-261112` (#299, e894eabd),
+`cu-wp2-review-288-r4-s24-261112`; all returned codex / system24/deepseek-v4.1-flash / reasoningEffort=high.
+2026-11-12: pre-D re-fetch found trycua/cua main at 465aab0b (0.47.15); unit wp1c added (013). Port of 33102290 dispatched —
+`cu-wp1c-33102290-s24-261112`, returned codex / system24/deepseek-v4.1-flash / reasoningEffort=high.
+2026-11-12: `cu-wp34-review-s24-261112` (393c49e2, 68771fdb) FAIL: P2 press_key/right_click/double_click still use the legacy
+perform-error helper (IllegalArgument/InvalidUIElement read as "nothing sent", then re-press / key chord / pixel fallback); P2 pixel
+right-click fallback runs without the pointer gate after 68771fdb's clipping-free semantic gate; P2 040's case-3 claim does not match
+`bind_exact_with` (corrected in 040/050, case 3 is a follow-up); P3 APIDisabled refusal untested; P3 foreground double_click pixel fallback
+unchecked. Fix dispatched — `cu-wp3c-perform-gate-s24-261112` (isolation worktree from 4fc4252b), returned codex /
+system24/deepseek-v4.1-flash / reasoningEffort=high.
+2026-11-12: `cu-wp1c-33102290-s24-261112` completed (type_text.rs +241/−2, 60 type_text tests, 2018 lib); lead audit added
+`submit_return_report` (a failed Return after a proven insert no longer surfaces as a retryable error), committed 19fcc334. Review
+dispatched — `cu-wp1c-review-s24-261112`, returned codex / system24/deepseek-v4.1-flash / reasoningEffort=high.
+2026-11-12: `cu-wp2-review-ab-r4-s24-261112` (#299 round 4) NEAR-PASS, 3 P3 accepted → ad5f6193 (docs, 020) + follow-up recorded.
+2026-11-12: `cu-wp2-review-288-r4-s24-261112` (#288 round 4) PASS, 1 P3 accepted → 39cabbe0.
+2026-11-12: `cu-wp1b-review-b-s24-261112` FAILED (actual return: "exceeded retry limit, last status: 429 Too Many Requests";
+run terminationCause quota after 2 h 26 m; it had named two forming findings but reported none). Re-dispatched narrower as
+`cu-wp1b-review-b1-s24-261112` (cursor release_t) and `cu-wp1b-review-b2-s24-261112` (Linux X11 gates) with the partial notes.
+2026-11-12: `cu-wp3c-perform-gate-s24-261112` FAILED (actual return: "exceeded retry limit, last status: 429 Too Many Requests"),
+`cu-wp1b-review-b2-s24-261112` FAILED (same). wp3c left a partial uncommitted diff (click.rs perform_outcome shared + legacy helper
+deleted + APIDisabled tests; press_key decide_chord mapped) in its worktree goat-5023485b-df387c95a2840a7c; the lead applied it to the lane
+worktree and continues the slice (lane rule: record the actual return, the lead continues).
+2026-11-12: lead completed wp3c → 98632052 (+ b724ece4 rustfmt of this branch's macOS files); red: 8 tests under the old meaning;
+green platform-macos --lib 2023 passed / 48 ignored. wp3/wp4 review decisions recorded (6 accepted). Round 2 dispatched with continueFrom —
+`cu-wp34-review-r2-s24-261112`; B2 retried — `cu-wp1b-review-b2-retry-s24-261112`; both returned codex / system24/deepseek-v4.1-flash /
+reasoningEffort=high.
+2026-11-12: `cu-wp1b-review-b2-retry-s24-261112` and `cu-wp34-review-r2-s24-261112` FAILED (actual return: "exceeded retry limit, last status:
+429 Too Many Requests"). B2 reviewed lead-side (011 §C B2). wp3/wp4 round 2 to be re-dispatched after the running reviews finish.

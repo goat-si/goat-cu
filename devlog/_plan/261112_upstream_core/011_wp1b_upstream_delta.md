@@ -109,3 +109,21 @@ NOT RUN: Linux/Windows linking and runtime tests (incl. the three new `platform-
 live standalone-browser e2e rows; live macOS fixture runs.
 
 
+
+## C — Review B2 (Linux X11 gates), lead-side after provider quota failures
+
+`cu-wp1b-review-b-s24-261112`, `cu-wp1b-review-b2-s24-261112` and `cu-wp1b-review-b2-retry-s24-261112` failed with "exceeded retry limit,
+last status: 429 Too Many Requests"; the lead reviewed the scope (lane rule: record the actual return, the lead continues). Not an
+independent review.
+
+- Preservation: for all 16 platform-linux files ef7a3646 touches, the added/removed line multiset of `git diff e0851769 ef7a3646` equals
+  upstream's `diff -u c0d3b919 e51f5740` exactly (0 upstream-only, 0 GOAT-only lines), so the merge changed no GOAT line.
+- #7370 (impl_.rs `qt_shortcut_background_must_refuse`, `unavailable_qt_shortcut_background`), #7369 (`unavailable_synthetic_pointer_background`
+  replacing the GTK-only check, scroll's MPX-wheel failure for toolkits that drop synthetic wheels) and #7371 (`MenuOpening::Forbidden` for
+  background invoke_menu, `MenuMustOpen` → `background_unavailable`) only add refusals before input. Scroll now reports
+  `effect: unverifiable` ("Sent N wheel detent(s) … not verified") instead of "Scrolled"; no GOAT test or doc pinned the old text.
+- Bounded waits: `prime_scroll_slave` → `step_and_confirm` 300 ms deadline, at most twice; `settle_pointer_enter` → `sync_client` bounded by
+  `PING_TIMEOUT`, else a 60 ms sleep.
+- Follow-up (pre-existing, not from this sync): Linux `invoke_menu` maps a sent AT-SPI `do_action` that returns a D-Bus error
+  ("doAction failed") to the `menu_path_unavailable` refusal (tools/invoke_menu.rs:38-43); the same mapping exists at origin/main
+  40c6f6eb (atspi/native.rs:4337). A sent action that errored may have acted, so it should read unverifiable, as #279 now does on macOS.

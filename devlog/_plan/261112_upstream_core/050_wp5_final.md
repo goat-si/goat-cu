@@ -7,3 +7,70 @@
 4. New agent-desktop core commits after `54855b62`: same, against 003's areas.
 5. Final record: base/head/upstream SHAs, local commit list, per-issue dispositions, protocol record, receipts, NOT RUN,
    sent with `origin.report`.
+
+## Final record (draft; completed at the last D)
+
+### Local commits on cu/261112-upstream-core-r2 (base origin/main 40c6f6eb)
+
+| Commit | Unit | Content |
+|---|---|---|
+| e3dd8120, 5b07f0b4 | wp0 | roadmap, stale check |
+| 1feaeffb | wp1 | sync libs/cua-driver 566a4ce6 → c0d3b919 (0.47.12), GOAT patches kept, vendor refreshed |
+| 20449d9f | wp1 D | wp1 record, wp1b retarget |
+| e0851769 | wp2 | #299 macOS process_instance + instance-bound tokens; #288 session-scoped fast-path store |
+| ef7a3646 | wp1b | sync c0d3b919 → e51f5740 (0.47.14) |
+| 393c49e2 | wp3 | #286 relocation frame re-check, #279 hotkey focus retry + one-meaning perform rule, #281 not-settable message / gated dispatcher, #283 dead hand_back; GOAT.md refusals note |
+| 68771fdb | wp4 | #272 / AD-G1 semantic visibility without ancestor clipping |
+| 09484534 | wp2 review | #299 round-1 findings (recording hook evidence, list_windows off runtime, refresh label, bracketed labels) |
+| a5e2bbde | wp3 | #287 bounded resting float + GNOME helper park |
+| 0d163dd1, fb4f50e0 | wp2 review | #288 rounds 1–2 (delta session derivation, eviction tests) |
+| 0654beae | wp2b | #299 Linux/Windows process_instance |
+| ece9964a | docs | dispatch log |
+| e894eabd | wp2b review | #299 round-3 findings (Linux/Windows second pass off the runtime, first read before metadata, refresh answers unlabelled, contract text; 020 corrected: Linux tokens are not instance-bound) |
+| e354f982 | wp3 review | #287 round-1 findings (macOS parks without frame ticks via an idle-fade deadline; a parked float restarts on a moving SnapTo, a re-show and a theme reselect; docs) |
+| fd7ef859 | wp2 review | #288 round-3 notes (session derivation only with deltas on; mode-free wire test; two more session shapes) |
+| 4fc4252b | wp1b review | Windows unused_mut on the browser launch command |
+| ad5f6193 | docs | #299 round-4 docs (process_instance per platform), 020 protocol record scope, 040 #272 case-3 correction |
+| 19fcc334 | wp1c | sync e51f5740 → 465aab0b (0.47.15): 33102290 single-line submit ported onto GOAT's AX rung, GTK3 harness, CHANGELOG, vendor README |
+| 39cabbe0 | wp2 review | #288 round-4 test robustness |
+| 98632052 | wp3 review | #279 one meaning for AX perform errors in press_key/right_click/double_click; pointer gate (checked_point) before right/double-click pixel routes; APIDisabled click refusal tests; GOAT.md |
+| b724ece4 | style | rustfmt of this branch's macOS files that were clean on origin/main |
+
+### Re-fetch before the last D (2026-11-12)
+
+origin/main `40c6f6eb` (unchanged); agent-desktop main `54855b62` (unchanged); trycua/cua main `465aab0b` (0.47.15), 10 commits after
+`e51f5740` → unit wp1c (013).
+
+### Follow-ups recorded, not done in this lane
+
+- Linux element tokens are not bound to the process instance (Linux publishes and resolves with `NotChecked`); Windows and macOS are.
+  Needs `publish_*_with_instance` + `resolve_for_instance` in platform-linux (020).
+- `browser/prepare.rs:1134`: a `profile_root()` error after profile creation skips cleanup (inherited byte-identical from upstream,
+  reachable only by concurrent env mutation); no composition test for GOAT containment + upstream breaker (wp1b review A).
+- #287: the GNOME helper's own 33 ms repaint timer runs regardless of parking (its pose parks); a `cursor.float` off→on toggle sends
+  the overlay no command, so a cursor that parked meanwhile stays upright until its next move or action (documented).
+- #288: the fast-path caches are bounded and shared across sessions, so sessions can evict each other's entries (a miss, no leak);
+  `forget_window` still has no production caller (pre-existing).
+- #272 case 3: a sheet/popover/menu element whose `AXWindow` is a same-pid child of the admitted window is refused by
+  `bind_exact_with` (tools/actionability/semantic.rs:85-88); admitting it needs its own safety argument.
+- #299 (Linux, pre-existing): other blocking reads still run on the async runtime — `list_windows` `retain_listed`
+- Linux `invoke_menu` (pre-existing at origin/main): a sent AT-SPI `do_action` that returns a D-Bus error is reported as the
+  `menu_path_unavailable` refusal (tools/invoke_menu.rs:38-43, atspi/native.rs `doAction failed`); it may have acted, so it should read
+  unverifiable (the #279 rule, macOS-only in this lane).
+  (`/proc/<pid>/status`) and the unlisted-window note (`/proc/<pid>/environ`), `get_window_state` `is_process_live` and
+  `wayland::list_windows_dispatch` (#299 review 4). Windows label reads use the full `process_fingerprint` (bounded cost, accepted).
+- Pre-existing warnings, same call graph on origin/main: `cua-driver-core` built without default features (`batch_tools/locate.rs`
+  `LocatorRegistry::Borrowed`, `Locator::new`); Windows target `uia/mod.rs:1205` `walk_cached_bounded`, `input/inject.rs:314/318/363`.
+
+### Issue dispositions (path:line at the final head)
+
+| Issue | Disposition | Evidence |
+|---|---|---|
+| #299 | FIXED (macOS, Linux, Windows) | 020 §A/§B, review rounds 1–3; failing-first `a_token_from_an_earlier_start_of_the_pid_is_refused`, `a_synchronous_resolve_reads_live_evidence`, `a_pid_that_restarts_during_a_listing_gets_no_label`, Linux/Windows `a_label_needs_two_agreeing_start_time_reads` |
+| #288 | FIXED | 020 §C + review rounds 1–3; failing-first `another_sessions_snapshot_is_not_visible` (runtime red store.rs:348), delta red tool.rs:6531 |
+| #287 | FIXED (option 2, bounded float then park; GNOME helper follows) | 030 §B #287; failing-first cursor_pose/render_map/pose_stream tests |
+| #286 | FIXED | 030 §A; failing-first `a_relocated_background_point_outside_the_frame_is_refused` |
+| #283 | FIXED (#283.2 dead hand_back); #283.1 documented (GOAT.md), live smoke NOT RUN | 030 wp3 B/C |
+| #281 | FIXED (#281.2 message, #281.3 dispatcher name + site log); #281.1 documented (GOAT.md) | 030 wp3 B/C; failing-first `a_selection_target_that_is_not_settable_says_so` |
+| #279 | FIXED (#279.1 focus retry; #279.2 one meaning for perform errors in click, press_key, right_click, double_click, element_pointer AXOpen — legacy helper deleted, 98632052) | 030 wp3 B/C; failing-first `a_transient_focus_write_error_keeps_polling_until_the_deadline`, `perform_error_after_dispatch_is_unverifiable_unless_nothing_was_sent`, 98632052's 8 red tests |
+| #272 | FIXED for the clipping cases (1, 5) in the macOS adapter (semantic visibility = window state + own frame); case 3 (sheet/popover/menu whose AXWindow differs) still refused by the exact binding — follow-up | 040 wp4 (corrected after the wp3/wp4 review); failing-first `semantic_press_ignores_ancestor_clipping`; live smoke on third-party apps NOT RUN |
