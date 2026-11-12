@@ -93,3 +93,22 @@ and no on-disk ref store in rust/crates (`rg wait_event|app_terminated|refs_stor
 | same, after the adjustment | 0 | 164 passed, 1 ignored |
 | `cargo check -p platform-macos --all-targets` | 0 | no warnings |
 | rustfmt --check actionability.rs / scope.rs / click.rs vs HEAD | — | identical remaining diffs |
+
+## wp4 close-out on HEAD cd815162
+
+Every row of 003 has a disposition. Paths are under `rust/crates/`; line numbers are at cd815162.
+
+| Gap | Disposition | Evidence |
+|---|---|---|
+| AD-G1 (#272) | FIXED for issue cases 1 and 5; case 3 (a sheet, popover or menu whose `AXWindow` differs) still refused — follow-up | `platform-macos/src/tools/actionability.rs:84` `semantic_facts` and `:194` `semantic_visibility` (window state + own frame, no ancestor clipping); pointer facts keep clipping in `:93` `facts_with_hits`; `actionability/scope.rs:331` `window_visible`; exact binding `actionability/semantic.rs:71` `bind_exact_with`. Pixel fallbacks under a semantic gate post only at `element_pointer.rs:254` `checked_point` (98632052). Test `actionability.rs:1022` `semantic_press_ignores_ancestor_clipping` |
+| AD-G2, AD-G3 | FIXED in wp2 (#299) | 020; wp2 closed with its receipt on 019c3858 |
+| AD-G4 | COVERED | `platform-macos/src/tools/get_window_state.rs:1717`–`:1718` (`observation_complete:false`, `observation_incomplete_reasons`); tests `:3515`, `:3546` |
+| AD-G5 | COVERED by wp1 | `cua-driver-core/src/session.rs:475` (a label whose owner transport closed starts a new episode only after cleanup), `:1109` `closed_transports`; `session_tools.rs:526` (end waits for the in-flight action) |
+| AD-G6, AD-G7 | NOT APPLICABLE | `rg -c 'wait_event\|app_terminated\|refs_store' rust/crates` → no matches |
+| AD-G8 | NOT APPLICABLE as a test-only port | `cua-driver-core/src/post_action_wait.rs:117`–`:141` tests parse arguments and task scope, no time; the settle is `platform-macos/src/window_change_detector.rs` (`REPORT_WINDOW` :305) on wall-clock deadlines in its own thread, which needs clock injection beyond #642's test-only scope |
+| AD-G9 | → #287, FIXED in wp3 | 030 close-out |
+| AD-G10 | → #286, FIXED in wp3 | 030 close-out |
+
+Review state: wp3/wp4 review of 68771fdb FAIL (findings 4 and 6) → 98632052 and the 040 correction (ad5f6193); wp3c review of
+98632052 NEAR-PASS → 0f0d4b70; delta review of 0f0d4b70 and 019c3858 pending (`cu-delta-review-019c3858-s24`). Live smoke against
+third-party apps: NOT RUN (no GOAT-owned fixtures for those surfaces).
