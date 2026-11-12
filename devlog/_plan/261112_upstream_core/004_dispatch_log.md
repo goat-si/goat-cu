@@ -197,3 +197,5 @@ disposition, and the batch test is red without the fix. Low: GOAT.md's typed cla
 untyped background_unavailable (menu validation may have posted Cmd+F20) → c7cce744; low: a leaked marker "1" matched under parent
 pid 1 → c7cce744 (`a_leaked_marker_never_makes_the_suite_the_lone_child` red at mutter_display.rs:512, then platform-linux 1171 / 15
 with and without a leaked marker, clippy clean). Decisions recorded with review_findings.record.
+2026-11-12: fresh final review before merge dispatched at 7cac46e0 as `cu-final-review-7cac46e0-s24` (a3bd993b, f3107f37, c7cce744;
+codex / system24/deepseek-v4.1-flash / high); 743260c6 (libei flaky test, found by the 7cac46e0 container run) added to its scope.

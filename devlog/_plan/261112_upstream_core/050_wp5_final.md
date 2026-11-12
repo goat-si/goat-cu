@@ -73,6 +73,8 @@
 | a3bd993b | ff24221c review round 2 | both landed-line instructions (do not repeat; read first, then Return) lead the message, inside run_steps' 300-character step message |
 | 286bc5bb | docs | ff24221c round-2 decisions |
 | c7cce744 | ff6658cc review | GOAT.md lists which APIDisabled refusals are typed (press_key's menu-chord refusal stays untyped: menu validation may have posted Cmd+F20); Linux fd test marker is `spawned-by-<pid>` |
+| 7cac46e0 | docs | ff6658cc review decisions |
+| 743260c6 | test fix | libei `a_text_stops_when_its_tool_call_is_over` (upstream, unchanged) abandoned the call after a fixed 50 ms settle and failed when the typing thread had sent nothing yet (seen under the receipt's load and 1 in 20 idle runs); it now waits on the server log for the first part (red with a scratch 200 ms typing delay, then 30/30, portal-input 1230 / 15) |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -223,6 +225,7 @@ change is provably additive. `contract/manifest.json` and both UniFFI binding se
 | wp1c | d0fb0350 | failures=0: macOS type_text 60, type_text_chars 4, e2e check, Linux container platform-linux 1168 |
 | wp1e | 068c9a00 | failures=0 (15 steps): contract 91, contract-gen --check, uniffi --check, contract_parity, schema_consistency, protocol_schema_test 2, check_protocol, macOS invoke_menu 33, windows host 207, Linux container 1168, requalify new tests 2, python compat 2 |
 | whole head | eb04e2a0 | `/tmp/goat-cu-sync/receipt-final.sh` 24 steps, failures=0: kache doctor, host `cargo check --all-targets` (platform-macos, core, cursor-overlay, cua-driver, sdk, contract), core lib + integration, contract lib, cursor-overlay lib, platform-macos lib, platform-windows host, Linux x86_64 and Windows MSVC target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, cargo deny, `cargo build -p cua-driver`, platform-linux host lib, e2e `--tests` check, check_protocol, protocol and output deltas, Wayland helper node checks. Linux container at the same content: cursor-overlay 157, platform-linux --lib --features portal-input 1229 / 15 ignored; default features 1170 / 15 and clippy at ff6658cc (no Rust change after it but fd7b782a's test-only doc) |
+| whole head | 7cac46e0 | the same 24 steps, failures=0. Linux container: cursor-overlay 157, cua-driver-core --lib 1826 / 3, platform-linux --lib 1171 / 15 (with and without a leaked marker) and clippy; portal-input 1229 / 1 failed under the receipt's concurrent load (`a_text_stops_when_its_tool_call_is_over`, a fixed-settle test from upstream), 1230 / 0 rerun idle → fixed in 743260c6 (portal-input 1230 / 15, default 1171 / 15, clippy both, 30/30 standalone) |
 
 Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
 
