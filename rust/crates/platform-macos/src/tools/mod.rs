@@ -102,16 +102,19 @@ pub(super) fn invalid_arguments(
 }
 
 /// The coded refusal for an [`ActionNotDelivered`] error, if `error` is one.
+/// It is typed `NOT_DELIVERED` as well, which is what
+/// `ToolResult::proves_no_input` reads, so a `run_steps` step that sent
+/// nothing is not counted as possibly delivered.
 ///
 /// [`ActionNotDelivered`]: crate::input::ax_actions::ActionNotDelivered
 pub(super) fn not_delivered_refusal(
     error: &anyhow::Error,
 ) -> Option<cua_driver_core::protocol::ToolResult> {
     let not_delivered = error.downcast_ref::<crate::input::ax_actions::ActionNotDelivered>()?;
-    Some(pre_dispatch_refusal(
-        not_delivered.code,
-        not_delivered.message.clone(),
-    ))
+    Some(
+        pre_dispatch_refusal(not_delivered.code, not_delivered.message.clone())
+            .with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED),
+    )
 }
 
 fn native_window_id(
@@ -131,6 +134,24 @@ mod snapshot_window_id_tests {
         assert_eq!(result.is_error, Some(true));
         let structured = result.structured_content.expect("structured refusal");
         assert_eq!(structured["code"], "invalid_arguments");
+        assert_eq!(structured["effect"], "refused");
+        assert_eq!(structured["dispatched"], false);
+    }
+
+    /// A proven non-delivery is typed NOT_DELIVERED, so a batch step that sent
+    /// nothing is not counted as possibly delivered (wp3c delta review).
+    #[test]
+    fn an_action_that_was_not_delivered_is_typed_not_delivered() {
+        let error = anyhow::Error::new(crate::input::ax_actions::ActionNotDelivered {
+            code: "action_unavailable",
+            message: "the AX API is disabled".into(),
+        });
+        let refusal = super::not_delivered_refusal(&error).expect("coded refusal");
+        assert_eq!(
+            refusal.disposition,
+            Some(cua_driver_contract::ErrorDisposition::NOT_DELIVERED)
+        );
+        let structured = refusal.structured_content.expect("structured refusal");
         assert_eq!(structured["effect"], "refused");
         assert_eq!(structured["dispatched"], false);
     }
@@ -2893,5 +2914,88 @@ mod element_disabled_tests {
         let structured = result.structured_content.expect("structured");
         assert_eq!(structured["code"], "element_disabled");
         assert!(structured.get("escalation").is_none(), "{structured}");
+    }
+}
+
+#[cfg(test)]
+mod not_delivered_batch_tests {
+    use async_trait::async_trait;
+    use cua_driver_core::{
+        authorization::PermissionMode,
+        protocol::ToolResult,
+        session_authorization::{SessionAuthorizationRegistry, SessionModeCeiling},
+        tool::{Tool, ToolDef, ToolRegistry},
+    };
+    use serde_json::Value;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// An action whose AX route provably sent nothing.
+    struct UndeliveredAction(ToolDef);
+
+    #[async_trait]
+    impl Tool for UndeliveredAction {
+        fn def(&self) -> &ToolDef {
+            &self.0
+        }
+
+        async fn invoke(&self, _args: Value) -> ToolResult {
+            let error = anyhow::Error::new(crate::input::ax_actions::ActionNotDelivered {
+                code: "action_unavailable",
+                message: "AXShowMenu was not delivered; nothing was sent.".into(),
+            });
+            super::not_delivered_refusal(&error).expect("coded refusal")
+        }
+    }
+
+    /// wp3c delta review: a `run_steps` step answered by
+    /// `not_delivered_refusal` reports `delivery: "not_delivered"`, and the
+    /// batch that sent nothing is typed NOT_DELIVERED rather than DELIVERED.
+    #[tokio::test]
+    async fn a_batch_step_refused_as_not_delivered_counts_as_not_delivered() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(UndeliveredAction(ToolDef {
+            name: "right_click".into(),
+            description: "undelivered action".into(),
+            input_schema: serde_json::json!({"type": "object", "additionalProperties": true}),
+            read_only: false,
+            destructive: false,
+            idempotent: false,
+            open_world: false,
+        })));
+        registry.register_session_tools();
+        let registry = Arc::new(registry);
+        registry.init_self_weak();
+        let ceiling = SessionModeCeiling::for_trusted_sessions(
+            [PermissionMode::Unrestricted],
+            true,
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+        )
+        .expect("ceiling");
+        let context = SessionAuthorizationRegistry::with_ceiling(ceiling)
+            .compatibility_context(PermissionMode::Unrestricted, None)
+            .expect("context");
+
+        let batch = registry
+            .invoke_with_context(
+                "run_steps",
+                serde_json::json!({"steps": [
+                    {"tool": "right_click", "args": {"pid": 42, "window_id": 7}}
+                ]}),
+                context,
+            )
+            .await;
+        assert_eq!(batch.is_error, Some(true));
+        assert_eq!(
+            batch.disposition,
+            Some(cua_driver_contract::ErrorDisposition::NOT_DELIVERED),
+            "a batch whose only step sent nothing delivered nothing"
+        );
+        let structured = batch.structured_content.expect("batch structured");
+        let step = &structured["steps"][0];
+        assert_eq!(step["delivery"], "not_delivered", "{structured}");
+        assert_eq!(step["code"], "action_unavailable", "{structured}");
+        assert_eq!(step["effect"], "refused", "{structured}");
     }
 }

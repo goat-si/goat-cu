@@ -499,14 +499,18 @@ mod tests {
     fn a_socket_that_never_accepts_fails_at_once_and_leaves_nothing_open() {
         // The descriptor count covers the whole process, and the other tests in this binary open
         // and close their own descriptors on other threads; count in a process running this alone.
+        // The marker carries the spawning process's pid, so a value left in the environment
+        // cannot make the whole suite's process count as the lone child.
         const ALONE: &str = "CUA_MUTTER_STALLED_SOCKET_ALONE";
-        if std::env::var_os(ALONE).is_none() {
+        let alone =
+            std::env::var(ALONE).ok() == Some(std::os::unix::process::parent_id().to_string());
+        if !alone {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "wayland::mutter_display::tests::a_socket_that_never_accepts_fails_at_once_and_leaves_nothing_open",
                 ])
-                .env(ALONE, "1")
+                .env(ALONE, std::process::id().to_string())
                 .output()
                 .unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);

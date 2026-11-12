@@ -374,16 +374,7 @@ impl ScrollTool {
                         }));
                     }
                     Ok(Ok((NativeScroll::NotDelivered(err), fronted))) => {
-                        let message = format!(
-                            "Native AX scroll was not delivered (AX error {err}); nothing was sent."
-                        );
-                        return if fronted {
-                            ToolResult::error(format!(
-                                "{message} The window was brought to the front first."
-                            ))
-                        } else {
-                            super::pre_dispatch_refusal("action_unavailable", message)
-                        };
+                        return native_scroll_not_delivered(err, fronted);
                     }
                     Ok(Err(error)) => {
                         return ToolResult::error(format!("Native AX scroll failed: {error}"));
@@ -1576,9 +1567,46 @@ unsafe fn collect_ax_buttons(
     }
 }
 
+/// The result of a native AX scroll proven not delivered: a coded refusal,
+/// or a plain error when this call fronted the window first, which is input
+/// of its own. The refusal is typed `NOT_DELIVERED` so a batch reads it as
+/// proof nothing was sent.
+fn native_scroll_not_delivered(err: AXError, fronted: bool) -> ToolResult {
+    let message = format!("Native AX scroll was not delivered (AX error {err}); nothing was sent.");
+    if fronted {
+        ToolResult::error(format!(
+            "{message} The window was brought to the front first."
+        ))
+    } else {
+        super::pre_dispatch_refusal("action_unavailable", message)
+            .with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A native scroll proven not delivered is typed NOT_DELIVERED unless this
+    /// call fronted the window first, which is input of its own (wp3c delta
+    /// review).
+    #[test]
+    fn a_native_scroll_that_was_not_delivered_is_typed_unless_the_window_was_fronted() {
+        use crate::ax::bindings::kAXErrorAPIDisabled;
+        let refused = native_scroll_not_delivered(kAXErrorAPIDisabled, false);
+        assert_eq!(
+            refused.disposition,
+            Some(cua_driver_contract::ErrorDisposition::NOT_DELIVERED)
+        );
+        assert_eq!(
+            refused.structured_content.expect("coded refusal")["code"],
+            "action_unavailable"
+        );
+        let fronted = native_scroll_not_delivered(kAXErrorAPIDisabled, true);
+        assert_eq!(fronted.is_error, Some(true));
+        assert_eq!(fronted.disposition, None);
+        assert!(fronted.structured_content.is_none());
+    }
 
     #[test]
     fn an_electron_reveal_that_was_sent_is_never_reported_as_refused() {
