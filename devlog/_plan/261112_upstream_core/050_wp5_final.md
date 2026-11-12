@@ -59,6 +59,8 @@
 | 1f2060af | #287 round-2 review | macOS parked loop keeps the ~1 s repin of a revealed pinned cursor; SetMotion/ApplyMotion restart a parked float; docs |
 | 648ee8ec | docs | wp1c final-review and #287 round-2 decisions |
 | ff6658cc | wp3c delta review | coded undelivered AX refusals (right_click, double_click, press_key, non-fronted scroll) are typed NOT_DELIVERED, so a run_steps step that sent nothing counts as not delivered (was DeliveredUnverified / retry Unsafe); GOAT.md fronted-window exception; Linux fd test marker carries the spawning pid |
+| 8939c283 | docs | wp3c delta review r2 decisions |
+| 8248c43b | wp1g | sync b9e38d1a → 56a69039 (cua-driver-rs 0.47.19): CHANGELOG entry, published installer version 0.47.18; GOAT keeps its versions (017) |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -72,6 +74,8 @@ channel (377b0fee), release entries, vendored cua-telemetry version. The final e
 and wp1e.
 Final re-fetch (~09:50 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged; trycua/cua main `b9e38d1a`, 4 commits after
 `4f2aa028`, one in scope (b9e38d1a, #6498) → unit wp1f (016), folded into the wp6 cycle as task wp6/t2.
+Re-fetch after ff6658cc (~11:45 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged; trycua/cua main `56a69039`
+(cua-driver-rs 0.47.19), 2 commits after `b9e38d1a` in `libs/cua-driver`, release bookkeeping only → unit wp1g (017), task wp6/t3.
 
 ### Follow-ups recorded, not done in this lane
 

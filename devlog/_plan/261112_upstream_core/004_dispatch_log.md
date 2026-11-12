@@ -157,3 +157,5 @@ scratch typo in the child filter, the old check passed (no child) and the new on
 and without the leaked marker, platform-linux --lib 1170 / 15, clippy clean. The pre-restart original `cu-delta-review-019c3858-s24`
 had resumed as a second run; cancelled as a duplicate. Decisions recorded with review_findings.record. Still running after the
 11:2x UTC GOAT restart: `cu-review-wp1f-ci-b0c7a85a-s24`, `cu-final-83aeb256-1f2060af-s24`.
+2026-11-12: fresh reviews dispatched for the new commits: `cu-review-ff6658cc-s24` (typed NOT_DELIVERED refusals, Linux fd marker) and
+`cu-review-wp1g-8248c43b-s24` (wp1g sync); both returned codex / system24/deepseek-v4.1-flash / reasoningEffort=high.
