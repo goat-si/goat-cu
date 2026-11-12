@@ -88,6 +88,8 @@
 | c8a91fc0 | wp1j | sync 7f2252fb → d17e70f5 (019b): a ref-targeted trusted `browser_click` reports its bounded target readback (confirmed / unverifiable); release 0.47.22 CHANGELOG (GOAT versions kept) |
 | ffc428c2 | docs | wp1j record, receipt at c8a91fc0 |
 | bc02a591 | wp1k | sync d17e70f5 → 52306ab4 (019c): upstream's accepted-browser-defaults test, which reads GOAT's three adapters and passes |
+| aeb89b8c | docs | wp1k record, receipt at bc02a591 |
+| a2539a20 | wp1k review | the Linux/Windows reasons for keeping the attach-background default say the attach fronts the browser while it opens the setup page, then restores focus |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -185,6 +187,12 @@ after `d17e70f5` (core `browser/platform.rs` only) → unit wp1k (019c), task wp
   production parses too. GOAT does not ship Perception, and upstream froze it (a967d132).
 - Receipts after the GOAT restart run with `TMPDIR=/private/tmp`: this thread's 85-character `TMPDIR` pushes five `cua-driver` socket
   test paths past SUN_LEN (424/424 with a short `TMPDIR`), and `/tmp` trips the Perception sandbox above.
+- wp1j review (upstream d17e70f5, for the lane that adopts `browser_*`): the trusted click's `DOM.resolveNode` keeps the CDP call's 20 s
+  timeout while the tab's mutation lock is held (`browser/tools.rs:1783`; `dom_event` has the same shape at `:1594`); the click
+  readback reads the target's `value` in-process on a tab the secret fence may cover (`:73`, compared and dropped, never published);
+  the ref-targeted trusted dialog branch (`:1943`) has no test.
+- wp1k review: `every_platform_declares_the_browser_platform_defaults_it_accepts` never reads the reasons, and its source parser would
+  miss a second `impl BrowserPlatform` block or count a `#[cfg]`-gated override; neither exists in GOAT's adapters today.
 
 ### Issue dispositions (path:line at the final head)
 

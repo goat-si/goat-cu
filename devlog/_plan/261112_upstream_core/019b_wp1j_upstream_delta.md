@@ -25,3 +25,9 @@ No protocol change (no schema touched); the installer pin is unchanged (0.47.22 
 | Linux container: `cua-driver-core --lib`; clippy `-D warnings` (core, platform-linux) | 0 / 0 | 1830 passed / 3 ignored; clean |
 | `TMPDIR=/private/tmp zsh /tmp/goat-cu-sync/receipt-final.sh` at c8a91fc0 | 0 | 24 steps, failures=0: core-lib 1827 / 3, macos-lib 2036 / 48, windows-host 200, linux-host 110, check_protocol compatible, protocol delta problems 0 (050) |
 NOT RUN: a live Chromium trusted click against a page.
+
+Review `cu-review-wp1j-c8a91fc0-s24`: PASS. It replayed upstream's hunks onto the parent with `patch --fuzz=0` and got all four files
+byte-identical; the readback stays on the bound frame session, adds no input, cannot report `confirmed` without a real before/after
+difference, and publishes nothing it read. Two low notes, both upstream's design and shared with the `dom_event` route, recorded as
+050 follow-ups (the `DOM.resolveNode` call keeps the connection's 20 s call timeout; the readback reads a field's value in-process on
+a tab the secret fence may cover); the ref-targeted trusted dialog branch has no dedicated test.

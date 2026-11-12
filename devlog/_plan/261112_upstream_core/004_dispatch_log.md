@@ -221,3 +221,6 @@ system24/deepseek-v4.1-flash / high, as requested).
 2026-11-12: the re-fetch after c678bba8 found trycua/cua at d17e70f5 → unit wp1j (019b), sync c8a91fc0; fresh review
 `cu-review-wp1j-c8a91fc0-s24` dispatched (returned codex / system24/deepseek-v4.1-flash / high). The re-fetch after ffc428c2 found
 52306ab4 → unit wp1k (019c), sync bc02a591; fresh review `cu-review-wp1k-bc02a591-s24` dispatched (same route, as returned).
+2026-11-12: all three reviews steered at ~19:40 UTC past their bounds. `cu-review-wp1j-c8a91fc0-s24` PASS (two upstream-design lows →
+050 follow-ups). `cu-review-wp1k-bc02a591-s24` NEAR-PASS: medium, upstream's Linux/Windows attach-default reason is false for GOAT's
+adapters → a2539a20 (text only, `browser::platform` 4 passed); lows recorded.
