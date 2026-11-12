@@ -386,8 +386,7 @@ mod u33_identity_tests {
             .is_ok());
         let refused = store
             .resolve_for_instance(42, &args, InstanceEvidence::Live(started(2)))
-            .err()
-            .expect("a restarted process refuses the old token");
+            .expect_err("a restarted process refuses the old token");
         assert_eq!(
             refused.structured_content.unwrap()["refusal"]["code"],
             "process_instance_mismatch"

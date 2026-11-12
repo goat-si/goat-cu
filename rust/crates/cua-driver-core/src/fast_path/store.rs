@@ -406,8 +406,8 @@ mod tests {
     #[test]
     fn evictions_keep_each_entry_in_its_own_session() {
         let store = GuardStore::new();
-        let own = |id: u64| if id % 2 == 0 { "a" } else { "b" };
-        let other = |id: u64| if id % 2 == 0 { "b" } else { "a" };
+        let own = |id: u64| if id.is_multiple_of(2) { "a" } else { "b" };
+        let other = |id: u64| if id.is_multiple_of(2) { "b" } else { "a" };
         let images = IMAGE_CAPACITY as u64 + 4;
         for id in 0..images {
             store.put_image(
