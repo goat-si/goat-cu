@@ -330,7 +330,11 @@ impl Tool for TypeTextTool {
         }
         let window_id_arg = args.opt_u64("window_id");
         let evidence = crate::process_identity::evidence(&args, pid).await;
-        let resolved = match latency::resolve(|| self.state.snapshots.resolve_for_instance(pid, &args, evidence)) {
+        let resolved = match latency::resolve(|| {
+            self.state
+                .snapshots
+                .resolve_for_instance(pid, &args, evidence)
+        }) {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -1557,6 +1561,96 @@ fn document_after_ax_insert(
         mark()
     } else {
         crate::document_edit::DocumentEdited::NotADocument
+    }
+}
+
+/// The text before a final Return, when the text is one line plus that Return
+/// and the role is a single-line field. Such a field cannot hold a newline, so
+/// the Return can only mean submit.
+fn single_line_submit_body<'a>(role: &str, text: &'a str) -> Option<&'a str> {
+    if !matches!(role, "AXTextField" | "AXSearchField" | "AXComboBox") {
+        return None;
+    }
+    let body = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix(['\n', '\r']))?;
+    (!body.is_empty() && !body.contains(['\n', '\r', '\t'])).then_some(body)
+}
+
+/// Why a single-line submit's Return was withheld.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubmitWithhold {
+    /// The keyboard policy does not allow a pid-routed key.
+    PolicyRefusesKeys,
+    /// The write's read-back did not prove the line landed.
+    InsertNotReadBack,
+    /// The written field is not proven to hold keyboard focus.
+    FieldNotFocused,
+}
+
+impl SubmitWithhold {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::PolicyRefusesKeys => "the keyboard policy does not allow pid-routed keys",
+            Self::InsertNotReadBack => "the field did not read back the inserted line",
+            Self::FieldNotFocused => "the field does not hold keyboard focus",
+        }
+    }
+}
+
+/// What the background AX rung does with the Return of a single-line submit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubmitPlan {
+    /// Not a single-line submit: nothing extra is sent.
+    NotASubmit,
+    /// The body was proven inserted and the field holds focus: press Return.
+    SendReturn,
+    /// The line was written but the Return must not be sent.
+    WithholdReturn(SubmitWithhold),
+}
+
+/// The Return is a pid-routed key that reaches whichever field holds focus, so
+/// it goes out only for a proof that the body landed in the focused field.
+fn submit_plan(
+    submit_body: Option<&str>,
+    progress: TypedProgress,
+    keyboard_allowed: bool,
+    focus_confirmed: bool,
+) -> SubmitPlan {
+    if submit_body.is_none() {
+        return SubmitPlan::NotASubmit;
+    }
+    if progress != TypedProgress::Complete {
+        return SubmitPlan::WithholdReturn(SubmitWithhold::InsertNotReadBack);
+    }
+    if !keyboard_allowed {
+        return SubmitPlan::WithholdReturn(SubmitWithhold::PolicyRefusesKeys);
+    }
+    if !focus_confirmed {
+        return SubmitPlan::WithholdReturn(SubmitWithhold::FieldNotFocused);
+    }
+    SubmitPlan::SendReturn
+}
+
+/// How a proven single-line insert reports its Return: `(verified,
+/// delivered_chars, detail suffix)`. The body already landed, so a failed key
+/// post must not turn the call into an error: a retry would insert the line
+/// again.
+fn submit_return_report(
+    pressed: &anyhow::Result<()>,
+    text: &str,
+    body: &str,
+) -> (bool, usize, String) {
+    match pressed {
+        Ok(()) => (true, text.chars().count(), ", then pressed Return".into()),
+        Err(error) => (
+            false,
+            body.chars().count(),
+            format!(
+                "; pressing Return failed ({error}), so it may not have been sent: read the field \
+                 before repeating it"
+            ),
+        ),
     }
 }
 
@@ -3251,6 +3345,16 @@ fn type_text_in_key_window(
         } else {
             unsafe { selected_range(element) }
         };
+        // A single-line field drops an inserted newline and never submits, and
+        // typing the line again after it doubled the text (Safari's address bar
+        // searched for "netflix.com netflix.com"). Insert the line alone, then
+        // send its Return once the insert and the field's focus are proven. The
+        // Return is a pid-routed key, so a semantic-only request never splits.
+        let keyboard_allowed = matches!(keyboard_policy, BackgroundKeyboardPolicy::Allowed);
+        let submit_body = keyboard_allowed
+            .then(|| single_line_submit_body(&role, text))
+            .flatten();
+        let ax_text = submit_body.unwrap_or(text);
         let bound = element_ptr_and_idx.is_some_and(|(ptr, _)| ptr == element as usize)
             && window_id.is_some_and(|wid| element_in_requested_window(pid, wid, element as usize));
         let settable =
@@ -3258,7 +3362,7 @@ fn type_text_in_key_window(
         let insertion = insert_ax_write(
             before_withheld,
             TextWriteContext { settable, prior },
-            || unsafe { set_string_attr(element, "AXSelectedText", text) },
+            || unsafe { set_string_attr(element, "AXSelectedText", ax_text) },
             || {
                 crate::ax::write_outcome::read_value_if_allowed(
                     &mut crate::ax::label_reader::NativeLabelReader,
@@ -3309,17 +3413,99 @@ fn type_text_in_key_window(
                 let ax_progress = if web_untrusted {
                     TypedProgress::Unverifiable
                 } else {
-                    ax_insert_progress(before.as_deref(), after.as_deref(), text, selection, bound)
+                    ax_insert_progress(
+                        before.as_deref(),
+                        after.as_deref(),
+                        ax_text,
+                        selection,
+                        bound,
+                    )
                 };
                 // An AX insert bypasses NSTextView's edit model, so a document is
                 // not marked edited and would never save the new text (DS-07).
                 let document = document_after_ax_insert(ax_progress, || unsafe {
                     crate::document_edit::ensure_marked_after_ax_write(pid, element, false)
                 });
+                // The Return reaches whichever field holds focus, so the rung
+                // proves the written element is that field, while the element
+                // is still live. A window-addressed request takes the strict
+                // window-aware check; a pid-only one the pid-wide check. Only a
+                // submit needs this, so an ordinary insert writes no focus.
+                let focus_confirmed =
+                    ax_progress == TypedProgress::Complete && submit_body.is_some() && {
+                        let _ = crate::input::ax_actions::focus_element(element as usize);
+                        match window_id {
+                            Some(wid) => element_has_exact_app_focus(pid, wid, element as usize),
+                            None => crate::input::ax_actions::element_has_keyboard_focus(
+                                pid,
+                                element as usize,
+                            ),
+                        }
+                    };
                 if owns {
                     unsafe {
                         CFRelease(element as _);
                     }
+                }
+                let submit =
+                    submit_plan(submit_body, ax_progress, keyboard_allowed, focus_confirmed);
+                let idx_str = || idx_opt.map(|i| format!(" [{i}]")).unwrap_or_default();
+                match submit {
+                    SubmitPlan::SendReturn => {
+                        let pressed = crate::input::keyboard::press_key(pid, "return", &[]);
+                        let (verified, delivered, suffix) =
+                            submit_return_report(&pressed, text, submit_body.unwrap_or(text));
+                        return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
+                            detail: format!(
+                                " into{} {role} \"{title}\"{}{suffix}",
+                                idx_str(),
+                                document.note().trim_end_matches('.')
+                            ),
+                            path: PATH_AX,
+                            verified,
+                            delivered_chars: Some(delivered),
+                            web_area: outcome_web_area,
+                        }));
+                    }
+                    SubmitPlan::WithholdReturn(reason) => {
+                        let insert_proven = ax_progress == TypedProgress::Complete;
+                        return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
+                            detail: if insert_proven {
+                                format!(
+                                    " into{} {role} \"{title}\"{}; Return was not sent because {}",
+                                    idx_str(),
+                                    document.note().trim_end_matches('.'),
+                                    reason.reason()
+                                )
+                            } else if let TypedProgress::Partial(delivered) = ax_progress {
+                                format!(
+                                    " via partial AX write into{} {role} \"{title}\"; delivered \
+                                     {delivered} char(s), and Return was not sent because {}",
+                                    idx_str(),
+                                    reason.reason()
+                                )
+                            } else {
+                                format!(
+                                    " via AX write into{} {role} \"{title}\"; Return was not sent \
+                                     because {}",
+                                    idx_str(),
+                                    reason.reason()
+                                )
+                            },
+                            path: PATH_AX,
+                            verified: false,
+                            // Without proof the line landed, no count is claimed.
+                            delivered_chars: match ax_progress {
+                                TypedProgress::Complete => {
+                                    submit_body.map(|body| body.chars().count())
+                                }
+                                TypedProgress::Partial(delivered) => Some(delivered),
+                                TypedProgress::Unchanged | TypedProgress::Unverifiable => None,
+                            },
+                            web_area: outcome_web_area,
+                        }));
+                    }
+                    SubmitPlan::NotASubmit => {}
                 }
                 if ax_progress == TypedProgress::Complete {
                     let idx_str = idx_opt.map(|i| format!(" [{i}]")).unwrap_or_default();
@@ -4371,6 +4557,109 @@ mod tests {
         assert_eq!(indeterminate["synthesized_chars"], 0);
         assert_eq!(indeterminate["retryable"], false);
         assert_eq!(indeterminate["escalation"]["recommended"], "verify_state");
+    }
+
+    #[test]
+    fn single_line_fields_split_off_one_trailing_return() {
+        for (role, text, expected) in [
+            ("AXTextField", "netflix.com\n", Some("netflix.com")),
+            ("AXSearchField", "query\r", Some("query")),
+            ("AXComboBox", "A1\r\n", Some("A1")),
+            ("AXTextField", "netflix.com", None),
+            ("AXTextField", "\n", None),
+            ("AXTextField", "a\n\n", None),
+            ("AXTextField", "a\nb\n", None),
+            ("AXTextField", "a\tb\n", None),
+            ("AXTextArea", "line\n", None),
+        ] {
+            assert_eq!(
+                single_line_submit_body(role, text),
+                expected,
+                "role={role} text={text:?}"
+            );
+        }
+    }
+
+    /// The Return reaches whichever field holds focus, so the rung sends it
+    /// only for a proof that the body landed in the confirmed focused field.
+    #[test]
+    fn submit_return_needs_a_complete_readback_and_confirmed_focus() {
+        use SubmitPlan::*;
+        use SubmitWithhold::*;
+        use TypedProgress::*;
+        let body = Some("netflix.com");
+        assert_eq!(submit_plan(body, Complete, true, true), SendReturn);
+        // Without proven insertion the Return could submit a partial line.
+        for progress in [Partial(4), Unchanged, Unverifiable] {
+            assert_eq!(
+                submit_plan(body, progress, true, true),
+                WithholdReturn(InsertNotReadBack),
+                "progress={progress:?}"
+            );
+        }
+        // A pid-routed key is only allowed by an Allowed policy.
+        assert_eq!(
+            submit_plan(body, Complete, false, true),
+            WithholdReturn(PolicyRefusesKeys)
+        );
+        assert_eq!(
+            submit_plan(body, Complete, true, false),
+            WithholdReturn(FieldNotFocused)
+        );
+        // No single-line submit body: the rung sends nothing extra, whatever
+        // the read-back and focus say.
+        for progress in [Complete, Partial(4), Unchanged, Unverifiable] {
+            for (allowed, focused) in [(true, true), (true, false), (false, true)] {
+                assert_eq!(
+                    submit_plan(None, progress, allowed, focused),
+                    NotASubmit,
+                    "progress={progress:?} allowed={allowed} focused={focused}"
+                );
+            }
+        }
+    }
+
+    /// A role that is not a single-line field, a multi-line text, or text with
+    /// an embedded control character never becomes a submit.
+    #[test]
+    fn only_a_single_line_field_with_one_trailing_return_is_a_submit() {
+        for (role, text) in [
+            ("AXTextArea", "line\n"),
+            ("AXTextField", "a\nb\n"),
+            ("AXTextField", "a\tb\n"),
+            ("AXTextField", "netflix.com"),
+            ("AXTextField", ""),
+        ] {
+            let body = single_line_submit_body(role, text);
+            assert_eq!(body, None, "role={role} text={text:?}");
+            assert_eq!(
+                submit_plan(body, TypedProgress::Complete, true, true),
+                SubmitPlan::NotASubmit,
+                "role={role} text={text:?}"
+            );
+        }
+    }
+
+    /// wp1c: the body of a proven submit landed, so a Return that failed to
+    /// post reports the inserted line and an unverified Return instead of an
+    /// error a caller would retry (inserting the line twice).
+    #[test]
+    fn a_failed_return_after_a_proven_insert_reports_the_line_not_an_error() {
+        let (verified, delivered, suffix) =
+            submit_return_report(&Ok(()), "netflix.com\n", "netflix.com");
+        assert!(verified);
+        assert_eq!(delivered, 12);
+        assert_eq!(suffix, ", then pressed Return");
+
+        let failed = Err(anyhow::anyhow!("key post refused"));
+        let (verified, delivered, suffix) =
+            submit_return_report(&failed, "netflix.com\n", "netflix.com");
+        assert!(!verified, "the Return is not confirmed");
+        assert_eq!(delivered, 11, "only the proven body counts");
+        assert!(
+            suffix.contains("key post refused") && suffix.contains("may not have been sent"),
+            "{suffix}"
+        );
     }
 
     #[test]
