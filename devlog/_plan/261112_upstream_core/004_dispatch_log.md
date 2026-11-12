@@ -173,3 +173,8 @@ invoke_menu and has no fallback). Low: the landed-line hint said to press Return
 bfef37d8 (assertion red at type_text.rs:4806, then type_text 61 / 1, --lib 2031 / 48, clippy clean); low: GNOME doc wording →
 bfef37d8; low coverage of the parked repin wiring → recorded residual (050); nit batch_nudge noise → no change. Fresh review of
 bfef37d8 dispatched as `cu-review-bfef37d8-s24` (codex / system24/deepseek-v4.1-flash / high).
+2026-11-12: `cu-review-bfef37d8-s24` NEAR-PASS: the hint is right, but the result text still advised Return after a focus check only
+(high) → ff24221c (assertions red at type_text.rs:4797, then type_text 61 / 1, --lib 2031 / 48, clippy clean). Low batch truncation
+accepted in part (the do-not-repeat clause leads; hint copying for ok steps a 050 follow-up); low nudge "(no separate read)" rebutted
+(`batch_nudge.rs:41-43`: observe:{} is the read). Round 2 with the same reviewer: `cu-review-ff24221c-r2c-s24` (continueFrom; returned
+codex / system24/deepseek-v4.1-flash / high; two earlier create calls were refused for argument shape and started nothing).

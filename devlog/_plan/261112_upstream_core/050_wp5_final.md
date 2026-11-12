@@ -65,6 +65,8 @@
 | fd7b782a | wp1f/CI review | `ToolRegistry::isolate_desktop` doc names its limit: calls dispatched through the registry only (test-only item) |
 | 9f79bc0f, 222d484a | docs | wp1f/CI review decisions; issue table and final receipt at eb04e2a0 |
 | bfef37d8 | final review of 83aeb256/1f2060af | the landed-line hint reads the field before Return (a failed Return post may still have been sent); GNOME parked-float doc wording |
+| d46baf86 | docs | final review of 83aeb256/1f2060af decisions |
+| ff24221c | review of bfef37d8 | the landed-line message leads with "do not repeat type_text" and gives the hint's read-first Return advice (was focus-only) |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -93,6 +95,9 @@ Re-fetch after ff6658cc (~11:45 UTC): origin/main `40c6f6eb` and agent-desktop `
   `PointOwnership::Unknown` and the caller presses unguarded (`atspi/native/hit_test.rs:309`, fail-open predates this lane). Smallest
   fixes: skip the substitution when parent and hit node name different buses; reserve a budget slice for the stacking pass.
 - `rust/VERSION` (0.38.0-goat.1) lags the workspace version (0.40.1-goat.1), identically on origin/main; nothing reads it.
+- `run_steps` copies a step's `hint`/`next_call` into its report only for a failed step (`batch_tools.rs:1849-1868`), so a non-error
+  step that carries advice (type_text's landed line without its Return) reaches a batched caller only through the 300-character
+  message; ff24221c puts the do-not-repeat clause first. Copying hints for ok steps changes run_steps output for every tool.
 - wp1f review P3 (upstream b9e38d1a, taken as merged): `wayland/text_keys.rs:90` opens the literal `libxkbcommon.so.0`, so a future
   static or bundled libxkbcommon build would refuse typing as "needs libxkbcommon 1.0" although the symbols are present; no such
   artifact ships. And about 20 unit tests (`niri/keyboard.rs:816` onward, `libei.rs:3527` onward) unwrap `xkb1()`, so a
