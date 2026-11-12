@@ -10,10 +10,13 @@ unchanged. Diff `/tmp/goat-cu-upstream/wp1i/52306ab4.diff`, merge `/tmp/goat-cu-
 
 The test reads GOAT's own adapters (`platform-{linux,macos,windows}`), so it checks GOAT's overrides, not upstream's: it passes, meaning GOAT
 leaves exactly the declared defaults in place on each platform. No protocol, version or vendor change.
+Sync commit bc02a591.
 
 ### Receipts
 
 | Command | Exit | Result |
 |---|---|---|
 | `cargo test -p cua-driver-core --lib browser::platform` | 0 | 4 passed, including the new test |
+| Linux container: `cua-driver-core --lib` | 0 | 1831 passed / 3 ignored |
+| `TMPDIR=/private/tmp zsh /tmp/goat-cu-sync/receipt-final.sh` at bc02a591 | 0 | 24 steps, failures=0: core-lib 1828 / 3, macos-lib 2036 / 48, windows-host 200, linux-host 110, check_protocol compatible, protocol delta problems 0 |
 NOT RUN: none beyond the lane's standing NOT RUN (no runtime surface changed).

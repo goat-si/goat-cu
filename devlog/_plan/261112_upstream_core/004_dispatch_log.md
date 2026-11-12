@@ -218,3 +218,6 @@ recomputed the fingerprint); low, the AX click still sent the retired `ShowFocus
 join but fail closed, as upstream; a stale ShowFocusRect comment identical upstream) need no change. The re-fetch after 79766176 found
 trycua/cua at 7f2252fb → unit wp1i (019), sync 190a160e. Fresh review dispatched as `cu-review-wp1i-190a160e-s24` (returned codex /
 system24/deepseek-v4.1-flash / high, as requested).
+2026-11-12: the re-fetch after c678bba8 found trycua/cua at d17e70f5 → unit wp1j (019b), sync c8a91fc0; fresh review
+`cu-review-wp1j-c8a91fc0-s24` dispatched (returned codex / system24/deepseek-v4.1-flash / high). The re-fetch after ffc428c2 found
+52306ab4 → unit wp1k (019c), sync bc02a591; fresh review `cu-review-wp1k-bc02a591-s24` dispatched (same route, as returned).
