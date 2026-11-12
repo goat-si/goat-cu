@@ -127,3 +127,22 @@ independent review.
 - Follow-up (pre-existing, not from this sync): Linux `invoke_menu` maps a sent AT-SPI `do_action` that returns a D-Bus error
   ("doAction failed") to the `menu_path_unavailable` refusal (tools/invoke_menu.rs:38-43); the same mapping exists at origin/main
   40c6f6eb (atspi/native.rs:4337). A sent action that errored may have acted, so it should read unverifiable, as #279 now does on macOS.
+
+## wp1b close-out on HEAD 88c70460
+
+The sync landed in ef7a3646 (c0d3b919 → e51f5740, cua-driver-rs 0.47.14) with review fix 4fc4252b. Paths are under `rust/crates/`;
+line numbers are at 88c70460.
+
+| Area | State | Code |
+|---|---|---|
+| Isolated launch breaker + mock keychain (upstream) combined with GOAT's host-owned process-group containment | kept both; one `record_failure` per attempt, every early return after profile creation cleans up | `cua-driver-core/src/browser/prepare.rs:597` `admit`, `:625` `record_failure`, `:422` `cleanup_created_profile`, `:490` `MACOS_MOCK_KEYCHAIN_SWITCH`, `:1144` containment under `host_owned_runtime()` |
+| Cursor release at the native arrival (upstream) | synced byte-identical; GOAT click ordering unchanged (dispatch uses the point computed before the glide) | `cursor-overlay/src/render_state.rs:1223` `release_time` |
+| macOS security-prompt read before an isolated launch (upstream) | synced; read-only window enumeration | `platform-macos/src/security_prompt.rs:148` `security_prompt_on_screen` |
+| Linux X11 background fixes (upstream) | synced; reviewed lead-side (§C B2 above) | `platform-linux/src/tools/impl_.rs`, `input/mod.rs`, `atspi/native.rs` |
+| Windows `unused_mut` on the launch command (review A P3) | FIXED 4fc4252b | `prepare.rs:1134` |
+
+Reviews: A (prepare.rs, lockfiles, docs) PASS; B1 (cursor release) NEAR-PASS; B2 (Linux X11 gates) lead-side after two provider 429
+failures. Residuals, recorded and not fixed here: `prepare.rs:1136` evaluates `profile_root()?` again after the profile exists, so an error
+there skips cleanup (inherited byte-identical from upstream, reachable only by a concurrent env change); the GOAT-containment/upstream-breaker
+composition has no combined test; `release_time` compares against the legacy fixed glide when `glide_duration_ms` is set with a non-default
+floor timing (upstream, latent: no GOAT caller sets `glide_duration_ms`).
