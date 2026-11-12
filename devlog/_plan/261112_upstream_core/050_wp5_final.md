@@ -71,6 +71,8 @@
 | f3107f37 | wp1g review | install.ps1's network-failure fallback names `mcp-config --client <name>` (was `connect`); a test guards both installers' fallbacks |
 | 07d81e6c | docs | wp1g review decisions |
 | a3bd993b | ff24221c review round 2 | both landed-line instructions (do not repeat; read first, then Return) lead the message, inside run_steps' 300-character step message |
+| 286bc5bb | docs | ff24221c round-2 decisions |
+| c7cce744 | ff6658cc review | GOAT.md lists which APIDisabled refusals are typed (press_key's menu-chord refusal stays untyped: menu validation may have posted Cmd+F20); Linux fd test marker is `spawned-by-<pid>` |
 
 ### Re-fetch before the last D (2026-11-12)
 

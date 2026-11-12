@@ -189,3 +189,11 @@ test is red on the parent text, the nudge rebuttal holds (`observe:{}` is a real
 Low: only the do-not-repeat clause was sure to fit run_steps' 300 characters (a DocumentEdited note pushed the read-first condition
 past it) → a3bd993b (assertion red at type_text.rs:4805, then type_text 61 / 1, --lib 2031 / 48, clippy clean). Nudge template nit:
 no change.
+2026-11-12: `cu-review-ff6658cc-s24` NEAR-PASS after 3 h 20 min (steered at 14:54 UTC to report from what it had): no path sends input
+before a NOT_DELIVERED refusal (press_key semantic branch only under !fg && px none after a mutex lease and fact-only gate_again;
+right_click's MenuInputWatch reads idle times and key_focus_guard::protect moves no key focus; pointer refusals fire before any post;
+scroll's refusal unreachable after a press), the fronted cases stay untyped, registry_disposition never relaxes a tool-set
+disposition, and the batch test is red without the fix. Low: GOAT.md's typed clause also covered press_key menu chords, which stay
+untyped background_unavailable (menu validation may have posted Cmd+F20) → c7cce744; low: a leaked marker "1" matched under parent
+pid 1 → c7cce744 (`a_leaked_marker_never_makes_the_suite_the_lone_child` red at mutter_display.rs:512, then platform-linux 1171 / 15
+with and without a leaked marker, clippy clean). Decisions recorded with review_findings.record.
