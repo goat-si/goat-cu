@@ -625,7 +625,8 @@ mod tests {
                 ),
                 (
                     "existing_profile_attach_background_limitation",
-                    "existing-profile attachment does not bring the browser forward",
+                    "the attach fronts the browser only while it opens the setup page, then \
+                     restores the previous focus",
                 ),
                 (
                     "guard_background_attach",
@@ -671,7 +672,8 @@ mod tests {
                 ),
                 (
                     "existing_profile_attach_background_limitation",
-                    "existing-profile attachment does not bring the browser forward",
+                    "the attach fronts the browser only while it opens the setup page, then \
+                     restores the previous window unless an Enter may still be unread",
                 ),
                 (
                     "guard_background_attach",
