@@ -137,17 +137,17 @@ Re-fetch after ff6658cc (~11:45 UTC): origin/main `40c6f6eb` and agent-desktop `
 |---|---|---|
 | #299 | FIXED (macOS, Linux, Windows) | 020 §A/§B, review rounds 1–3; failing-first `a_token_from_an_earlier_start_of_the_pid_is_refused`, `a_synchronous_resolve_reads_live_evidence`, `a_pid_that_restarts_during_a_listing_gets_no_label`, Linux/Windows `a_label_needs_two_agreeing_start_time_reads` |
 | #288 | FIXED | 020 §C + review rounds 1–3; failing-first `another_sessions_snapshot_is_not_visible` (runtime red store.rs:348), delta red tool.rs:6531 |
-| #287 | FIXED (option 2, bounded float then park; GNOME helper follows) | 030 §B #287; failing-first cursor_pose/render_map/pose_stream tests |
+| #287 | FIXED (option 2, bounded float then park; GNOME helper follows) | 030 §B #287; failing-first cursor_pose/render_map/pose_stream tests; round 2 e354f982 (macOS parked loop waits on the idle deadline instead of frame ticks; a snap, re-show or theme reselect restarts a parked float) and 1f2060af (parked pinned cursor keeps its ~1 s repin; SetMotion/ApplyMotion restart a parked float), each red first |
 | #286 | FIXED | 030 §A; failing-first `a_relocated_background_point_outside_the_frame_is_refused` |
 | #283 | FIXED (#283.2 dead hand_back); #283.1 documented (GOAT.md), live smoke NOT RUN | 030 wp3 B/C |
 | #281 | FIXED (#281.2 message, #281.3 dispatcher name + site log); #281.1 documented (GOAT.md) | 030 wp3 B/C; failing-first `a_selection_target_that_is_not_settable_says_so` |
-| #279 | FIXED (#279.1 focus retry; #279.2 one meaning for perform errors in click, press_key, right_click, double_click, element_pointer AXOpen — legacy helper deleted, 98632052) | 030 wp3 B/C; failing-first `a_transient_focus_write_error_keeps_polling_until_the_deadline`, `perform_error_after_dispatch_is_unverifiable_unless_nothing_was_sent`, 98632052's 8 red tests |
+| #279 | FIXED (#279.1 focus retry; #279.2 one meaning for perform errors in click, press_key, right_click, double_click, element_pointer AXOpen — legacy helper deleted, 98632052; extended to scroll's native scroll-bar presses and press_key's semantic AXConfirm/AXCancel, 0f0d4b70; the proven-not-delivered refusals typed NOT_DELIVERED so run_steps counts them as sending nothing, ff6658cc) | 030 wp3 B/C; failing-first `a_transient_focus_write_error_keeps_polling_until_the_deadline`, `perform_error_after_dispatch_is_unverifiable_unless_nothing_was_sent`, 98632052's 8 red tests, 0f0d4b70's 4, ff6658cc's 3 (incl. `a_batch_step_refused_as_not_delivered_counts_as_not_delivered`) |
 | #272 | FIXED for the clipping cases (1, 5) in the macOS adapter (semantic visibility = window state + own frame); case 3 (sheet/popover/menu whose AXWindow differs) still refused by the exact binding — follow-up | 040 wp4 (corrected after the wp3/wp4 review); failing-first `semantic_press_ignores_ancestor_clipping`; live smoke on third-party apps NOT RUN |
 
-### Final receipt (kache doctor exit 0), /tmp/goat-cu-sync/receipt-final.sh on 9bd0e96c
+### Final receipt (kache doctor exit 0), /tmp/goat-cu-sync/receipt-final.sh on eb04e2a0 (earlier run on 9bd0e96c also 24/24)
 
 All 24 steps exit 0 (failures=0): check-host; core-lib 1825 passed / 3 ignored; core-int 93; contract-lib 91; overlay-lib 157; macos-lib
-2023 passed / 48 ignored; windows-host 207; linux-host 110; linux-target and windows-target type checks; clippy-macos (-D warnings);
+2031 passed / 48 ignored; windows-host 207; linux-host 110; linux-target and windows-target type checks; clippy-macos (-D warnings);
 clippy-linux (-D warnings, cross target); windows-bins and linux-bins (cua-driver, cursor-theme-cli, cua-driver-uia, cua-driver-sdk,
 portal-input); cargo deny; build-driver; e2e-check; check_protocol.py (protocol-compatible in every GOAT launch form; daemon 0.8.0 =
 0.8.0; descriptions reworded for get_guide, set_config, type_text, not protocol); proto_delta problems 0; output delta adds only
