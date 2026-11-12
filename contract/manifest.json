@@ -2759,6 +2759,10 @@
             "minimum": 0,
             "type": "integer"
           },
+          "process_instance": {
+            "description": "Opaque label of the process instance that owned pid when this answer was read (its kernel start time on macOS, Linux and Windows). Compare for equality only: the same pid with a different label is a different process, the earlier one having exited. Absent when it could not be read or did not hold for the whole answer.",
+            "type": "string"
+          },
           "returned_element_count": {
             "minimum": 0,
             "type": [
@@ -4011,6 +4015,10 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "process_instance": {
+                  "description": "Opaque label of the process instance that owned pid when this answer was read (its kernel start time on macOS, Linux and Windows). Compare for equality only: the same pid with a different label is a different process, the earlier one having exited. Absent when it could not be read or did not hold for the whole answer.",
+                  "type": "string"
+                },
                 "running": {
                   "type": "boolean"
                 }
@@ -4285,6 +4293,10 @@
                     "integer",
                     "null"
                   ]
+                },
+                "process_instance": {
+                  "description": "Opaque label of the process instance that owned pid when this answer was read (its kernel start time on macOS, Linux and Windows). Compare for equality only: the same pid with a different label is a different process, the earlier one having exited. Absent when it could not be read or did not hold for the whole answer.",
+                  "type": "string"
                 },
                 "space_ids": {
                   "items": {
