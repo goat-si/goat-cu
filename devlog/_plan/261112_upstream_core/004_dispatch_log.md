@@ -109,3 +109,10 @@ green platform-macos --lib 2023 passed / 48 ignored. wp3/wp4 review decisions re
 reasoningEffort=high.
 2026-11-12: `cu-wp1b-review-b2-retry-s24-261112` and `cu-wp34-review-r2-s24-261112` FAILED (actual return: "exceeded retry limit, last status:
 429 Too Many Requests"). B2 reviewed lead-side (011 §C B2). wp3/wp4 round 2 to be re-dispatched after the running reviews finish.
+2026-11-12: PR #300 pushed at 458ff8f6 under the then-current authority; goat-ci failed (Windows serve.rs, clippy) → d0e90760, 2a726372.
+Delivery rule then changed: the coordinator pushes and manages the PR; this lane pushes nothing more (watch removed).
+2026-11-12: second pre-D re-fetch → wp1d (133b2ef9). Final receipt on 9bd0e96c: failures=0.
+2026-11-12 04:28 UTC: GOAT server restart cancelled the four running reviews; GOAT resumed them as run 2. `cu-wp1c-review-s24-261112` finished:
+NEAR-PASS, 3 P2 + 3 P3 → 1ec667ea (5 accepted, 1 rebutted with ad5f6193 evidence; decisions recorded). `cu-wp3-287-review-r2-s24-261112`,
+`cu-wp1b-review-b1-s24-261112` and `cu-wp3c-review-s24-261112` logged nothing after the restart notice (04:28) through 05:04; not duplicated.
+Their scopes (e354f982, ef7a3646 cursor release, 98632052) are named in the fresh final review of the exact head.

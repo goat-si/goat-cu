@@ -39,6 +39,7 @@
 | d0e90760 | CI fix | goat-ci on PR #300: Windows serve.rs cfg(unix) from the wp1 sync, clippy items_after_test_module (ax/bindings.rs), expect_err, is_multiple_of |
 | 2a726372 | test | re-pin the ax/bindings.rs glob audit after the pure move |
 | 133b2ef9 | wp1d | sync 465aab0b → 4cf88bae (0.47.16): Linux GTK3 overlay hit test, macOS e2e occluder test, vendored cua-telemetry 0.25.0 |
+| 1ec667ea | wp1c review | a line that landed without its Return is LineWithoutReturn (unverified, not the retryable type_text_incomplete); submit_step / completed_text_result pure decisions with call-site tests; focus written only when needed and disclosed; per-read-back withhold reasons |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -59,6 +60,12 @@ after `465aab0b` → unit wp1d (014).
   `forget_window` still has no production caller (pre-existing).
 - #272 case 3: a sheet/popover/menu element whose `AXWindow` is a same-pid child of the admitted window is refused by
   `bind_exact_with` (tools/actionability/semantic.rs:85-88); admitting it needs its own safety argument.
+- Flake observed once: `window_change_detector::tests::a_change_read_after_the_deadline_still_releases_the_lease` (arrived with the wp1
+  sync, absent on origin/main) failed at `assert!(lock(&TAIL).is_none())` (window_change_detector.rs:1583) in one full parallel
+  `platform-macos --lib` run on 1ec667ea's tree; it passed in the receipt, 5/5 alone and in the next full run (2022 passed). It sleeps on
+  wall-clock deadlines and reads process-global tail state.
+- macOS `type_text` single-line submit: the focus write before Return is disclosed in the answer but not added to the mutation chain
+  (wp1c review P3, accepted in part).
 - #299 (Linux, pre-existing): other blocking reads still run on the async runtime — `list_windows` `retain_listed`
 - Linux `invoke_menu` (pre-existing at origin/main): a sent AT-SPI `do_action` that returns a D-Bus error is reported as the
   `menu_path_unavailable` refusal (tools/invoke_menu.rs:38-43, atspi/native.rs `doAction failed`); it may have acted, so it should read
