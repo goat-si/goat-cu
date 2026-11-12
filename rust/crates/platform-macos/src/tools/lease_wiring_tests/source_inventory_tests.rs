@@ -64,7 +64,9 @@ fn inventory() -> Vec<Site> {
 // a pinned source fingerprint; the remaining reviewed globs target enums.
 fn check_reviewed_glob_targets(root: &Path) {
     for (path, expected) in [
-        (root.join("ax/bindings.rs"), 7435168060815112653_u64),
+        // Re-audited at d0e90760+: three items moved above the test module
+        // (clippy items_after_test_module), no export added or removed.
+        (root.join("ax/bindings.rs"), 16574817398429486645_u64),
         (
             root.join("../../cua-driver-contract/src/vocabulary.rs"),
             7383688377390068226_u64,
