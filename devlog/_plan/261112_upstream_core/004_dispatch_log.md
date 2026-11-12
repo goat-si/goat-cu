@@ -130,3 +130,8 @@ the commits without a review of their final form: `cu-final-287-e354f982-s24`, `
 2026-11-12 ~09:45 UTC: GOAT server restart cancelled all five (task.read: status cancelled), none had reported. Re-dispatched at b0c7a85a with
 the same narrow briefs (`-r2` ids), plus `cu-review-wp1f-ci-b0c7a85a-s24` for 3be03b46 (wp1f) and b0c7a85a (CI test fix); all six returned
 codex / system24/deepseek-v4.1-flash / reasoningEffort=high.
+2026-11-12: `cu-review-libei-57e9cae1-s24` PASS (one INFO, the CI coverage follow-up, accepted). The pre-restart
+`cu-final-wp1c-1ec667ea-s24` completed after all: NEAR-PASS, P2 (landed line still carried a foreground re-send escalation) accepted →
+895e6ad2 (failing-first assertion red, then green; platform-macos --lib 2026 / 48, clippy clean), P3 mapping coverage rebutted, P3
+char counts accepted as recorded residual; decisions recorded with review_findings.record. Its `-r2` duplicate cancelled; fresh final
+review of 895e6ad2 dispatched as `cu-final-wp1c-895e6ad2-s24` (codex / system24/deepseek-v4.1-flash / high).

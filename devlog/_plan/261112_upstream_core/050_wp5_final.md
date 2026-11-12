@@ -52,6 +52,8 @@
 | b0c7a85a | CI fix | paused-clock batch pacing test runs on its own desktop lane (goat-ci run 43183852970) |
 | 7c5cfcd1 | docs | batch pacing CI fix record; reviews re-dispatched after the GOAT restart |
 | 57e9cae1 | test fix | libei.rs tests compile with `portal-input` again (pre-existing on origin/main since 87e2e869) |
+| ff3338e7 | docs | libei portal-input test fix and CI follow-up |
+| 895e6ad2 | wp1c round-2 review | a single-line submit's line that landed without its Return carries no re-send escalation (was `recommended: foreground`) |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -68,6 +70,9 @@ Final re-fetch (~09:50 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62`
 
 ### Follow-ups recorded, not done in this lane
 
+- wp1c round-2 review P3 (rebutted, residual): the `TypeTextDelivery` → `line_without_return` mapping in `type_text` `invoke` is two
+  adjacent arms with no direct test; both ends are pinned (`submit_step`, `completed_text_result`), and pinning the arms needs a
+  delivery-enum or AX-rung restructure.
 - CI builds no `platform-linux` tests with `portal-input`, so the libei and portal tests (59 more than the default set) ran nowhere until
   57e9cae1; adding `--features portal-input` to a Linux unit job would keep them compiling (workflow change left to the maintainers).
 - Linux element tokens are not bound to the process instance (Linux publishes and resolves with `NotChecked`); Windows and macOS are.
