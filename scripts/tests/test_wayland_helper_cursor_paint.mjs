@@ -239,5 +239,27 @@ helper.SetCursorState('click', '', '', true);
 globalThis.helperClock = 101.3;
 assert.ok(drawOps() > idle, 'requested click marks are drawn');
 
+// #287: a look with `park` eases the resting float out and parks the tip
+// exactly on the point once `hold` passes park + ease_in; a look without it
+// (an older driver) floats on; a bad `park` is rejected and leaves the look
+// in place. The rest clock starts at full amplitude (hold 2 s).
+helper.SetCursorState('idle', '', '', true);
+const restAt = (now, look) => {
+  helper.SetCursorLook(JSON.stringify({ float: look, halo: null }));
+  globalThis.helperClock = now;
+  helper.PlayCursorPath(JSON.stringify({ samples: [[0, 400, 300, 0, 0, 0]], arrival: null, rest: [0, 2, 0] }));
+};
+const offset = (tip) => Math.hypot(tip[0] - 400, tip[1] - 300);
+restAt(200, { ...float, park: 9.3 });
+assert.ok(offset(paint(200).tip) > 0.1, 'floating inside the rest window');
+near(paint(209).tip, [400, 300], 'parked upright after the window');
+near(paint(260).tip, [400, 300], 'still parked');
+restAt(300, float);
+assert.ok(offset(paint(309).tip) > 0.1, 'a look without park floats on');
+helper.SetCursorLook(JSON.stringify({ float: { ...float, park: -1 }, halo: null }));
+assert.ok(offset(paint(309).tip) > 0.1, 'a negative park is rejected');
+helper.SetCursorLook(JSON.stringify({ float: { ...float, park: 'x' }, halo: null }));
+assert.ok(offset(paint(309).tip) > 0.1, 'a non-numeric park is rejected');
+
 helper.disable();
 console.log('helper cursor paint: ok');

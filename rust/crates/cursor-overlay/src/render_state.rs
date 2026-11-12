@@ -471,6 +471,16 @@ impl RenderStateCore {
         }
     }
 
+    /// Start a parked resting float again, from 0 like an arrival: it holds,
+    /// eases in, plays its bounded window and parks again (#287). A float
+    /// that has not parked carries on.
+    fn restart_parked_float(&mut self) {
+        if crate::cursor_pose::rest_parked(self.float_hold_secs) {
+            self.float_from = 0.0;
+            self.float_hold_secs = 0.0;
+        }
+    }
+
     /// Whether this cursor floats at all: `cursor.float` on, the built-in
     /// theme, and no reduced motion.
     pub fn floats(&self) -> bool {
@@ -991,12 +1001,14 @@ impl RenderStateCore {
                 heading_radians,
             } => {
                 let reveal_badge = !self.is_revealed();
+                let moved = self.pos != (x, y);
                 self.pos = (x, y);
                 if let Some(heading) = heading_radians {
                     self.heading = heading;
                 }
                 // A snap mid-move settles the float from where it was; at
-                // rest it carries on.
+                // rest it carries on, and a parked float starts again when
+                // the snap moves the cursor.
                 let travelling = self
                     .trajectory
                     .as_ref()
@@ -1006,6 +1018,8 @@ impl RenderStateCore {
                 if travelling {
                     self.float_from = amplitude;
                     self.float_hold_secs = 0.0;
+                } else if moved {
+                    self.restart_parked_float();
                 }
                 // The navigate mark a move plays by itself is an opt-in
                 // action mark (`cursor.marks`).
@@ -1090,6 +1104,7 @@ impl RenderStateCore {
                 self.visible = v;
                 if reveal_badge {
                     self.reveal_session_badge();
+                    self.restart_parked_float();
                 }
                 true
             }
@@ -1163,6 +1178,9 @@ impl RenderStateCore {
                         self.cfg.theme_id = theme_id;
                         self.cfg.reduced_motion = reduced_motion;
                         self.visual.reduced_motion = reduced_motion;
+                        // A theme or motion change that brings the float
+                        // back starts it again rather than showing it parked.
+                        self.restart_parked_float();
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -3827,6 +3845,73 @@ mod plain_cursor_tests {
             .map(|id| crate::cursor_pose::halo_rgb(None, id))
             .collect();
         assert_eq!(colours.len(), 4);
+    }
+
+    /// #287 review: a parked resting cursor starts its bounded float again
+    /// when a snap moves it, when it is shown again and when its theme is
+    /// reselected, easing in from 0 like an arrival. A snap to the point it
+    /// already rests on leaves it parked, so repeated tracking snaps cost no
+    /// frames.
+    #[test]
+    fn a_parked_cursor_floats_again_after_a_snap_a_reshow_or_a_theme_reselect() {
+        fn parked() -> RenderStateCore {
+            let mut cursor = core(CursorOptions::DEFAULT);
+            // Resting motion runs only inside an idle-hide delay.
+            cursor.motion.idle_hide_ms = 20_000.0;
+            cursor.float_hold_secs = 3_600.0;
+            assert!(crate::cursor_pose::rest_parked(cursor.float_hold_secs));
+            assert!(!cursor.has_resting_motion(), "parked");
+            cursor
+        }
+        fn restarted(cursor: &RenderStateCore, why: &str) {
+            assert_eq!(
+                cursor.float_hold_secs, 0.0,
+                "{why}: the rest clock restarts"
+            );
+            assert_eq!(cursor.float_amplitude(), 0.0, "{why}: no jump");
+            assert!(cursor.has_resting_motion(), "{why}: it floats again");
+        }
+
+        let mut cursor = parked();
+        let (x, y) = cursor.pos;
+        cursor.apply_command_base(
+            OverlayCommand::SnapTo {
+                x,
+                y,
+                heading_radians: None,
+            },
+            false,
+            false,
+        );
+        assert!(!cursor.has_resting_motion(), "a snap in place stays parked");
+        cursor.apply_command_base(
+            OverlayCommand::SnapTo {
+                x: x + 40.0,
+                y,
+                heading_radians: None,
+            },
+            false,
+            false,
+        );
+        restarted(&cursor, "snap");
+
+        let mut cursor = parked();
+        cursor.apply_command_base(OverlayCommand::SetEnabled(true), false, false);
+        assert!(!cursor.has_resting_motion(), "already shown: stays parked");
+        cursor.apply_command_base(OverlayCommand::SetEnabled(false), false, false);
+        cursor.apply_command_base(OverlayCommand::SetEnabled(true), false, false);
+        restarted(&cursor, "reshow");
+
+        let mut cursor = parked();
+        cursor.apply_command_base(
+            OverlayCommand::SetTheme {
+                theme_id: crate::DEFAULT_THEME_ID.into(),
+                reduced_motion: crate::ReducedMotion::Off,
+            },
+            false,
+            false,
+        );
+        restarted(&cursor, "theme");
     }
 
     #[test]

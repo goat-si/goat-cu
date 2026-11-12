@@ -740,18 +740,48 @@ impl RenderEntry for RenderState {
     }
 
     /// The shared predicate (glide, spring, pulse, badge, resting motion,
-    /// idle fade) plus two macOS terms: the focus-rect fade, and the opaque
-    /// idle-hide countdown. The macOS loop parks on a blocking `recv` with no
-    /// deadline, so a reduced-motion cursor must keep frame ticks through the
-    /// countdown for its idle fade to start on time.
+    /// idle fade) plus the macOS focus-rect fade. The idle-hide countdown
+    /// needs no frames: the parked loop wakes at `idle_fade_wait` and charges
+    /// the parked time to the idle clock (#287).
     fn needs_frame_tick(&self) -> bool {
-        self.core.needs_frame_tick()
-            || self.focus_rect.is_some()
-            || (self.core.motion.idle_hide_ms > 0.0 && self.core.is_revealed())
+        self.core.needs_frame_tick() || self.focus_rect.is_some()
     }
 }
 
 // ── AppKit / CGImage plumbing ─────────────────────────────────────────────
+
+/// Session-badge hover polling cadence while the loop is otherwise parked.
+const HOVER_POLL_INTERVAL: Duration = Duration::from_millis(80);
+
+/// How the render loop waits before its next pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParkedWait {
+    /// Pixels can change on the next frame: run at frame cadence.
+    Frame,
+    /// Park until a command arrives or this much time passes.
+    Until(Duration),
+    /// Nothing changes on a timer: park until a command arrives.
+    Block,
+}
+
+/// #287: the wait before the next pass. A parked loop wakes for session-badge
+/// hover polling and for the earliest idle fade, so a resting cursor needs
+/// no frame ticks while its idle-hide countdown runs.
+fn parked_wait(
+    frame_tick_needed: bool,
+    hover_poll_needed: bool,
+    idle_fade_wait: Option<Duration>,
+) -> ParkedWait {
+    if frame_tick_needed {
+        return ParkedWait::Frame;
+    }
+    let hover = hover_poll_needed.then_some(HOVER_POLL_INTERVAL);
+    match (hover, idle_fade_wait) {
+        (Some(a), Some(b)) => ParkedWait::Until(a.min(b)),
+        (Some(wait), None) | (None, Some(wait)) => ParkedWait::Until(wait),
+        (None, None) => ParkedWait::Block,
+    }
+}
 
 unsafe fn run_appkit(_cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMsg>) {
     use objc2::runtime::AnyObject;
@@ -882,10 +912,10 @@ fn render_loop(
     _win_h: f64,
 ) {
     let target_frame_ms = Duration::from_millis(16); // ~60 fps while pixels can change
-    let hover_poll_ms = Duration::from_millis(80);
     let mut last_tick = Instant::now();
     let mut frame_tick_needed = false;
     let mut hover_poll_needed = false;
+    let mut idle_fade_wait: Option<Duration> = None;
     // Repin bookkeeping: track last pinned wid and a frame counter for
     // the periodic defensive-repin (every ~60 active frames ≈ 1 s).
     let mut last_pinned: Option<u64> = None;
@@ -901,34 +931,31 @@ fn render_loop(
     }));
 
     loop {
-        // When no cursor animation/fade is active, block until the MCP side
-        // sends a command. This is the idle-server fast path: no fullscreen
-        // pixmap allocation, no CGImage conversion, no 60fps wakeup.
-        let (first_msg, hover_poll_tick) = if frame_tick_needed {
-            (None, hover_poll_needed)
-        } else if hover_poll_needed {
-            match rx.recv_timeout(hover_poll_ms) {
-                Ok(msg) => (Some(msg), true),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (None, true),
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        } else {
-            match rx.recv() {
-                Ok(msg) => (Some(msg), false),
-                Err(_) => break,
-            }
-        };
+        // When no cursor animation/fade is active, park until the MCP side
+        // sends a command, a session-badge hover poll is due, or the earliest
+        // idle fade starts (#287). This is the idle-server fast path: no
+        // fullscreen pixmap allocation, no CGImage conversion, no 60fps wakeup.
+        let parked = !frame_tick_needed;
+        let (first_msg, hover_poll_tick) =
+            match parked_wait(frame_tick_needed, hover_poll_needed, idle_fade_wait) {
+                ParkedWait::Frame => (None, hover_poll_needed),
+                ParkedWait::Until(wait) => match rx.recv_timeout(wait) {
+                    Ok(msg) => (Some(msg), hover_poll_needed),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (None, hover_poll_needed),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                },
+                ParkedWait::Block => match rx.recv() {
+                    Ok(msg) => (Some(msg), false),
+                    Err(_) => break,
+                },
+            };
 
-        let woke_from_idle = first_msg.is_some();
         let now = Instant::now();
-        let dt = if woke_from_idle {
-            // The blocking recv() above can span an arbitrarily long idle period.
-            // Do not charge that time to the first animation tick after a command;
-            // let the wake-up frame render the newly-applied state at t=0.
-            0.0
-        } else {
-            now.duration_since(last_tick).as_secs_f64().min(0.05)
-        };
+        let elapsed_secs = now.duration_since(last_tick).as_secs_f64();
+        // A parked wait can span an arbitrarily long idle period. That time is
+        // charged to each cursor's idle clock before commands apply (below);
+        // the first animation tick after a command renders it at t=0.
+        let dt = if parked { 0.0 } else { elapsed_secs.min(0.05) };
         last_tick = now;
 
         // Refit before painting, so the frame after a display change (often
@@ -967,10 +994,20 @@ fn render_loop(
             hover_changed,
             next_frame_tick_needed,
             next_hover_poll_needed,
+            next_idle_fade_wait,
         ) = {
             let mut guard = RENDER.lock().unwrap();
             match guard.as_mut() {
                 Some(map) => {
+                    // #287: a parked wake first advances the existing state by
+                    // the parked time, so idle clocks run without frame ticks
+                    // and the idle fade starts on time. Nothing travels while
+                    // parked, so no arrival fires here.
+                    let mut arrived: Vec<CursorKey> = if parked {
+                        map.tick_all(elapsed_secs)
+                    } else {
+                        Vec::new()
+                    };
                     // Drain via get-or-create; track the last-touched key so we
                     // can read its pinned_wid after ticking.
                     let mut last_key: Option<CursorKey> = None;
@@ -991,9 +1028,8 @@ fn render_loop(
                     // or immediately after a command changed render state. The
                     // latter lets a just-created path/click/focus rect start on
                     // this frame without waiting for the next 16ms tick.
-                    let mut arrived: Vec<CursorKey> = Vec::new();
                     if frame_tick_needed || had_msg {
-                        arrived = map.tick_all(dt);
+                        arrived.extend(map.tick_all(dt));
                     }
                     let pointer = if hover_poll_tick
                         || map
@@ -1026,6 +1062,7 @@ fn render_loop(
                         .cursors
                         .values()
                         .any(|rs| rs.core.session_badge_needs_hover_poll());
+                    let next_idle_fade_wait = map.idle_fade_wait();
                     (
                         pinned,
                         raise_unpinned,
@@ -1034,6 +1071,7 @@ fn render_loop(
                         hover_changed,
                         next_frame_tick_needed,
                         next_hover_poll_needed,
+                        next_idle_fade_wait,
                     )
                 }
                 None => break,
@@ -1085,6 +1123,7 @@ fn render_loop(
 
         frame_tick_needed = next_frame_tick_needed;
         hover_poll_needed = next_hover_poll_needed;
+        idle_fade_wait = next_idle_fade_wait;
         if frame_tick_needed {
             // Sleep remainder of frame budget.
             let elapsed = Instant::now().duration_since(last_tick);
@@ -1877,9 +1916,12 @@ mod tests {
         let cursor = placed(&mut map, "sessA");
         cursor.core.visual.reduced_motion = cursor_overlay::ReducedMotion::On;
         cursor.core.motion.idle_hide_ms = 20_000.0;
-        // The macOS loop has no idle deadline, so the opaque countdown ticks.
+        // #287: the opaque countdown needs no frames; the parked loop wakes
+        // at the idle fade instead.
         assert!(!cursor.core.needs_frame_tick());
-        assert!(cursor.needs_frame_tick());
+        assert!(!cursor.needs_frame_tick());
+        assert!(map.idle_fade_wait().is_some());
+        let cursor = map.cursors.get_mut("sessA").unwrap();
 
         cursor.core.motion.idle_hide_ms = 0.0;
         assert!(!cursor.needs_frame_tick());
@@ -1901,6 +1943,65 @@ mod tests {
 
         cursor.core.idle_alpha = 0.0;
         assert!(!map.needs_frame_tick(), "a fully hidden cursor must park");
+    }
+
+    /// #287 review: on macOS too a resting default cursor parks after its
+    /// bounded float and requests no frames while the idle-hide countdown
+    /// runs; the parked loop wakes at the idle fade, and a wake that charges
+    /// the parked time starts the fade on time.
+    #[test]
+    fn a_parked_resting_cursor_needs_no_macos_frames_until_its_idle_fade() {
+        use cursor_overlay::cursor_pose::{FLOAT_EASE_IN_SECS, FLOAT_HOLD_SECS, FLOAT_REST_SECS};
+        let mut map = empty_map();
+        let cursor = placed(&mut map, "sessA");
+        cursor.core.motion.idle_hide_ms = 20_000.0;
+        cursor.core.options_override = Some(cursor_overlay::CursorOptions::default());
+        assert!(map.needs_frame_tick(), "it floats in its first seconds");
+
+        let window = FLOAT_HOLD_SECS + FLOAT_EASE_IN_SECS + FLOAT_REST_SECS + FLOAT_EASE_IN_SECS;
+        let mut t = 0.0;
+        while t < window + 0.5 {
+            map.tick_all(1.0 / 60.0);
+            t += 1.0 / 60.0;
+        }
+        assert!(
+            map.cursors["sessA"].core.is_revealed(),
+            "inside the idle delay"
+        );
+        assert!(!map.needs_frame_tick(), "a parked cursor costs no frames");
+
+        let wait = map.idle_fade_wait().expect("the idle fade is pending");
+        assert_eq!(
+            parked_wait(false, false, Some(wait)),
+            ParkedWait::Until(wait)
+        );
+        map.tick_all(wait.as_secs_f64() + 0.001);
+        assert!(map.cursors["sessA"].core.idle_fade_in_progress());
+        assert!(map.needs_frame_tick(), "the fade animates");
+    }
+
+    #[test]
+    fn the_parked_loop_wakes_for_hover_polls_and_the_earliest_idle_fade() {
+        let fade = Duration::from_secs(5);
+        let soon = Duration::from_millis(10);
+        assert_eq!(parked_wait(true, true, Some(fade)), ParkedWait::Frame);
+        assert_eq!(parked_wait(false, false, None), ParkedWait::Block);
+        assert_eq!(
+            parked_wait(false, true, None),
+            ParkedWait::Until(HOVER_POLL_INTERVAL)
+        );
+        assert_eq!(
+            parked_wait(false, true, Some(fade)),
+            ParkedWait::Until(HOVER_POLL_INTERVAL)
+        );
+        assert_eq!(
+            parked_wait(false, true, Some(soon)),
+            ParkedWait::Until(soon)
+        );
+        assert_eq!(
+            parked_wait(false, false, Some(fade)),
+            ParkedWait::Until(fade)
+        );
     }
 
     #[test]

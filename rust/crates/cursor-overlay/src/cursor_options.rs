@@ -383,7 +383,7 @@ pub fn config_schema_properties() -> Map<String, Value> {
         (
             FLOAT_KEY,
             &on_off[..],
-            "Agent cursor float: a slow four-second sway, bob and slight tilt, at rest and while moving, that eases to zero on every arrival and holds there for the click, drag, drop, scroll or typing, so they land exactly upright on the hotspot. on (default). off: the cursor never floats and a resting overlay stops redrawing. Applies immediately to every cursor.",
+            "Agent cursor float: a slow four-second sway, bob and slight tilt while moving and for two loops at rest, then the cursor parks upright until its next move or action. It eases to zero on every arrival and holds there for the click, drag, drop, scroll or typing, so they land exactly upright on the hotspot. on (default). off: the cursor never floats and a resting overlay stops redrawing. Applies immediately to every cursor.",
         ),
         (
             HALO_KEY,

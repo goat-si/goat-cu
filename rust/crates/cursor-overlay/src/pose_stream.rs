@@ -168,9 +168,10 @@ impl PoseTrack {
 
 impl PoseLook {
     /// JSON for the helper: `{"float": {"secs", "sway", "bob", "lift",
-    /// "tilt", "hold", "ease_in", "ease_out"} | null, "halo": {"rgb":
-    /// "#rrggbb", "radius": pt, "peak": a, "stops": [[o, k], ...], "body":
-    /// [x, y]} | null}`.
+    /// "tilt", "hold", "ease_in", "ease_out", "park"} | null, "halo":
+    /// {"rgb": "#rrggbb", "radius": pt, "peak": a, "stops": [[o, k], ...],
+    /// "body": [x, y]} | null}`. `park` is the rest time at which the float
+    /// eases out and parks; a helper that gets no `park` floats on.
     pub fn to_json(&self) -> String {
         let float = self.float.map(|f| {
             json!({
