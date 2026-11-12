@@ -34,11 +34,14 @@ Some macOS click paths refuse instead of guessing, by design. These show up as r
   AXCancel), right_click AXShowMenu, double_click AXOpen and scroll's native scroll-bar presses:
   such an error is reported as unverifiable and is never followed by a second press, a key chord, a
   pixel click or a wheel scroll. Only ActionUnsupported and NotImplemented (nothing was sent) move
-  on to the next route; APIDisabled is refused as not delivered (`action_unavailable`,
-  `dispatched: false`, typed not delivered so a run_steps step counts as sending nothing), with
-  nothing else sent. When the same call had already brought the window to the front (a foreground
-  double_click, or a scroll that fronted its window), the answer is a plain error instead: fronting
-  the window was input of its own.
+  on to the next route (a background double_click then refuses instead of falling back to pixels).
+  APIDisabled is refused as not delivered. For right_click AXShowMenu, a background double_click
+  AXOpen, press_key's semantic keys and scroll's native scroll-bar presses the refusal is
+  `action_unavailable`, `dispatched: false`, typed not delivered so a run_steps step counts as
+  sending nothing. press_key's menu-chord refusal is `background_unavailable` and stays untyped,
+  because menu validation may already have posted Cmd+F20 key events. When the same call had
+  already brought the window to the front (a foreground double_click, or a scroll that fronted its
+  window), the answer is a plain error instead: fronting the window was input of its own.
 - A right_click or double_click pixel route, including a fallback after AXShowMenu or AXOpen, posts
   only at the element's checked center: pointer admission for the exact window, a readable frame and
   window bounds, the center inside the window and on the element. A clipped, scrolled-out or
