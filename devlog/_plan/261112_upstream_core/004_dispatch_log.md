@@ -138,3 +138,7 @@ review of 895e6ad2 dispatched as `cu-final-wp1c-895e6ad2-s24` (codex / system24/
 2026-11-12: the pre-restart `cu-final-ci-wp1d-s24` also completed: PASS (bindings move pure, re-pin = FNV-1a of the moved file, serve.rs
 restores exactly what Windows calls, 133b2ef9 equals upstream with versions kept, vendored crate = 4cf88bae). Three P3/INFO accepted as
 recorded follow-ups (GTK3 stacking scope and budget fail-open, upstream/pre-existing; rust/VERSION lag); `-r2` duplicate cancelled.
+2026-11-12: the pre-restart `cu-wp1e-review-068c9a00-s24` completed: b5aa4734 PASS, 068c9a00 NEAR-PASS. P2 (batch foreground fallback
+would retry macOS invoke_menu) rebutted: a run_steps step tool must be in BATCHABLE_TOOLS (batch_tools.rs:2602-2621, :36-47), which
+lacks invoke_menu, and the click menu-bar reroute keeps `tool == "click"` (:1757-1772), so the gate never asks whether invoke_menu
+accepts delivery_mode. P3 (015 implied the upstream docs specs were taken) accepted, 015 corrected. `-r2` duplicate cancelled.

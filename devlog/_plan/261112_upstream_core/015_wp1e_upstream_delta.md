@@ -8,7 +8,7 @@ wp1d, 014); `gh api repos/trycua/cua/compare/4cf88bae...4f2aa028` lists 21 chang
 
 | Commit | Scope | Disposition |
 |---|---|---|
-| ac720702 | `invoke_menu` accepts optional `delivery_mode` (background\|foreground) in `InvokeMenuInput` with capability `input.delivery_mode`; Linux stops stripping it before parsing; manifest, Python/TS bindings, docs specs, protocol_schema_test | IN: port |
+| ac720702 | `invoke_menu` accepts optional `delivery_mode` (background\|foreground) in `InvokeMenuInput` with capability `input.delivery_mode`; Linux stops stripping it before parsing; manifest, Python/TS bindings, protocol_schema_test (upstream also regenerated `scripts/docs-generators/cli-specs/*.json` and the mdx reference page, which have no counterpart in this repository) | IN: port |
 | 377b0fee | hyprland-plugin requalify: `[omarchy]` listed first in the omarchy-edge channel (`requalify/channels.py`, `test_requalify.py`) | IN: port |
 | ee1f7f5f, 4f2aa028, 35a8de84 | cua-driver-rs 0.47.17 / 0.47.18 releases, published installer version | IN: CHANGELOG entries; GOAT keeps its versions (`rust/VERSION` 0.38.0-goat.1, workspace 0.40.1-goat.1), installer scripts and lock version lines stay GOAT's as in wp1b–wp1d |
 | 902a2507, 94b6fdd4 | cua-sdk 0.25.1 / 0.25.2: `libs/cua/Cargo.toml` workspace version 0.25.0 → 0.25.2 | IN (vendor): `vendor/cua/crates/cua-telemetry/Cargo.toml` writes out the workspace version; no `cua-telemetry` source, `targets.json` or `sandbox-images.json` change in the range. Refresh the version and `vendor/README.md`'s source commit |
