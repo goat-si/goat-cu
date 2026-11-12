@@ -23,8 +23,11 @@ arrow upright, then eases back in about half a second later. The tilt adds to
 the `cursor.rotate` heading. About ten seconds after the cursor settles the
 float eases out and the cursor parks upright, so the macOS, Windows, X11, and
 Wayland overlays stop rendering while it waits out its idle-hide delay; the
-next move, click, action cue, snap, re-show or theme change starts the float
-again. The cursor fades out after its idle-hide delay. Turn the float off with
+next move, click, action cue, snap, re-show, theme change or motion change
+starts the float again. On GNOME Shell, where the shell helper draws the
+cursor, a re-show or theme change does not reach the helper, so a parked float
+there starts again only with the next move. The cursor fades out after its
+idle-hide delay. Turn the float off with
 `cua-driver config set cursor.float off`; a resting cursor is then still as
 soon as activity settles. A cursor that parked while the float was off stays
 upright when it is turned back on, until its next move or action.

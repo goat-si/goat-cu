@@ -12,9 +12,10 @@
 //!   move or click used to start by itself, and the macOS focus rectangle
 //!   around a clicked element. Off: every theme paints its idle frame.
 //! - `cursor.float` (on by default): the float of the built-in theme, a slow
-//!   vertical bob at rest and a smaller lift while the cursor travels that
-//!   settles to exactly zero on arrival. The arrow stays upright. Off: the
-//!   cursor never floats, so a resting overlay stops redrawing.
+//!   sway, bob and slight tilt while the cursor travels and for two loops at
+//!   rest, after which it parks upright; it settles to exactly zero on
+//!   arrival. Off: the cursor never floats, so a resting overlay stops
+//!   redrawing.
 //! - `cursor.halo` (on by default): a soft glow in the cursor's accent colour
 //!   behind the arrow body. No click effect.
 //! - `cursor.rotate` (`heading` by default): `heading` points the tip along
@@ -383,7 +384,7 @@ pub fn config_schema_properties() -> Map<String, Value> {
         (
             FLOAT_KEY,
             &on_off[..],
-            "Agent cursor float: a slow four-second sway, bob and slight tilt while moving and for two loops at rest, then the cursor parks upright until its next move or action. It eases to zero on every arrival and holds there for the click, drag, drop, scroll or typing, so they land exactly upright on the hotspot. on (default). off: the cursor never floats and a resting overlay stops redrawing. Applies immediately to every cursor.",
+            "Agent cursor float: a slow four-second sway, bob and slight tilt while moving and for two loops at rest, then the cursor parks upright until its next move or action. It eases to zero on every arrival and holds there for the click, drag, drop, scroll or typing, so they land exactly upright on the hotspot. on (default). off: the cursor never floats and a resting overlay stops redrawing. Applies immediately to every cursor, except that one that parked while it was off stays upright until its next move or action.",
         ),
         (
             HALO_KEY,

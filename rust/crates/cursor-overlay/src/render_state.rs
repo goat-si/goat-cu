@@ -1110,11 +1110,15 @@ impl RenderStateCore {
             }
             OverlayCommand::SetMotion(m) => {
                 self.motion = m;
+                // A delay that makes resting motion possible again floats a
+                // cursor that parked meanwhile (#287 review).
+                self.restart_parked_float();
                 true
             }
             OverlayCommand::ApplyMotion(args) => {
                 if let Ok(motion) = self.motion.with_motion_args(&args) {
                     self.motion = motion;
+                    self.restart_parked_float();
                 }
                 true
             }
@@ -3912,6 +3916,25 @@ mod plain_cursor_tests {
             false,
         );
         restarted(&cursor, "theme");
+
+        // A motion change that makes resting motion possible again (an
+        // idle-hide delay after none) restarts a float that parked meanwhile.
+        let mut cursor = parked();
+        cursor.motion.idle_hide_ms = 0.0;
+        assert!(!cursor.has_resting_motion(), "no idle-hide delay");
+        let mut motion = cursor.motion.clone();
+        motion.idle_hide_ms = 20_000.0;
+        cursor.apply_command_base(OverlayCommand::SetMotion(motion), false, false);
+        restarted(&cursor, "set motion");
+        let mut cursor = parked();
+        cursor.motion.idle_hide_ms = 0.0;
+        cursor.apply_command_base(
+            OverlayCommand::ApplyMotion(serde_json::json!({"idle_hide_ms": 20_000.0})),
+            false,
+            false,
+        );
+        assert_eq!(cursor.motion.idle_hide_ms, 20_000.0, "applied");
+        restarted(&cursor, "apply motion");
     }
 
     #[test]

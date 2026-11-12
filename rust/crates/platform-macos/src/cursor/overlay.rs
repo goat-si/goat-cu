@@ -752,6 +752,9 @@ impl RenderEntry for RenderState {
 
 /// Session-badge hover polling cadence while the loop is otherwise parked.
 const HOVER_POLL_INTERVAL: Duration = Duration::from_millis(80);
+/// How often a parked loop reasserts a pinned cursor's z-order, as the active
+/// render loop does every ~60 frames.
+const PARKED_REPIN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How the render loop waits before its next pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -765,22 +768,33 @@ enum ParkedWait {
 }
 
 /// #287: the wait before the next pass. A parked loop wakes for session-badge
-/// hover polling and for the earliest idle fade, so a resting cursor needs
-/// no frame ticks while its idle-hide countdown runs.
+/// hover polling, for the earliest idle fade and, while a revealed cursor is
+/// pinned, for the defensive repin, so a resting cursor needs no frame ticks
+/// while its idle-hide countdown runs.
 fn parked_wait(
     frame_tick_needed: bool,
     hover_poll_needed: bool,
     idle_fade_wait: Option<Duration>,
+    repin_pinned: bool,
 ) -> ParkedWait {
     if frame_tick_needed {
         return ParkedWait::Frame;
     }
-    let hover = hover_poll_needed.then_some(HOVER_POLL_INTERVAL);
-    match (hover, idle_fade_wait) {
-        (Some(a), Some(b)) => ParkedWait::Until(a.min(b)),
-        (Some(wait), None) | (None, Some(wait)) => ParkedWait::Until(wait),
-        (None, None) => ParkedWait::Block,
-    }
+    [
+        hover_poll_needed.then_some(HOVER_POLL_INTERVAL),
+        idle_fade_wait,
+        repin_pinned.then_some(PARKED_REPIN_INTERVAL),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .map_or(ParkedWait::Block, ParkedWait::Until)
+}
+
+/// Whether a parked pass reasserts the pinned cursor's z-order: at most once
+/// per [`PARKED_REPIN_INTERVAL`], and only while a revealed cursor is pinned.
+fn parked_repin_due(parked: bool, repin_pinned: bool, since_last_repin: Duration) -> bool {
+    parked && repin_pinned && since_last_repin >= PARKED_REPIN_INTERVAL
 }
 
 unsafe fn run_appkit(_cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMsg>) {
@@ -920,6 +934,10 @@ fn render_loop(
     // the periodic defensive-repin (every ~60 active frames ≈ 1 s).
     let mut last_pinned: Option<u64> = None;
     let mut repin_frames: u32 = 0;
+    // Whether a revealed cursor is pinned, and when the z-order was last
+    // reasserted, so a parked loop keeps repinning it (#287 review).
+    let mut repin_pinned = false;
+    let mut last_repin = Instant::now();
     // The window and pixmap cover the main display as it was when AppKit
     // started. Follow later reconfigurations (resolution switch, VM display
     // resize) so cursor points keep landing where the pointer is.
@@ -936,19 +954,23 @@ fn render_loop(
         // idle fade starts (#287). This is the idle-server fast path: no
         // fullscreen pixmap allocation, no CGImage conversion, no 60fps wakeup.
         let parked = !frame_tick_needed;
-        let (first_msg, hover_poll_tick) =
-            match parked_wait(frame_tick_needed, hover_poll_needed, idle_fade_wait) {
-                ParkedWait::Frame => (None, hover_poll_needed),
-                ParkedWait::Until(wait) => match rx.recv_timeout(wait) {
-                    Ok(msg) => (Some(msg), hover_poll_needed),
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (None, hover_poll_needed),
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                },
-                ParkedWait::Block => match rx.recv() {
-                    Ok(msg) => (Some(msg), false),
-                    Err(_) => break,
-                },
-            };
+        let (first_msg, hover_poll_tick) = match parked_wait(
+            frame_tick_needed,
+            hover_poll_needed,
+            idle_fade_wait,
+            repin_pinned,
+        ) {
+            ParkedWait::Frame => (None, hover_poll_needed),
+            ParkedWait::Until(wait) => match rx.recv_timeout(wait) {
+                Ok(msg) => (Some(msg), hover_poll_needed),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (None, hover_poll_needed),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+            ParkedWait::Block => match rx.recv() {
+                Ok(msg) => (Some(msg), false),
+                Err(_) => break,
+            },
+        };
 
         let now = Instant::now();
         let elapsed_secs = now.duration_since(last_tick).as_secs_f64();
@@ -957,6 +979,7 @@ fn render_loop(
         // the first animation tick after a command renders it at t=0.
         let dt = if parked { 0.0 } else { elapsed_secs.min(0.05) };
         last_tick = now;
+        let parked_repin = parked_repin_due(parked, repin_pinned, now.duration_since(last_repin));
 
         // Refit before painting, so the frame after a display change (often
         // the first one after an idle wake) is already drawn at the pointer.
@@ -995,6 +1018,7 @@ fn render_loop(
             next_frame_tick_needed,
             next_hover_poll_needed,
             next_idle_fade_wait,
+            next_repin_pinned,
         ) = {
             let mut guard = RENDER.lock().unwrap();
             match guard.as_mut() {
@@ -1063,6 +1087,10 @@ fn render_loop(
                         .values()
                         .any(|rs| rs.core.session_badge_needs_hover_poll());
                     let next_idle_fade_wait = map.idle_fade_wait();
+                    let next_repin_pinned = pinned.is_some()
+                        && map.cursors.values().any(|rs| {
+                            rs.core.pinned_wid == pinned && cursor_is_externally_visible(rs)
+                        });
                     (
                         pinned,
                         raise_unpinned,
@@ -1072,6 +1100,7 @@ fn render_loop(
                         next_frame_tick_needed,
                         next_hover_poll_needed,
                         next_idle_fade_wait,
+                        next_repin_pinned,
                     )
                 }
                 None => break,
@@ -1084,15 +1113,16 @@ fn render_loop(
         }
 
         // Repin: immediately on target change, then defensive every ~1 s while
-        // the render loop is active. When quiescent, z-order is left unchanged
-        // until the next command wakes the loop.
-        if frame_tick_needed || had_msg {
+        // the render loop is active or a parked loop shows a pinned cursor.
+        // Otherwise z-order is left unchanged until the next command.
+        if frame_tick_needed || had_msg || parked_repin {
             repin_frames += 1;
             let pin_changed = pinned_wid != last_pinned;
             last_pinned = pinned_wid;
-            if pinned_wid.is_some() && (pin_changed || repin_frames >= 60) {
+            if pinned_wid.is_some() && (pin_changed || repin_frames >= 60 || parked_repin) {
                 MacZOrderEnforcer { win_ptr }.reassert(pinned_wid);
                 repin_frames = 0;
+                last_repin = now;
             } else if raise_unpinned {
                 // A direct move_cursor has no target window to pin against.
                 // Raise the normal-level, click-through overlay without
@@ -1124,6 +1154,7 @@ fn render_loop(
         frame_tick_needed = next_frame_tick_needed;
         hover_poll_needed = next_hover_poll_needed;
         idle_fade_wait = next_idle_fade_wait;
+        repin_pinned = next_repin_pinned;
         if frame_tick_needed {
             // Sleep remainder of frame budget.
             let elapsed = Instant::now().duration_since(last_tick);
@@ -1911,7 +1942,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_rect_and_reduced_motion_countdown_keep_macos_frames() {
+    fn a_focus_rect_keeps_macos_frames_but_a_reduced_motion_countdown_does_not() {
         let mut map = empty_map();
         let cursor = placed(&mut map, "sessA");
         cursor.core.visual.reduced_motion = cursor_overlay::ReducedMotion::On;
@@ -1972,7 +2003,7 @@ mod tests {
 
         let wait = map.idle_fade_wait().expect("the idle fade is pending");
         assert_eq!(
-            parked_wait(false, false, Some(wait)),
+            parked_wait(false, false, Some(wait), false),
             ParkedWait::Until(wait)
         );
         map.tick_all(wait.as_secs_f64() + 0.001);
@@ -1984,24 +2015,52 @@ mod tests {
     fn the_parked_loop_wakes_for_hover_polls_and_the_earliest_idle_fade() {
         let fade = Duration::from_secs(5);
         let soon = Duration::from_millis(10);
-        assert_eq!(parked_wait(true, true, Some(fade)), ParkedWait::Frame);
-        assert_eq!(parked_wait(false, false, None), ParkedWait::Block);
         assert_eq!(
-            parked_wait(false, true, None),
+            parked_wait(true, true, Some(fade), false),
+            ParkedWait::Frame
+        );
+        assert_eq!(parked_wait(false, false, None, false), ParkedWait::Block);
+        assert_eq!(
+            parked_wait(false, true, None, false),
             ParkedWait::Until(HOVER_POLL_INTERVAL)
         );
         assert_eq!(
-            parked_wait(false, true, Some(fade)),
+            parked_wait(false, true, Some(fade), false),
             ParkedWait::Until(HOVER_POLL_INTERVAL)
         );
         assert_eq!(
-            parked_wait(false, true, Some(soon)),
+            parked_wait(false, true, Some(soon), false),
             ParkedWait::Until(soon)
         );
         assert_eq!(
-            parked_wait(false, false, Some(fade)),
+            parked_wait(false, false, Some(fade), false),
             ParkedWait::Until(fade)
         );
+    }
+
+    /// A parked loop still wakes about once a second while a revealed cursor
+    /// is pinned, so the defensive repin keeps it above its target window
+    /// after the resting float parks (#287 review).
+    #[test]
+    fn a_parked_pinned_cursor_wakes_to_repin_its_window() {
+        let fade = Duration::from_secs(5);
+        assert_eq!(
+            parked_wait(false, false, None, true),
+            ParkedWait::Until(PARKED_REPIN_INTERVAL)
+        );
+        assert_eq!(
+            parked_wait(false, false, Some(fade), true),
+            ParkedWait::Until(PARKED_REPIN_INTERVAL)
+        );
+        assert_eq!(
+            parked_wait(false, true, Some(fade), true),
+            ParkedWait::Until(HOVER_POLL_INTERVAL)
+        );
+        assert_eq!(parked_wait(true, false, None, true), ParkedWait::Frame);
+        assert!(parked_repin_due(true, true, PARKED_REPIN_INTERVAL));
+        assert!(!parked_repin_due(true, true, Duration::from_millis(500)));
+        assert!(!parked_repin_due(false, true, Duration::from_secs(2)));
+        assert!(!parked_repin_due(true, false, Duration::from_secs(2)));
     }
 
     #[test]
