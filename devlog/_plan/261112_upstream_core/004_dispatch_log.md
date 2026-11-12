@@ -239,3 +239,11 @@ cut the condition, test band, em dash, non-web wording) → 491904b1; round 3 di
 2026-11-12: round 3 (`cu-final-review-491904b1-r3-s24`) PASS at 491904b1: the condition sits in the mark at offset 0 of every untrusted
 line; 3 612 composed combinations, none without it; three informational notes recorded. `cu-review-wp1m-99de9504-s24` (steered)
 NEAR-PASS: M1 `select_text`/`menu_bar_extras` carve-out → named in the contract doc and a 050 follow-up; L1, L2 fixed in 019e.
+2026-11-12: PR #300 CI failure at 27f04c31 (window_state_view shared store) → abc581b7. Per the user, DeepSeek final reviews were replaced by
+Grok 4.7 (`cu-review-wp1m-grok-27f04c31-s24`, `cu-final-review-grok-27f04c31-s24`), both failed at once (402, Grok usage balance
+exhausted); later reviews on morph/morph-dsv41flash-1017 (high), selections verified. `cu-review-wp1m-morph-34f79cb5-s24` PASS (L1 carve-out
+wording → 902b6e30, L2 → 050 follow-up). `cu-final-review-morph-34f79cb5-s24` NEAR-PASS: M1 two window_state_view tests stored the same
+snapshot id → 0e2064fe (red both directions "other_window"); L1 negative-only text guards and L2 Safari/Firefox sent to the Chromium-only
+typed tools → 0e2064fe (red with old texts and scratch rewordings); L3 upstream design docs → follow-up. `cu-review-wp1p-902b6e30-s24`
+NEAR-PASS: L3 019h release-state note fixed; L1 (`bring_to_front`, `clipboard_write`) rebutted with the contract doc's window-activation
+line. Fresh final review `cu-final-review-morph-0e2064fe-s24` dispatched for 0e2064fe and the records.

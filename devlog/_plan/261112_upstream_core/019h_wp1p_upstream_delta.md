@@ -5,7 +5,7 @@ touches `libs/cua-driver`. Merge `/tmp/goat-cu-sync/wp1p-merge.sh` (base 2fc7f3c
 
 | Commit | Scope | Disposition |
 |---|---|---|
-| d2b06459 (#7520) | published installer version 0.47.23: `scripts/_install-rust.sh:690`, `scripts/install.ps1:166`, `.github/release-state/cua-driver-rs-published-version` | IN: both installers merged clean, only the pin line moves (0.47.22 → 0.47.23); each still differs from 2319d456 only by GOAT's `mcp-config --client <name>` hint line |
+| d2b06459 (#7520) | published installer version 0.47.23: `scripts/_install-rust.sh:690`, `scripts/install.ps1:166`, `.github/release-state/cua-driver-rs-published-version` | IN: both installers merged clean, only the pin line moves (0.47.22 → 0.47.23); each still differs from 2319d456 only by GOAT's `mcp-config --client <name>` hint line. The release-state file is outside `libs/cua-driver` and not carried (GOAT's `.github/` holds only `workflows/goat-ci.yml`) |
 | 4a9ee679, 2aab2f60, 0266f05d, 2319d456 | Cua Spaces SDK, bundle and test fixes | OUT (no `libs/cua-driver` file) |
 
 `cua-driver-rs-v0.47.23` is released (2026-11-12T20:25Z, 58 assets, prerelease-flagged like 0.47.18-0.47.22), and upstream's published-version

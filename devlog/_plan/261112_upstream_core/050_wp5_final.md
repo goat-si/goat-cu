@@ -105,6 +105,8 @@
 | 34f79cb5 | wp1o | sync fd4505cf → 2fc7f3c7 (019g): release 0.47.24 CHANGELOG entry; GOAT versions kept |
 | 52f2b794 | wp1p | sync 2fc7f3c7 → 2319d456 (019h): installer pin 0.47.23 (upstream's published version) |
 | 902b6e30 | wp1m review | the carve-out sentence names only the two tools' acting results (discovery and refusal payloads carry no `verified`); the capability-derived test gap recorded as a follow-up |
+| 0e2064fe | final review of 34f79cb5 | two `window_state_view` tests no longer store the same snapshot id (`s0000ab01`/`s0000ab02`, one entry per id in the shared store); macOS `type_text` names the typed browser tools for Chromium and the px form for Safari, Firefox and embedded web views; stronger page-tool guards in the `type_text` and `set_value` tests |
+| a0bc8020 | docs | CI fix abc581b7, wp1o and wp1p in this record; re-fetch 21:40 UTC |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -237,6 +239,18 @@ the local head.
 - wp1m morph review (34f79cb5): `every_native_input_tool_publishes_the_action_result` is capability-derived, so a future native-input tool
   that advertises no capability and is not an action-result tool passes unseen. Smallest fix: a GOAT test with a per-platform expected
   set of native-input tool names, `select_text` and `menu_bar_extras` listed as the current exceptions.
+  The wp1p review (902b6e30) asked to name `bring_to_front` and `clipboard_write` there too: rebutted, since the contract doc's own
+  (upstream) text lists window activation among the mutating tools that keep their own typed results (`docs/action-result-contract.md:56-57`),
+  which is `bring_to_front` (it advertises `window.activate`, `tool.rs:1041`), and `clipboard_write` changes the clipboard, not desktop
+  input. The expected set in the fix should still list both as outside the rule.
+- Final review of 34f79cb5: macOS `type_text`'s escalation tag stays `page` for every non-Electron web area
+  (`web_readback_next_rung`, `type_text.rs:1204`), which `action_record` maps to binding a browser page route; Safari and Firefox have
+  none. 0e2064fe makes the description, next step and reason name the px form for them; telling the browsers apart in the tag needs the
+  bundle id in `web_readback_next_rung`. And upstream's design records still describe `page` as an acting rung
+  (`docs/browser-tool-implementation-plan.md:47`, `:49`; `docs/test-matrix.md:251` "Page selector/JavaScript"); both files are
+  byte-identical to upstream 2319d456, so they are left for upstream.
+- `platform-macos/src/tools/set_value.rs` is not rustfmt-clean (on origin/main too; e0851769 adds one more hunk at `:131`), so the
+  wp7 receipt checks rustfmt only on the files it changed that were clean.
 - Final review rounds 2-3 (informational): an embedded web view after pixel focus reads "do not repeat it" next to the mark's "type
   again only if the text is missing" (the px rung is terminal); the non-web branch says "read the field" where the field could not be
   read; with a field title over ~27 characters the browser-tab step's px clause falls past run_steps' 300-character cut (the read and
@@ -378,3 +392,8 @@ After wp1h: wp1i 190a160e NEAR-PASS → 7cab649b; wp1j c8a91fc0 PASS; wp1k bc02a
 of 7cab649b NEAR-PASS → 1f1d4edd (af4e914b PASS), round 2 PASS (also wp1n 5e172dbe) with lows → 491904b1, round 3 PASS at 491904b1;
 wp1m 99de9504 NEAR-PASS, its findings documentation only → 03af2302. Every code commit's final form has a PASS or a reviewed fix; the
 commits after 491904b1 change docs and devlog only. Docs-only commits are not reviewed separately.
+After PR #300's CI failure at 27f04c31 and the user's model changes (DeepSeek final reviews replaced by Grok 4.7, whose two tasks failed at
+once with "usage balance exhausted"; then morph/morph-dsv41flash-1017, high): wp1m morph review at 34f79cb5 PASS (two lows → 902b6e30 and a
+follow-up); fresh final review at 34f79cb5 (7cab649b through abc581b7 and wp1o) NEAR-PASS: M1 the `s0000ab01` snapshot-id collision and
+L1/L2 → 0e2064fe, L3 → follow-up; wp1p review at 902b6e30 (52f2b794, 902b6e30) NEAR-PASS: L3 → 019h, L1 rebutted (follow-ups). A fresh
+final review of 0e2064fe and the records closes the lane.
