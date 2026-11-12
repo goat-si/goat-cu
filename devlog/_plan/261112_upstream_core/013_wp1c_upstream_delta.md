@@ -69,3 +69,17 @@ insert the line twice. \`submit_return_report\` reports it as the inserted line 
 
 NOT RUN: live Safari/AppKit submit (no GOAT-owned fixture with a single-line field was driven); the GTK3 e2e harness.
 
+
+## wp1c close-out on HEAD d5e23ca6
+
+19fcc334 synced e51f5740 → 465aab0b; the wp1c review (NEAR-PASS) led to 1ec667ea. wp1d (014, 133b2ef9: 465aab0b → 4cf88bae) followed in
+the same chain. Paths under `rust/crates/platform-macos/src/tools/type_text.rs`, line numbers at d5e23ca6:
+
+| Item | State | Code / test |
+|---|---|---|
+| Single-line submit (upstream 33102290) on GOAT's AX rung | ported: body as one AX insert, Return only after a proven insert and confirmed focus | `:1603` `single_line_submit_body`, `:1669` `submit_step` |
+| A line that landed without its Return | `TypeTextDelivery::LineWithoutReturn`: unverified, not an error, says to press Return with press_key instead of repeating type_text | `:1207`, `:1657`, gate `:730` `completed_text_result`; test `:4744` `a_line_without_its_return_is_not_a_retryable_partial` (red first) |
+| Return gating and disclosure | Return only after `Complete` (bound target) and confirmed focus; focus written only when needed and disclosed | test `:4644` `a_submit_presses_return_only_after_a_proven_insert_and_confirmed_focus` |
+
+Review state: final round of 1ec667ea is `cu-final-wp1c-1ec667ea-s24` and of 133b2ef9 is `cu-final-ci-wp1d-s24` (both dispatched after the
+whole-branch final review failed; 004). NOT RUN: live Safari/AppKit submit; the GTK3 e2e harness (needs a Linux desktop).

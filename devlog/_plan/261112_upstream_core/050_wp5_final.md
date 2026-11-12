@@ -71,6 +71,13 @@ and wp1e.
   wall-clock deadlines and reads process-global tail state.
 - macOS `type_text` single-line submit: the focus write before Return is disclosed in the answer but not added to the mutation chain
   (wp1c review P3, accepted in part).
+- Flake observed once: one `cua-driver-core --lib browser` test failed (328 passed, 1 failed) in the first wp1b close-out receipt on
+  d5e23ca6; that receipt kept only summary lines, so the test is unnamed. Six standalone reruns and three reruns beside a concurrent
+  `platform-macos --lib` passed 329/0. Candidates are the wall-clock asserts in `browser/cdp_ws.rs:1576`, `:1602` (500 ms) and
+  `browser/v2_tests.rs:4186`, `:4387`, `:4461`. Receipts now keep a full log per step (`/tmp/goat-cu-sync/receipt-lib.zsh`).
+- Receipt helper fix: the wp2–wp4 and first wp1b close-out scripts printed each step's own exit correctly but gated on the status of the
+  `echo`, so a failing step did not stop them. wp2–wp4 printed exit 0 and `ok` for every step, so their results stand; the first wp1b
+  receipt is superseded by its re-run with the fixed helper (failures=0).
 - #299 (Linux, pre-existing): other blocking reads still run on the async runtime — `list_windows` `retain_listed`
 - Linux `invoke_menu` (pre-existing at origin/main): a sent AT-SPI `do_action` that returns a D-Bus error is reported as the
   `menu_path_unavailable` refusal (tools/invoke_menu.rs:38-43, atspi/native.rs `doAction failed`); it may have acted, so it should read

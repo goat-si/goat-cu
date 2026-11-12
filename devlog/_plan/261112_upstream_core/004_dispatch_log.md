@@ -121,3 +121,9 @@ right/double-click refusals, press_key AXConfirm/AXCancel classification) → 0f
 then platform-macos --lib 2026 passed / 48 ignored and clippy -D warnings exit 0.
 2026-11-12: goat-ci on PR #300 at b54560e5: Linux `mutter_display` descriptor-count test failed 81 vs 79 (parallel tests' descriptors
 in a process-wide count) → test runs alone in a child test process (050 "CI after the receipt"). Left local for the coordinator to push.
+2026-11-12: `cu-delta-review-019c3858-s24` dispatched (0f0d4b70 + 019c3858), codex / system24/deepseek-v4.1-flash / reasoningEffort=high.
+2026-11-12 08:38 UTC: `cu-final-review-12e47ec6-s24` FAILED (actual return: "Error running remote compact task: Provider error 400 ...
+Invalid 'input[124].name': string does not match pattern"), the third long review lost to compaction; no report. Stalled
+`cu-wp3-287-review-r2-s24-261112` (no activity since the 04:28 restart) cancelled. Replaced by three narrow fresh final-round reviews of
+the commits without a review of their final form: `cu-final-287-e354f982-s24`, `cu-final-wp1c-1ec667ea-s24`, `cu-final-ci-wp1d-s24`
+(d0e90760, 2a726372, 133b2ef9); all returned codex / system24/deepseek-v4.1-flash / reasoningEffort=high.
