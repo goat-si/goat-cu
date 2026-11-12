@@ -836,7 +836,7 @@ fn type_text_outcome_result(
         // message capped at 300 characters keeps them; the Return advice
         // matches LINE_WITHOUT_RETURN_HINT.
         (
-            "📨 Inserted the line, Return not pressed — do not repeat type_text, which would insert \
+            "📨 Inserted the line, Return not confirmed — do not repeat type_text, which would insert \
              it again; to submit, read the field first: if it still holds the line unsubmitted and \
              has focus, press Return with press_key. Inserted",
             String::new(),
@@ -4804,6 +4804,9 @@ mod tests {
         let read_first = text.find("read the field first").expect(&text);
         assert!(read_first < count, "{text}");
         assert!(!text.contains("check that the field has focus"), "{text}");
+        // A failed Return post may have gone out, so the message never says
+        // the Return was not pressed (final review before merge).
+        assert!(!text.contains("Return not pressed"), "{text}");
         // The dispatch seam's recovery hint must not frame a re-type either.
         let mut annotated = completed_text_result(outcome(), true, 12, false, false, "");
         cua_driver_core::recovery_hint::annotate(

@@ -2486,9 +2486,17 @@ pub(super) mod local_eis {
         install().local.control(control);
     }
 
-    /// How many events the server has logged since `record` cleared the log.
-    pub(in crate::wayland::libei) fn logged() -> usize {
-        install().local.log.lock().unwrap().len()
+    /// How many text parts the server has logged since `record` cleared the log. Only
+    /// `Emitted::Text` counts: a keyboard probe's Shift tap is not part of any text.
+    pub(in crate::wayland::libei) fn logged_text_parts() -> usize {
+        install()
+            .local
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event, Emitted::Text(_)))
+            .count()
     }
 
     /// Run `f` against a local EIS server and return what the server received
@@ -2900,7 +2908,7 @@ mod tests {
 
 #[cfg(test)]
 mod typing_route_tests {
-    use super::local_eis::{control, logged, record, Control, Emitted, LocalEis};
+    use super::local_eis::{control, logged_text_parts, record, Control, Emitted, LocalEis};
     use super::*;
 
     const RIGHT_ALT: u32 = 100;
@@ -3207,12 +3215,12 @@ mod typing_route_tests {
                     send("🙂\n🙂\n🙂\n🙂\n🙂\n🙂", false)
                 }
             });
-            // GOAT: end the call once its first part reached the server, so the text is cut
+            // GOAT: end the call once its first text part reached the server, so the text is cut
             // mid-way however the threads are scheduled. A fixed settle let the call end before a
             // loaded typing thread had sent anything; the bound only catches a typing thread
             // that never sends.
             let deadline = Instant::now() + Duration::from_secs(10);
-            while logged() == 0 {
+            while logged_text_parts() == 0 {
                 assert!(Instant::now() < deadline, "the typing thread sent nothing");
                 thread::sleep(Duration::from_millis(1));
             }
