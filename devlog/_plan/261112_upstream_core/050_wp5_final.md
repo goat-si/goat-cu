@@ -80,3 +80,13 @@ after `465aab0b` → unit wp1d (014).
 | #281 | FIXED (#281.2 message, #281.3 dispatcher name + site log); #281.1 documented (GOAT.md) | 030 wp3 B/C; failing-first `a_selection_target_that_is_not_settable_says_so` |
 | #279 | FIXED (#279.1 focus retry; #279.2 one meaning for perform errors in click, press_key, right_click, double_click, element_pointer AXOpen — legacy helper deleted, 98632052) | 030 wp3 B/C; failing-first `a_transient_focus_write_error_keeps_polling_until_the_deadline`, `perform_error_after_dispatch_is_unverifiable_unless_nothing_was_sent`, 98632052's 8 red tests |
 | #272 | FIXED for the clipping cases (1, 5) in the macOS adapter (semantic visibility = window state + own frame); case 3 (sheet/popover/menu whose AXWindow differs) still refused by the exact binding — follow-up | 040 wp4 (corrected after the wp3/wp4 review); failing-first `semantic_press_ignores_ancestor_clipping`; live smoke on third-party apps NOT RUN |
+
+### Final receipt (kache doctor exit 0), /tmp/goat-cu-sync/receipt-final.sh on 9bd0e96c
+
+All 24 steps exit 0 (failures=0): check-host; core-lib 1825 passed / 3 ignored; core-int 93; contract-lib 91; overlay-lib 157; macos-lib
+2023 passed / 48 ignored; windows-host 207; linux-host 110; linux-target and windows-target type checks; clippy-macos (-D warnings);
+clippy-linux (-D warnings, cross target); windows-bins and linux-bins (cua-driver, cursor-theme-cli, cua-driver-uia, cua-driver-sdk,
+portal-input); cargo deny; build-driver; e2e-check; check_protocol.py (protocol-compatible in every GOAT launch form; daemon 0.8.0 =
+0.8.0; descriptions reworded for get_guide, set_config, type_text, not protocol); proto_delta problems 0; output delta adds only
+process_instance on get_window_state, list_apps.apps[], list_windows.windows[], removes nothing; JS helper syntax, helper paint and
+helper safety harnesses. Logs: /tmp/goat-cu-sync/receipt-final/.
