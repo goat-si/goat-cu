@@ -64,11 +64,19 @@ impl RetainedElement {
     }
 
     /// The element's live `IsEnabled`. `None` for an MSAA element or when UIA
-    /// cannot read it.
+    /// cannot read it. GOAT: `refuse_if_disabled` calls this on a blocking-pool
+    /// thread, which may never have joined COM; without this the read fails
+    /// with `CO_E_NOTINITIALIZED` and a disabled control is acted on.
     pub fn element_is_enabled(&self) -> Option<bool> {
         if !self.is_uia() || self.ptr == 0 {
             return None;
         }
+        let _ = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            )
+        };
         let element = std::mem::ManuallyDrop::new(unsafe {
             IUIAutomationElement::from_raw(self.ptr as *mut _)
         });
