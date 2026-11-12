@@ -128,6 +128,9 @@ release (CHANGELOG and version files only) → unit wp1l (019d), task wp6/t8.
 Re-fetch after 35755746 (~19:55 UTC): trycua/cua main `01596ffc` (#7507, protocol_schema_test and the contract doc) → unit wp1m (019e), task wp6/t9.
 Re-fetch after 1f1d4edd (~20:15 UTC): trycua/cua main `fd4505cf` (#7509, published installer 0.47.22) → unit wp1n (019f), task wp6/t10.
 origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged at each.
+Last re-fetch before the final D (2026-11-12 20:30 UTC, after the receipt at 03af2302): trycua/cua main `fd4505cf` (no commit after wp1n),
+origin/main `40c6f6eb`, agent-desktop `54855b62` — no new in-scope delta. The remote lane branch reads `99de9504` (pushed by the
+coordinator), an ancestor of the local head.
 
 ### Follow-ups recorded, not done in this lane
 
@@ -240,6 +243,12 @@ origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged at each.
 
 ### Final receipt (kache doctor exit 0), /tmp/goat-cu-sync/receipt-final.sh on eb04e2a0 (earlier run on 9bd0e96c also 24/24)
 
+Issue evidence at the final code head 03af2302 (failing-first tests, run by every whole-head receipt): #299
+`platform-macos/src/process_identity.rs:366`, `:421`, `:469`, `platform-linux/src/process_instances.rs:78`,
+`platform-windows/src/process_instance.rs:348`; #288 `cua-driver-core/src/fast_path/store.rs:334`; #286
+`platform-macos/src/tools/click.rs:5647`; #281 `click.rs:5586`; #279 `hotkey.rs:897`, `click.rs:8003`, `tools/mod.rs:2955`; #272
+`tools/actionability.rs:1022`; #287 `platform-macos/src/cursor/overlay.rs:1984`, `cursor-overlay/src/render_state.rs:3765`.
+
 All 24 steps exit 0 (failures=0): check-host; core-lib 1825 passed / 3 ignored; core-int 93; contract-lib 91; overlay-lib 157; macos-lib
 2031 passed / 48 ignored; windows-host 207; linux-host 110; linux-target and windows-target type checks; clippy-macos (-D warnings);
 clippy-linux (-D warnings, cross target); windows-bins and linux-bins (cua-driver, cursor-theme-cli, cua-driver-uia, cua-driver-sdk,
@@ -322,6 +331,7 @@ and a `deprecated` entry only). `contract/manifest.json` and both UniFFI binding
 | whole head | 1f1d4edd | `TMPDIR=/private/tmp`: the same 24 steps, failures=0: core-lib 1828 / 3, core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 200, linux-host 110, target checks, clippy macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol compatible, protocol delta problems 0, output delta adds only `process_instance`, helper tests |
 | wp1n | 5e172dbe | `bash -n`, connect-step 15, install version fallback 40 / 7 skipped (upstream layout) |
 | final review round 2 fix | 491904b1 | the sweep over detail lengths 0-300 red at type_text.rs:5118, then tools::type_text 63 / 1; platform-macos --lib 2038 / 48; clippy -p platform-macos --all-targets -D warnings clean. Only this file changed after the 1f1d4edd receipt |
+| whole head (final) | 03af2302 | `TMPDIR=/private/tmp`, kache doctor 0: the same 24 steps, failures=0: core-lib 1828 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 200, linux-host 110, Linux x86_64 and Windows MSVC target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, cargo deny (bans, licenses, sources ok), build-driver, e2e check, check_protocol compatible in every launch form (daemon 0.8.0 = 0.8.0), protocol delta problems 0, output delta removes nothing, Wayland helper checks. Later commits change devlog only |
 
 Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
 
@@ -330,4 +340,7 @@ Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed);
 Earlier rounds per unit are in 004. The whole-branch final review of 12e47ec6 failed in provider compaction; the commits without a review
 of their final form are under narrow fresh reviews: `cu-delta-review-019c3858-s24` (0f0d4b70, 019c3858), `cu-final-287-e354f982-s24`,
 `cu-final-wp1c-1ec667ea-s24`, `cu-final-ci-wp1d-s24` (d0e90760, 2a726372, 133b2ef9), `cu-wp1e-review-068c9a00-s24` (b5aa4734, 068c9a00).
-Docs-only commits are not reviewed separately.
+After wp1h: wp1i 190a160e NEAR-PASS → 7cab649b; wp1j c8a91fc0 PASS; wp1k bc02a591 NEAR-PASS → a2539a20, round 2 PASS; fresh final review
+of 7cab649b NEAR-PASS → 1f1d4edd (af4e914b PASS), round 2 PASS (also wp1n 5e172dbe) with lows → 491904b1, round 3 PASS at 491904b1;
+wp1m 99de9504 NEAR-PASS, its findings documentation only → 03af2302. Every code commit's final form has a PASS or a reviewed fix; the
+commits after 491904b1 change docs and devlog only. Docs-only commits are not reviewed separately.
