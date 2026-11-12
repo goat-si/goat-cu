@@ -46,6 +46,8 @@
 | 88c70460 | docs | third re-fetch; unit wp1e (015) |
 | b5aa4734 | contract | `contract/manifest.json` regenerated for the #299 `process_instance` outputs (`cua-contract-gen -- all --check` exit 1 → 0) |
 | 068c9a00 | wp1e | sync 4cf88bae → 4f2aa028 (0.47.18): `invoke_menu` `delivery_mode` contract (manifest and UniFFI bindings regenerated), hyprland requalify channel, CHANGELOG, installer version, vendored cua-telemetry 0.25.2 |
+| e3dcec4d | docs | final record at 068c9a00 |
+| 3be03b46 | wp1f | sync 4f2aa028 → b9e38d1a: libxkbcommon 1.0 text functions resolved at run time (Linux; Ubuntu 20.04 loads the driver) |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -57,6 +59,8 @@ Third re-fetch (~08:35 UTC): origin/main `40c6f6eb` and agent-desktop main `5485
 cua-sdk 0.25.2), 16 commits after `4cf88bae` → unit wp1e (015): `invoke_menu` `delivery_mode` contract (ac720702), hyprland requalify
 channel (377b0fee), release entries, vendored cua-telemetry version. The final evidence report moves to a closing phase after wp1b, wp1c
 and wp1e.
+Final re-fetch (~09:50 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged; trycua/cua main `b9e38d1a`, 4 commits after
+`4f2aa028`, one in scope (b9e38d1a, #6498) → unit wp1f (016), folded into the wp6 cycle as task wp6/t2.
 
 ### Follow-ups recorded, not done in this lane
 
