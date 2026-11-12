@@ -142,3 +142,8 @@ recorded follow-ups (GTK3 stacking scope and budget fail-open, upstream/pre-exis
 would retry macOS invoke_menu) rebutted: a run_steps step tool must be in BATCHABLE_TOOLS (batch_tools.rs:2602-2621, :36-47), which
 lacks invoke_menu, and the click menu-bar reroute keeps `tool == "click"` (:1757-1772), so the gate never asks whether invoke_menu
 accepts delivery_mode. P3 (015 implied the upstream docs specs were taken) accepted, 015 corrected. `-r2` duplicate cancelled.
+2026-11-12: `cu-final-wp1c-895e6ad2-s24` NEAR-PASS: seam hint still said "typing again" (accepted → 83aeb256, red via
+recovery_hint::annotate then green), delivery mapping unpinned (accepted → completed_delivery + table test, red on a scratch flip),
+counts residual (accepted). The pre-restart `cu-final-287-e354f982-s24` completed: NEAR-PASS, 5 P3: GNOME doc, parked repin,
+motion restart, doc residue accepted → 1f2060af (red first: set-motion case; repin test compile); macOS seam test rebutted as
+residual. `-r2` duplicate cancelled. Decisions recorded with review_findings.record.

@@ -54,6 +54,9 @@
 | 57e9cae1 | test fix | libei.rs tests compile with `portal-input` again (pre-existing on origin/main since 87e2e869) |
 | ff3338e7 | docs | libei portal-input test fix and CI follow-up |
 | 895e6ad2 | wp1c round-2 review | a single-line submit's line that landed without its Return carries no re-send escalation (was `recommended: foreground`) |
+| 888d0811, 09a0e5dd, 495f9c31 | docs | review records (libei PASS, wp1c r2, CI/wp1d, wp1e) |
+| 83aeb256 | wp1c final review | a landed line sets its own hint (press Return with press_key, do not type again) over the seam's "read before typing again"; `completed_delivery` pins the delivery mapping |
+| 1f2060af | #287 round-2 review | macOS parked loop keeps the ~1 s repin of a revealed pinned cursor; SetMotion/ApplyMotion restart a parked float; docs |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -70,6 +73,8 @@ Final re-fetch (~09:50 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62`
 
 ### Follow-ups recorded, not done in this lane
 
+- #287 round-2 review P3 (rebutted, residual): the macOS parked-wake seam (charge idle time before applying commands) has no direct
+  test; the X11 loop has one via `apply_messages_after_wake`. A test needs that drain extracted from the AppKit loop.
 - Linux GTK3 hit test (upstream 7dbc78d1, taken byte-identical in 133b2ef9; final review of the CI/wp1d slice): the `SiblingStacking`
   first-match correction checks only the application's toolkit, so it may apply inside an embedded toolkit's subtree (WebKitGTK web
   process) at `atspi/native.rs:5359`; and its extra AT-SPI round-trips share the 1500 ms `INPUT_QUERY_BUDGET`, where a timeout yields
