@@ -135,3 +135,6 @@ codex / system24/deepseek-v4.1-flash / reasoningEffort=high.
 895e6ad2 (failing-first assertion red, then green; platform-macos --lib 2026 / 48, clippy clean), P3 mapping coverage rebutted, P3
 char counts accepted as recorded residual; decisions recorded with review_findings.record. Its `-r2` duplicate cancelled; fresh final
 review of 895e6ad2 dispatched as `cu-final-wp1c-895e6ad2-s24` (codex / system24/deepseek-v4.1-flash / high).
+2026-11-12: the pre-restart `cu-final-ci-wp1d-s24` also completed: PASS (bindings move pure, re-pin = FNV-1a of the moved file, serve.rs
+restores exactly what Windows calls, 133b2ef9 equals upstream with versions kept, vendored crate = 4cf88bae). Three P3/INFO accepted as
+recorded follow-ups (GTK3 stacking scope and budget fail-open, upstream/pre-existing; rust/VERSION lag); `-r2` duplicate cancelled.

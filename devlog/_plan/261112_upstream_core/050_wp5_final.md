@@ -70,6 +70,12 @@ Final re-fetch (~09:50 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62`
 
 ### Follow-ups recorded, not done in this lane
 
+- Linux GTK3 hit test (upstream 7dbc78d1, taken byte-identical in 133b2ef9; final review of the CI/wp1d slice): the `SiblingStacking`
+  first-match correction checks only the application's toolkit, so it may apply inside an embedded toolkit's subtree (WebKitGTK web
+  process) at `atspi/native.rs:5359`; and its extra AT-SPI round-trips share the 1500 ms `INPUT_QUERY_BUDGET`, where a timeout yields
+  `PointOwnership::Unknown` and the caller presses unguarded (`atspi/native/hit_test.rs:309`, fail-open predates this lane). Smallest
+  fixes: skip the substitution when parent and hit node name different buses; reserve a budget slice for the stacking pass.
+- `rust/VERSION` (0.38.0-goat.1) lags the workspace version (0.40.1-goat.1), identically on origin/main; nothing reads it.
 - wp1c round-2 review P3 (rebutted, residual): the `TypeTextDelivery` → `line_without_return` mapping in `type_text` `invoke` is two
   adjacent arms with no direct test; both ends are pinned (`submit_step`, `completed_text_result`), and pinning the arms needs a
   delivery-enum or AX-rung restructure.
