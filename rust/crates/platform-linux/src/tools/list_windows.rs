@@ -69,10 +69,21 @@ impl Tool for ListWindowsTool {
         use cua_driver_core::tool_args::ArgsExt;
         let filter_pid = args.opt_u64("pid").map(|v| v as u32);
         let on_screen_only = args.bool_or("on_screen_only", false);
-        let mut windows =
-            tokio::task::spawn_blocking(move || crate::wayland::list_windows_dispatch(filter_pid))
-                .await
-                .unwrap_or_default();
+        // #299: the first start-time pass runs before the windows are
+        // enumerated (every pid, or the filtered one), so a pid reused while
+        // the listing is built is never labelled with the new instance.
+        let (mut windows, instance_before) = tokio::task::spawn_blocking(move || {
+            let before = crate::process_instances::read_instances(
+                match filter_pid {
+                    Some(pid) => vec![pid],
+                    None => crate::proc_fs::all_pids(),
+                },
+                crate::proc_fs::process_instance_id,
+            );
+            (crate::wayland::list_windows_dispatch(filter_pid), before)
+        })
+        .await
+        .unwrap_or_default();
         let none_listed = windows.is_empty();
         retain_listed(
             &mut windows,
@@ -80,6 +91,14 @@ impl Tool for ListWindowsTool {
             args.opt_str("app").as_deref(),
             crate::proc_fs::is_process_live,
         );
+        // #299: the pids this listing keeps get the second start-time pass
+        // after the answer is built; a pid it cannot read, or reads a
+        // different start time for, is left unlabelled.
+        let pids: std::collections::BTreeSet<u32> = windows
+            .iter()
+            .filter_map(|w| w.pid)
+            .filter(|pid| *pid > 0)
+            .collect();
         if crate::wayland::is_wayland() {
             crate::wayland::remember_observed_window_origins(&windows);
         }
@@ -109,8 +128,13 @@ impl Tool for ListWindowsTool {
         ) {
             lines.push(note);
         }
-        let structured =
-            json!({ "windows": windows.iter().map(window_record_json).collect::<Vec<_>>() });
+        let mut records: Vec<Value> = windows.iter().map(window_record_json).collect();
+        let instance_after = crate::process_instances::read_instances(
+            pids.iter().copied(),
+            crate::proc_fs::process_instance_id,
+        );
+        crate::process_instances::label_records(&mut records, &instance_before, &instance_after);
+        let structured = json!({ "windows": records });
         ToolResult::text(lines.join("\n")).with_structured(structured)
     }
 }

@@ -170,6 +170,38 @@ as a follow-up commit with its own failing-first test, and the recorded C receip
 | same, after | 0 | 152 passed, 1 ignored |
 | `cargo check -p platform-macos --all-targets` | 0 | no warnings |
 
+### #299 review round 2 (`cu-wp2-review-ab-r2-s24-261112`, on 09484534) — PASS, three P3 notes
+
+All four round-1 fixes verified (resolve_now ≡ evidence(); label format identical; list_windows task keeps every filter; absent pid
+gets no label; both exemptions Read). P3 notes: (1) REBUTTED — the recording hook's three proc syscalls run on a thread that already does
+blocking AX IPC (`element_screen_center`, recording_hooks.rs:94) and a CGWindow frame read (`resolve_window_px_frame`, :98);
+(2) ACCEPTED — docs/tool-output-format.md now says a screenshot-only refresh omits `process_instance` (landed with the Linux/Windows
+#299 commit, same line); (3) ACCEPTED as cost — `labels_before` reads one start stamp per host pid inside the existing blocking task.
+
+## wp2b — #299 on Linux and Windows (child `cu-wp2b-299-lw-s24-261112`, lead-adjusted)
+
+Same semantics as macOS: decimal kernel start time, equality only, kept only when a read before and a read after the answer agree,
+none for installed-only entries. Pure helpers `label_instance` / `read_instances` / `label_records` in platform-linux
+`process_instances.rs` (new, `cfg(any(linux, test))`) and platform-windows `process_instance.rs` (:55-100; `instance_start_time` over the
+existing `process_fingerprint`, which also rejects an exited pid). Wired into Linux list_apps / list_windows / get_window_state
+(`/proc/<pid>/stat` field 22) and Windows list_apps / list_windows / get_window_state (`GetProcessTimes`). Lead adjustment, same reason as
+#299 round-1 finding 4: the child's listings took the first pass after enumerating; it now runs before enumeration over every pid
+(Linux `proc_fs::all_pids`, Windows a `list_processes` snapshot) or the filtered pid, so a pid reused mid-listing gets no label. Element
+tokens on Linux/Windows were already bound to the instance (`publish_*_with_instance`, U15 #260). Docs paragraph names all three sources
+and the macOS screenshot-only refresh case.
+
+| Command (rust/) | Exit | Result |
+|---|---|---|
+| child: `cargo test -p platform-windows --lib` with helpers stubbed | 101 | process_instance.rs `a_label_needs_two_agreeing_start_time_reads` (None vs Some("77")), `records_name_the_instance_of_the_pid_they_report` (Null vs "170") |
+| child: `cargo test -p platform-linux --lib` with `label_instance` stubbed | 101 | process_instances.rs:61 and :95 panicked |
+| lead: `cargo test -p platform-windows --lib` (host) | 0 | 206 passed |
+| lead: `cargo test -p platform-linux --lib` (host subset) | 0 | 109 passed |
+| lead: Linux target `cargo check --target x86_64-unknown-linux-gnu -p platform-linux --all-targets` (stand-in cc/ar/pkg-config) | 0 | third-party `nom` note only |
+| lead: Windows target `cargo check --target x86_64-pc-windows-msvc -p platform-windows --all-targets` (stand-in cc/ar) | 0 | the 5 warnings recorded at HEAD in 010 (prepare.rs:1133, uia/mod.rs:1205, inject.rs:314/318/363); none in changed files |
+| child: `cargo test -p platform-macos --lib`; `cargo test -p cua-driver --test removed_tool_docs_test`; `cargo clippy -p platform-windows -p platform-linux --all-targets` | 0 / 0 / 0 | 2013 passed 48 ignored; 2 passed; no warnings from either crate |
+
+NOT RUN: any Linux or Windows runtime read (no host); the listing order change is type-checked only.
+
 ## #288 independent review (`cu-wp2-review-288-s24-261112`, on e0851769) — NEAR-PASS, 4 findings
 
 | # | Sev | Finding | Disposition |

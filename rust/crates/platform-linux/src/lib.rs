@@ -87,6 +87,11 @@ pub mod atspi;
 #[cfg(any(target_os = "linux", test))]
 mod snapshot_queries;
 
+// Pure `process_instance` labelling decisions for answers that name a pid
+// (#299); ungated so its table tests run on any host.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) mod process_instances;
+
 #[cfg(target_os = "linux")]
 pub mod a11y;
 

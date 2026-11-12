@@ -231,6 +231,19 @@ fn is_system_owned(uid: u32, mode: u32) -> bool {
     uid == 0 && mode & 0o022 == 0
 }
 
+/// Every pid the kernel lists in `/proc` right now (#299: the first
+/// start-time pass of a listing runs over these, before it enumerates).
+pub(crate) fn all_pids() -> Vec<u32> {
+    fs::read_dir("/proc")
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Return all running processes by reading /proc/<pid>/status.
 pub fn list_processes() -> Vec<ProcessInfo> {
     let mut result = Vec::new();

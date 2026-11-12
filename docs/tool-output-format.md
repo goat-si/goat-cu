@@ -59,12 +59,17 @@ budget stop and without passing over anything: no children below
 be read, no omitted tabs. Only then can `verify_state` answer `unsatisfied`
 for an element that is not there instead of `unknown`.
 
-On macOS, answers that name a pid also report `process_instance`: an opaque
-label of the process that owned the pid when the answer was read (its kernel
-start time), on each `list_apps` running app, each `list_windows` record and
-the `get_window_state` answer. Compare it for equality only; the same pid with
-a different label is a different process. `get_window_state` reports it only
-when the start time read before and after the walk agree, and its element
-tokens are bound to that process: once the pid names another process start,
-using them refuses with `process_instance_mismatch` (`process_instance_unverified`
-when the identity could not be read).
+Answers that name a pid also report `process_instance`: an opaque label of the
+process that owned the pid when the answer was read (its kernel start time:
+macOS `pbi_start_tvsec`/`pbi_start_tvusec`, Linux `/proc/<pid>/stat` field 22,
+Windows `GetProcessTimes` creation time), on each `list_apps` running app, each
+`list_windows` record and the `get_window_state` answer. Compare it for
+equality only; the same pid with a different label is a different process. It
+is reported only when the start time read before and after the answer agree,
+so a pid that was reused or unreadable mid-read gets none. On macOS
+`get_window_state` element tokens are also bound to that process (a
+screenshot-only read that refreshed an existing snapshot omits the label,
+since that snapshot's tokens keep the instance they were read from): once the pid
+names another process start, using them refuses with
+`process_instance_mismatch` (`process_instance_unverified` when the identity
+could not be read).
