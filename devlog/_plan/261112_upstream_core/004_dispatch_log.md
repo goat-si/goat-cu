@@ -184,3 +184,8 @@ f3107f37: install.ps1's network-failure fallback (line 2099) still advertised `c
 like the shell installer, and `test_installer_fallback_hints_name_mcp_config_not_connect` guards both fallbacks (red on install.ps1,
 then 15 passed). Decisions recorded with review_findings.record (the amended commit's id is f3107f37; the recorded entries cite
 b629f6b3, the same change before a commit-message-only amend).
+2026-11-12: `cu-review-ff24221c-r2c-s24` (round 2, same reviewer) PASS: both LineWithoutReturn causes give the same message and hint, the
+test is red on the parent text, the nudge rebuttal holds (`observe:{}` is a real get_window_state read, `batch_tools.rs:2676-2733`).
+Low: only the do-not-repeat clause was sure to fit run_steps' 300 characters (a DocumentEdited note pushed the read-first condition
+past it) → a3bd993b (assertion red at type_text.rs:4805, then type_text 61 / 1, --lib 2031 / 48, clippy clean). Nudge template nit:
+no change.
