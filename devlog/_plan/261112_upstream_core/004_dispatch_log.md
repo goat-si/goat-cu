@@ -178,3 +178,9 @@ bfef37d8 dispatched as `cu-review-bfef37d8-s24` (codex / system24/deepseek-v4.1-
 accepted in part (the do-not-repeat clause leads; hint copying for ok steps a 050 follow-up); low nudge "(no separate read)" rebutted
 (`batch_nudge.rs:41-43`: observe:{} is the read). Round 2 with the same reviewer: `cu-review-ff24221c-r2c-s24` (continueFrom; returned
 codex / system24/deepseek-v4.1-flash / high; two earlier create calls were refused for argument shape and started nothing).
+2026-11-12: `cu-review-wp1g-8248c43b-s24` PASS (range coverage, CHANGELOG and pins equal to 56a69039, GOAT versions untouched, vendored
+inputs outside the range, no baked-version consumer expects another value, 017's test claims reproduced). Two low findings accepted →
+f3107f37: install.ps1's network-failure fallback (line 2099) still advertised `connect`; it now names `mcp-config --client <name>`
+like the shell installer, and `test_installer_fallback_hints_name_mcp_config_not_connect` guards both fallbacks (red on install.ps1,
+then 15 passed). Decisions recorded with review_findings.record (the amended commit's id is f3107f37; the recorded entries cite
+b629f6b3, the same change before a commit-message-only amend).
