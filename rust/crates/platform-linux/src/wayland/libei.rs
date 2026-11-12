@@ -2801,10 +2801,10 @@ mod tests {
         );
     }
 
-    use local_eis::{record, Emitted};
+    use local_eis::{record, Emitted as EisEmitted};
 
-    fn motion(device: &str, x: f32, y: f32) -> Emitted {
-        Emitted::Motion(device.into(), x, y)
+    fn motion(device: &str, x: f32, y: f32) -> EisEmitted {
+        EisEmitted::Motion(device.into(), x, y)
     }
 
     const LEFT: u32 = 0x110;
@@ -2817,8 +2817,8 @@ mod tests {
             events,
             vec![
                 motion("wide", 6237.0, 1014.0),
-                Emitted::Button(LEFT, true),
-                Emitted::Button(LEFT, false),
+                EisEmitted::Button(LEFT, true),
+                EisEmitted::Button(LEFT, false),
             ]
         );
     }
@@ -2846,9 +2846,9 @@ mod tests {
         let (result, events) = record(|| drag(0.0, 0.0, 3000.0, 1014.0, 4, 0, Button::Left));
         result.unwrap();
         assert_eq!(events.first(), Some(&motion("wide", 0.0, 0.0)));
-        assert_eq!(events[1], Emitted::Button(LEFT, true));
+        assert_eq!(events[1], EisEmitted::Button(LEFT, true));
         assert_eq!(events[events.len() - 2], motion("wide", 3000.0, 1014.0));
-        assert_eq!(events.last(), Some(&Emitted::Button(LEFT, false)));
+        assert_eq!(events.last(), Some(&EisEmitted::Button(LEFT, false)));
         assert_eq!(events.len(), 2 + 1 + 4 + 1 - 1);
     }
 
