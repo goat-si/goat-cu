@@ -116,3 +116,8 @@ Delivery rule then changed: the coordinator pushes and manages the PR; this lane
 NEAR-PASS, 3 P2 + 3 P3 → 1ec667ea (5 accepted, 1 rebutted with ad5f6193 evidence; decisions recorded). `cu-wp3-287-review-r2-s24-261112`,
 `cu-wp1b-review-b1-s24-261112` and `cu-wp3c-review-s24-261112` logged nothing after the restart notice (04:28) through 05:04; not duplicated.
 Their scopes (e354f982, ef7a3646 cursor release, 98632052) are named in the fresh final review of the exact head.
+2026-11-12: `cu-wp3c-review-s24-261112` finished: NEAR-PASS, 2 P2 + 1 P3 on 98632052 (scroll-bar AXPress then wheel, uncoded
+right/double-click refusals, press_key AXConfirm/AXCancel classification) → 0f0d4b70; restoring the old behaviour gave 4 red tests,
+then platform-macos --lib 2026 passed / 48 ignored and clippy -D warnings exit 0.
+2026-11-12: goat-ci on PR #300 at b54560e5: Linux `mutter_display` descriptor-count test failed 81 vs 79 (parallel tests' descriptors
+in a process-wide count) → test runs alone in a child test process (050 "CI after the receipt"). Left local for the coordinator to push.

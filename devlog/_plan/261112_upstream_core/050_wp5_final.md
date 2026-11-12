@@ -40,6 +40,7 @@
 | 2a726372 | test | re-pin the ax/bindings.rs glob audit after the pure move |
 | 133b2ef9 | wp1d | sync 465aab0b → 4cf88bae (0.47.16): Linux GTK3 overlay hit test, macOS e2e occluder test, vendored cua-telemetry 0.25.0 |
 | 1ec667ea | wp1c review | a line that landed without its Return is LineWithoutReturn (unverified, not the retryable type_text_incomplete); submit_step / completed_text_result pure decisions with call-site tests; focus written only when needed and disclosed; per-read-back withhold reasons |
+| 0f0d4b70 | wp3c review | #279 rule extended: a native scroll-bar AXPress error that may have acted ends the call (no second wheel scroll); proven non-delivery and pointer-gate refusals in right/double-click are coded refusals; press_key's semantic AXConfirm/AXCancel perform goes through the write-outcome classifier; GOAT.md |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -97,3 +98,16 @@ portal-input); cargo deny; build-driver; e2e-check; check_protocol.py (protocol-
 0.8.0; descriptions reworded for get_guide, set_config, type_text, not protocol); proto_delta problems 0; output delta adds only
 process_instance on get_window_state, list_apps.apps[], list_windows.windows[], removes nothing; JS helper syntax, helper paint and
 helper safety harnesses. Logs: /tmp/goat-cu-sync/receipt-final/.
+
+### CI after the receipt
+
+- PR #300 at b54560e5 (run 43156456005, `PR Linux schema contract and platform unit`):
+  `wayland::mutter_display::tests::a_socket_that_never_accepts_fails_at_once_and_leaves_nothing_open` failed 81 vs 79 at
+  mutter_display.rs:523 with 1167 other tests passing. The socket path closes its descriptor on every error (`connect_bounded` owns
+  it as `OwnedFd` straight after `socket(2)`); the test counted `/proc/self/fd` for the whole process while the other tests in the
+  binary open and close their own descriptors on other threads. Red (scratch, not committed): a sibling thread holding a socket pair
+  inside the window gives 8 vs 6, the same +2. Fix: the test re-runs itself alone in a child test process (`--exact` plus a marker
+  variable) and requires the child's ` 1 passed;`, so a filter that matches nothing fails. Linux (rust:1.97.1 aarch64 container,
+  plain cargo; Xvfb installed for the two X11 tests): named test green; the scratch sibling held across the child run green; a scratch
+  typo in the child filter red; full `platform-linux --lib` 3× 1168 passed / 15 ignored; clippy `-p platform-linux -p cua-driver-core
+  --all-targets -D warnings` exit 0.

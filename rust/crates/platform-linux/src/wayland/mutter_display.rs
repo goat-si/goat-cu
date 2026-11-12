@@ -497,6 +497,26 @@ mod tests {
 
     #[test]
     fn a_socket_that_never_accepts_fails_at_once_and_leaves_nothing_open() {
+        // The descriptor count covers the whole process, and the other tests in this binary open
+        // and close their own descriptors on other threads; count in a process running this alone.
+        const ALONE: &str = "CUA_MUTTER_STALLED_SOCKET_ALONE";
+        if std::env::var_os(ALONE).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "wayland::mutter_display::tests::a_socket_that_never_accepts_fails_at_once_and_leaves_nothing_open",
+                ])
+                .env(ALONE, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains(" 1 passed;"),
+                "{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         use std::os::unix::net::UnixListener;
         let dir = std::env::temp_dir().join(format!("cua-mutter-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
