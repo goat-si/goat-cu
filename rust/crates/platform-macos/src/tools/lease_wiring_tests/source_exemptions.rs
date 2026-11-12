@@ -40,7 +40,8 @@ pub(super) const ENTRIES: &[Entry] = &[
         fingerprint: 18055387372649062197,
         occurrence: 1,
         category: Category::Read,
-        reason: "permission guide registers the helper with TCC off the UI thread; no target app input",
+        reason:
+            "permission guide registers the helper with TCC off the UI thread; no target app input",
     },
     Entry {
         file: "permissions/status.rs",

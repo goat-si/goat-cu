@@ -145,10 +145,8 @@ pub(crate) async fn evidence(args: &serde_json::Value, pid: i32) -> InstanceEvid
     if args.get("element_token").is_none() {
         return InstanceEvidence::NotChecked;
     }
-    match crate::goat::action_latency::spawn_blocking(move || {
-        process_fingerprint(i64::from(pid))
-    })
-    .await
+    match crate::goat::action_latency::spawn_blocking(move || process_fingerprint(i64::from(pid)))
+        .await
     {
         Ok(Some(fingerprint)) => InstanceEvidence::Live(fingerprint),
         Ok(None) => InstanceEvidence::Unavailable("process identity could not be read".into()),
@@ -368,8 +366,17 @@ mod u33_identity_tests {
     fn a_token_from_an_earlier_start_of_the_pid_is_refused() {
         let store = SnapshotStore::new();
         let capture = instance_capture(42, Some(started(1)), Some(started(1)));
-        let (id, _) = publish_read(&store, 42, 7, Rows(vec![10]), Some("s"), None, None, capture)
-            .unwrap();
+        let (id, _) = publish_read(
+            &store,
+            42,
+            7,
+            Rows(vec![10]),
+            Some("s"),
+            None,
+            None,
+            capture,
+        )
+        .unwrap();
         let args = serde_json::json!({
             "element_token": cua_driver_core::element_token::token_for(id, 0),
             "_session_id": "s",
@@ -397,7 +404,10 @@ mod u33_identity_tests {
             instance_capture(42, None, Some(started(1))),
             InstanceCapture::Failed(_)
         ));
-        let other_pid = ProcessFingerprint { pid: 43, ..started(1) };
+        let other_pid = ProcessFingerprint {
+            pid: 43,
+            ..started(1)
+        };
         assert!(matches!(
             instance_capture(42, Some(other_pid.clone()), Some(other_pid)),
             InstanceCapture::Failed(_)

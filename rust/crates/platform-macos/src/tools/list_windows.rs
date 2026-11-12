@@ -113,7 +113,10 @@ fn label_window_records(structured: &mut Value, mut label_of: impl FnMut(i32) ->
         return;
     };
     for window in windows {
-        let Some(pid) = window["pid"].as_i64().and_then(|pid| i32::try_from(pid).ok()) else {
+        let Some(pid) = window["pid"]
+            .as_i64()
+            .and_then(|pid| i32::try_from(pid).ok())
+        else {
             continue;
         };
         if let Some(label) = labels.entry(pid).or_insert_with(|| label_of(pid)) {
@@ -323,7 +326,10 @@ mod tests {
         let windows = structured["windows"].as_array().unwrap();
         assert_eq!(windows[0]["process_instance"], "start-17");
         assert_eq!(windows[1]["process_instance"], "start-17");
-        assert!(windows[2].get("process_instance").is_none(), "an unreadable instance is omitted");
+        assert!(
+            windows[2].get("process_instance").is_none(),
+            "an unreadable instance is omitted"
+        );
     }
 
     fn window(

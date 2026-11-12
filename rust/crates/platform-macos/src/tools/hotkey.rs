@@ -377,7 +377,11 @@ impl Tool for HotkeyTool {
         let key_display = raw_keys.join("+");
         let window_id_arg = args.opt_u64("window_id");
         let evidence = crate::process_identity::evidence(&args, pid).await;
-        let resolved = match latency::resolve(|| self.state.snapshots.resolve_for_instance(pid, &args, evidence)) {
+        let resolved = match latency::resolve(|| {
+            self.state
+                .snapshots
+                .resolve_for_instance(pid, &args, evidence)
+        }) {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };
