@@ -99,6 +99,12 @@
 | 1f1d4edd | final review of 7cab649b | the untrusted web read-back result leads with the read-first rule inside run_steps' 300-character step message; Safari's address-field refusal reads with `page` and acts through element actions; `same_pid_keyboard_ambiguity` names `get_browser_state` and the `browser_*` tools |
 | 5e172dbe | wp1n | sync 01596ffc → fd4505cf (019f): installer pin 0.47.22 (upstream's published version) |
 | 491904b1 | final review round 2 | the unverified mark carries the condition on typing again ("type again only if the text is missing"), so no cut can keep the write without it |
+| 03af2302 | docs | the contract doc names the `select_text`/`menu_bar_extras` carve-out (wp1m review); wp1m, wp1n and final review records |
+| 27f04c31 | docs | final receipt at 03af2302 and last re-fetch |
+| abc581b7 | CI fix | two `window_state_view` tests no longer share the process-wide snapshot store: the "both" case moves to an unused window id, and a test build keeps 4096 snapshots in total (production 32, per-window 8) so parallel reads cannot evict a test's own (goat-ci run 43301885942) |
+| 34f79cb5 | wp1o | sync fd4505cf → 2fc7f3c7 (019g): release 0.47.24 CHANGELOG entry; GOAT versions kept |
+| 52f2b794 | wp1p | sync 2fc7f3c7 → 2319d456 (019h): installer pin 0.47.23 (upstream's published version) |
+| 902b6e30 | wp1m review | the carve-out sentence names only the two tools' acting results (discovery and refusal payloads carry no `verified`); the capability-derived test gap recorded as a follow-up |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -131,6 +137,11 @@ origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged at each.
 Last re-fetch before the final D (2026-11-12 20:30 UTC, after the receipt at 03af2302): trycua/cua main `fd4505cf` (no commit after wp1n),
 origin/main `40c6f6eb`, agent-desktop `54855b62` — no new in-scope delta. The remote lane branch reads `99de9504` (pushed by the
 coordinator), an ancestor of the local head.
+Re-fetch after abc581b7 (~20:50 UTC): trycua/cua main `2fc7f3c7` (release 0.47.24) → unit wp1o (019g). Re-fetch after 34f79cb5
+(~21:10 UTC): trycua/cua main `2319d456` (published installer 0.47.23) → unit wp1p (019h).
+Last re-fetch (2026-11-12 21:40 UTC, after 902b6e30): trycua/cua main `2319d456` (no commit after wp1p), origin/main `40c6f6eb`,
+agent-desktop `54855b62` — no new in-scope delta. The remote lane branch reads `34f79cb5` (pushed by the coordinator), an ancestor of
+the local head.
 
 ### Follow-ups recorded, not done in this lane
 
@@ -262,6 +273,23 @@ helper safety harnesses. Logs: /tmp/goat-cu-sync/receipt-final/.
 
 ### CI after the receipt
 
+- PR #300 at 27f04c31 (run 43301885942, `PR Linux schema contract and platform unit`, `cua-driver-core --lib`):
+  `window_state_view::tests::an_elements_diff_counts_only_the_elements_it_returns` failed at window_state_view.rs:2641 with
+  `since_status` "diff" instead of "no_change" (1830 passed). Its "both" case read window 7021, which
+  `since_returns_diff_then_falls_back` also reads, and `since:"latest"` names a window's most recent read in the process-wide snapshot
+  store, so the other test's read landing between this test's second and third reads made "latest" the other test's snapshot. Red
+  (scratch, not committed): replaying that read between the two reads gave the CI failure exactly (left "diff", right "no_change",
+  "both"; `/tmp/goat-cu-sync/wsv-red.log`). Running the module alone then showed a second shared-store failure:
+  `since_with_elements_returns_every_element_and_passes_the_typed_check` read "unknown_snapshot" (`wsv-module.log`, 45 passed / 1
+  failed) because the store keeps 32 snapshots across all windows and parallel tests evicted the one it had just stored; storing 32 other
+  windows' snapshots between its reads reproduced it (`wsv2-red.log`). Fix abc581b7: the "both" case uses window 7030, which no other
+  test uses, and a test build keeps 4096 snapshots in total (`#[cfg(test)]`; production 32; the per-window cap of 8 unchanged; no test
+  exercises the total cap). No assertion changed. Each scratch passes with its fix in place. macOS: `window_state_view` 46 passed in
+  30 of 30 runs, `cua-driver-core --lib` 2× 1828 passed / 3 ignored. Linux container at 902b6e30 (no Rust change after abc581b7):
+  both named tests passed (`--exact`), `window_state_view` 46 passed in 30 of 30 runs, `cua-driver-core --lib` 1831 passed / 3 ignored
+  and `clippy -p cua-driver-core --all-targets -D warnings` exit 0 (`/tmp/goat-cu-sync/wsv-focused-902b6e30.log`). goat-ci on 34f79cb5 (which contains abc581b7):
+  `PR Linux schema contract and platform unit`, `PR macOS schema contract`, `PR Windows schema contract and platform unit`, Clippy macOS
+  and Linux, `deny` and the Linux and Windows arm64 builds green.
 - PR #300 at 5c760643 (run 43183852970, Linux `cua-driver-core --lib`): `batch_tools::tests::pauses_between_steps_but_not_after_the_last`
   failed at tests.rs:1400 with "2. click ERROR (time_budget): step exceeded its execution budget" (1825 passed). The test runs on a paused
   tokio clock and replaces only step 1's deadline with a trigger (`deadline_override.take()`, batch_tools.rs:1037); step 2 keeps a real
@@ -334,7 +362,10 @@ and a `deprecated` entry only). `contract/manifest.json` and both UniFFI binding
 | whole head | 1f1d4edd | `TMPDIR=/private/tmp`: the same 24 steps, failures=0: core-lib 1828 / 3, core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 200, linux-host 110, target checks, clippy macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol compatible, protocol delta problems 0, output delta adds only `process_instance`, helper tests |
 | wp1n | 5e172dbe | `bash -n`, connect-step 15, install version fallback 40 / 7 skipped (upstream layout) |
 | final review round 2 fix | 491904b1 | the sweep over detail lengths 0-300 red at type_text.rs:5118, then tools::type_text 63 / 1; platform-macos --lib 2038 / 48; clippy -p platform-macos --all-targets -D warnings clean. Only this file changed after the 1f1d4edd receipt |
-| whole head (final) | 03af2302 | `TMPDIR=/private/tmp`, kache doctor 0: the same 24 steps, failures=0: core-lib 1828 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 200, linux-host 110, Linux x86_64 and Windows MSVC target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, cargo deny (bans, licenses, sources ok), build-driver, e2e check, check_protocol compatible in every launch form (daemon 0.8.0 = 0.8.0), protocol delta problems 0, output delta removes nothing, Wayland helper checks. Later commits change devlog only |
+| whole head (final) | 03af2302 | `TMPDIR=/private/tmp`, kache doctor 0: the same 24 steps, failures=0: core-lib 1828 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 200, linux-host 110, Linux x86_64 and Windows MSVC target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, cargo deny (bans, licenses, sources ok), build-driver, e2e check, check_protocol compatible in every launch form (daemon 0.8.0 = 0.8.0), protocol delta problems 0, output delta removes nothing, Wayland helper checks. After it, the only Rust change is abc581b7 (one test module) |
+| CI fix | abc581b7 | red first (scratch): the CI failure and "unknown_snapshot" each reproduced exactly; then `window_state_view` 30/30 runs and core-lib 2× 1828 / 3 (macOS), the Linux container receipt at 902b6e30 and goat-ci on 34f79cb5 in "CI after the receipt" |
+| wp1o | 34f79cb5 | CHANGELOG top 40 lines identical to 2fc7f3c7; the 8 version files byte-identical to the parent (019g) |
+| wp1p | 52f2b794 | `bash -n`, connect-step 15, install version fallback 40 / 7 skipped (upstream layout) (019h) |
 
 Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
 
