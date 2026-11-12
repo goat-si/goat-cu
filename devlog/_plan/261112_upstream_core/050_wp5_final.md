@@ -48,6 +48,10 @@ origin/main `40c6f6eb` (unchanged); agent-desktop main `54855b62` (unchanged); t
 `e51f5740` → unit wp1c (013).
 Second re-fetch (~05:40 UTC): origin/main and agent-desktop unchanged; trycua/cua main `4cf88bae` (0.47.16 + cua-sdk 0.25.0), 8 commits
 after `465aab0b` → unit wp1d (014).
+Third re-fetch (~08:35 UTC): origin/main `40c6f6eb` and agent-desktop main `54855b62` unchanged; trycua/cua main `4f2aa028` (0.47.18 +
+cua-sdk 0.25.2), 16 commits after `4cf88bae` → unit wp1e (015): `invoke_menu` `delivery_mode` contract (ac720702), hyprland requalify
+channel (377b0fee), release entries, vendored cua-telemetry version. The final evidence report moves to a closing phase after wp1b, wp1c
+and wp1e.
 
 ### Follow-ups recorded, not done in this lane
 
