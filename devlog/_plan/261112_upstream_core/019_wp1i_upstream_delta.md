@@ -1,8 +1,9 @@
 # 019 — wp1i: upstream delta 7dc3cc43 → 7f2252fb (page actions removed, three tools deprecated, Perception frozen)
 
-Found at the re-fetch after 79766176 (2026-11-13): trycua/cua main `7f2252fb`, 11 commits after `7dc3cc43` (wp1h, 018), 7 of them
+Found at the re-fetch after 79766176 (2026-11-12 ~18:00 UTC, repeated after the GOAT restart): trycua/cua main `7f2252fb`, 11 commits after `7dc3cc43` (wp1h, 018), 7 of them
 touching `libs/cua-driver` (45 files); goat-cu origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged. Patches and per-file
 base/upstream copies: `/tmp/goat-cu-upstream/wp1i/`, `/tmp/goat-cu-upstream/7dc3cc43…`, `/tmp/goat-cu-upstream/7f2252fb…`.
+Sync commit 190a160e.
 
 | Commit | Scope | Disposition |
 |---|---|---|
@@ -70,6 +71,7 @@ missing in any file except the intended ones listed here.
 | Linux container (rust:1.97.1-trixie): `platform-linux --lib`, `--features portal-input` | 0 / 0 | 1173 / 15, 1232 / 15 |
 | Linux container: clippy `-D warnings` (platform-linux, core, cursor-overlay; platform-linux with portal-input) | 0 / 0 | clean |
 | Linux container: `cursor-overlay --lib`, `cua-driver-core --lib` | 0 / 0 | 158, 1825 / 3 |
+| `TMPDIR=/private/tmp zsh /tmp/goat-cu-sync/receipt-final.sh` at 190a160e | 0 | 24 steps, failures=0 (050); a first run with `TMPDIR=/tmp` failed six `perception_client` sandbox tests (35/35 with the default or `/private/tmp`; code unchanged since 1feaeffb) and was stopped |
 
 NOT RUN: Windows and Linux runtime (no live bookmark/CDP path remains to exercise), the GTK3 and web e2e harnesses, PowerShell
 installer tests, a live GOAT session calling the deprecated `get_accessibility_tree`.

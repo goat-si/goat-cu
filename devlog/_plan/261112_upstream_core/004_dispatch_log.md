@@ -214,3 +214,7 @@ NOT RUN); F2 (press_key/hotkey do not refuse a disabled token; macOS neither) an
 recomputed the fingerprint); low, the AX click still sent the retired `ShowFocusRect` → ed282703 (macOS lib 2038 / 48, clippy 0);
 `_cueRequested` residue identical in upstream, kept. Fresh final review of 08c5ca6e and ed282703 dispatched as
 `cu-final-review-ed282703-s24` (codex / system24/deepseek-v4.1-flash / high). Receipt at ed282703: 24/24.
+2026-11-12: `cu-final-review-ed282703-s24` PASS (08c5ca6e, ed282703); its two low notes (Windows keyboard-focus reads also skip the COM
+join but fail closed, as upstream; a stale ShowFocusRect comment identical upstream) need no change. The re-fetch after 79766176 found
+trycua/cua at 7f2252fb → unit wp1i (019), sync 190a160e. Fresh review dispatched as `cu-review-wp1i-190a160e-s24` (returned codex /
+system24/deepseek-v4.1-flash / high, as requested).

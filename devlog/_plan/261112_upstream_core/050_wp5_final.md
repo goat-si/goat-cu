@@ -82,6 +82,8 @@
 | af2d3826 | docs | wp1h record (018) |
 | 08c5ca6e | wp1h review B | Windows `element_is_enabled` joins COM before reading `IsEnabled`, so the disabled-control refusal cannot fail open on a fresh blocking-pool thread |
 | ed282703 | wp1h review A | macOS AX click drops the retired `ShowFocusRect` send (upstream's removal the merge had not re-applied) |
+| 79766176 | docs | wp1h reviews, follow-ups, receipt at ed282703 |
+| 190a160e | wp1i | sync 7dc3cc43 → 7f2252fb (019): `page` keeps only `get_text`/`query_dom` (page actions, their switch, the Windows bookmark bridge and GOAT's `page_dispatch.rs` removed; `goat/compat` records the non-additive `page` schema); `replay_trajectory`, `install_ffmpeg`, `get_accessibility_tree` deprecated with a notice and a `tools/list` marker; Perception frozen; installer download retry; releases 0.47.20/0.47.21 and cua-sdk 0.27.0 (GOAT versions kept, vendored cua-telemetry 0.27.0); macOS pixel restore no longer tracks `page` |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -99,6 +101,9 @@ Re-fetch after ff6658cc (~11:45 UTC): origin/main `40c6f6eb` and agent-desktop `
 (cua-driver-rs 0.47.19), 2 commits after `b9e38d1a` in `libs/cua-driver`, release bookkeeping only → unit wp1g (017), task wp6/t3.
 Re-fetch before the last D (~16:20 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged; trycua/cua main `7dc3cc43`,
 7 commits after `56a69039` in `libs/cua-driver` (54 files) → unit wp1h (018), task wp6/t4.
+Re-fetch after 79766176 (2026-11-12 ~18:00 UTC, repeated ~18:15 UTC after the GOAT restart): origin/main `40c6f6eb` and agent-desktop
+`54855b62` unchanged; trycua/cua main `7f2252fb`, 11 commits after `7dc3cc43`, 7 of them in `libs/cua-driver` (45 files) → unit
+wp1i (019), task wp6/t5.
 
 ### Follow-ups recorded, not done in this lane
 
@@ -162,6 +167,16 @@ Re-fetch before the last D (~16:20 UTC): origin/main `40c6f6eb` and agent-deskto
   `wayland::list_windows_dispatch` (#299 review 4). Windows label reads use the full `process_fingerprint` (bounded cost, accepted).
 - Pre-existing warnings, same call graph on origin/main: `cua-driver-core` built without default features (`batch_tools/locate.rs`
   `LocatorRegistry::Borrowed`, `Locator::new`); Windows target `uia/mod.rs:1205` `walk_cached_bounded`, `input/inject.rs:314/318/363`.
+- wp1i, for GOAT: `get_accessibility_tree` is deprecated upstream (removal in the first release after 26 Nov 2026) and GOAT still
+  allows it (goat-si/goat `packages/shared/src/cuaDriverManifest.ts:28` at origin/dev c77c9745). It works and now carries a notice
+  naming `list_windows`/`list_apps`/`get_window_state`; GOAT must drop it from `CUA_DRIVER_ALLOWED_TOOLS` before goat-cu syncs the
+  removal, or `check_protocol.py`'s `validate()` fails the candidate.
+- Perception worker sandbox (pre-existing, unchanged since 1feaeffb): with `TMPDIR=/tmp` (a symlink to `/private/tmp`) six
+  `perception_client` tests fail with `WorkerCrashed` / "early eof"; the default `TMPDIR` and `/private/tmp` pass 35/35. The worker's
+  temp working directory is handed to the sandbox unresolved (`perception_client.rs:642-659`), so a symlinked `TMPDIR` likely breaks
+  production parses too. GOAT does not ship Perception, and upstream froze it (a967d132).
+- Receipts after the GOAT restart run with `TMPDIR=/private/tmp`: this thread's 85-character `TMPDIR` pushes five `cua-driver` socket
+  test paths past SUN_LEN (424/424 with a short `TMPDIR`), and `/tmp` trips the Perception sandbox above.
 
 ### Issue dispositions (path:line at the final head)
 
@@ -225,8 +240,13 @@ removed). The other "added optional argument(s)" lines compare against that olde
 `/tmp/goat-cu-sync/proto_delta.py` against the 0.40.1-goat.1 release binary (this lane's base release) on 068c9a00 reports 65 = 65 tools in
 both forms, added [], removed [], the one optional argument `invoke_menu.delivery_mode`, descriptions reworded for `set_config` and
 `type_text` (not protocol), daemon 0.8.0 = 0.8.0, problems 0; the same script found no added optional argument after wp1 (010), and the
-check_protocol output differs from the 9bd0e96c receipt only by the two `invoke_menu` lines. No allowed-changes entry is needed: each
-change is provably additive. `contract/manifest.json` and both UniFFI binding sets pass their generators' `--check` (wp1e receipt).
+check_protocol output differs from the 9bd0e96c receipt only by the two `invoke_menu` lines. Up to wp1h no allowed-changes entry was
+needed. wp1i (upstream b13430e0) removes `page`'s page actions, which `check_protocol.py` reports as `tools page: input schema changed` in
+both launch forms (exit 1 at 190a160e before the entry). `goat/compat/allowed-changes.json` records it with the reason: GOAT's manifest
+excludes `page`, so GOAT never calls it, and the actions were already refused unless a daemon operator set
+`CUA_DRIVER_ENABLE_LEGACY_PAGE_MUTATIONS`. With the entry, check_protocol exits 0 and proto_delta reports problems 0 (65 = 65 tools,
+`invoke_menu.delivery_mode` the only added argument). The deprecated tools stay listed with unchanged input schemas (description prefix
+and a `deprecated` entry only). `contract/manifest.json` and both UniFFI binding sets pass their generators' `--check` (wp1e and wp1i).
 
 ### Per-phase receipts (kache doctor exit 0 in each; `cxc receipt test`)
 
@@ -242,6 +262,8 @@ change is provably additive. `contract/manifest.json` and both UniFFI binding se
 | whole head | 7cac46e0 | the same 24 steps, failures=0. Linux container: cursor-overlay 157, cua-driver-core --lib 1826 / 3, platform-linux --lib 1171 / 15 (with and without a leaked marker) and clippy; portal-input 1229 / 1 failed under the receipt's concurrent load (`a_text_stops_when_its_tool_call_is_over`, a fixed-settle test from upstream), 1230 / 0 rerun idle → fixed in 743260c6 (portal-input 1230 / 15, default 1171 / 15, clippy both, 30/30 standalone) |
 | wp1h | c2067c65 / 9b9b29af | receipt 22/24 at c2067c65 (windows-target, windows-bins: E0063 in upstream's Windows-only test) → both 0 at 9b9b29af; focused suites and the Linux container in 018 |
 | whole head | ed282703 | 24 steps, failures=0: core-lib 1825 / 3, core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 207, linux-host 110, Linux and Windows target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol (compatible in every launch form; daemon 0.8.0 = 0.8.0), protocol delta problems 0 (only `invoke_menu.delivery_mode`; set_config/type_text reworded), output delta adds only `process_instance`, helper tests. Linux container at c2067c65 (no Linux code after it): platform-linux 1173 / 15, portal-input 1232 / 15, cursor-overlay 158, core 1826 / 3, clippy both feature sets |
+| wp1i | 190a160e | failing first `page_actions_never_hold_the_restore_wait` (red 101, then green); focused suites, cross checks and the Linux container in 019 |
+| whole head | 190a160e | `TMPDIR=/private/tmp` (see follow-ups): 24 steps, failures=0: core-lib 1822 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2036 / 48, windows-host 200, linux-host 110, Linux and Windows target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol (compatible in every launch form with the `page` entry), protocol delta problems 0, output delta adds only `process_instance`, helper tests. Linux container at 190a160e content: platform-linux 1173 / 15, portal-input 1232 / 15, cursor-overlay 158, core 1825 / 3, clippy both feature sets. A first run with `TMPDIR=/tmp` failed core-lib on six Perception sandbox tests (environment, see follow-ups) and was stopped |
 
 Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
 
