@@ -69,7 +69,7 @@ fn def() -> &'static ToolDef {
             route fits the transport budget; longer text is refused with a safe chunk size. In web content \
             (browser tabs, Slack, VS Code) AXValue does not prove the DOM saw the text, so the result is \
             `effect:\"unverifiable\"`; exact web targets use pointer focus and PID key delivery. For a browser \
-            tab use the `page` tool; for an embedded web view pass `x, y` (no element_token) to pixel-click \
+            tab use get_browser_state and browser_type (`page` only reads); for an embedded web view pass `x, y` (no element_token) to pixel-click \
             the field and type in one call (AX-press a closed control open first).".into(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -739,6 +739,21 @@ fn completed_delivery(delivery: TypeTextDelivery) -> Option<(TypeTextOutcome, bo
     }
 }
 
+/// The next step a browser-tab result names when its AXValue read-back is not
+/// proof that the DOM saw the text.
+const BROWSER_TAB_NEXT_STEP: &str =
+    "Check the field before typing again: in a browser tab read it \
+     with get_browser_state and type with browser_type only if the text did not land; in an \
+     embedded web view re-type with the px form (x,y) only after the screenshot shows it missing.";
+
+/// The reason the `page` escalation gives for browser web content: `page` only
+/// reads, so acting on the tab goes through the typed browser tools.
+const BROWSER_TAB_ESCALATION_REASON: &str = "Browser web content — AXValue read-back cannot prove \
+     that the DOM observed the input (and AX type_text on a contenteditable is racy). Confirm via \
+     the screenshot or get_browser_state first; if the text did not land, type it with \
+     browser_type (mode insert_text first; keystrokes if a rich-text editor such as Draft.js, \
+     Lexical or Slate discards the insert).";
+
 /// The hint for a line that landed without its Return. The dispatch seam keeps
 /// a hint the tool set, so its generic "read before typing again" never applies.
 /// A Return whose post failed may still have been sent, so pressing it waits on
@@ -847,8 +862,7 @@ fn type_text_outcome_result(
             "The pixel-focus rung already ran, so do not repeat it; verify the \
                          result via the screenshot."
         } else if web {
-            "For a browser tab use the `page` tool (it drives the DOM); for an \
-                         embedded web view, re-type with the px form (x,y)."
+            BROWSER_TAB_NEXT_STEP
         } else {
             "Read the window to check the text before sending it again."
         };
@@ -914,19 +928,7 @@ fn type_text_outcome_result(
                                  element px action (x,y to pixel-focus the field, then \
                                  type).",
                 )),
-                Some("page") => Some((
-                    "page",
-                    "Browser web content — AXValue read-back cannot prove \
-                                 that the DOM observed the input (and AX type_text on a \
-                                 contenteditable is racy). Drive the tab's DOM with the \
-                                 `page` tool: execute_javascript + el.value/innerText for a \
-                                 plain input; for a rich-text contenteditable \
-                                 (Draft.js/Lexical/Slate-style editors can silently discard \
-                                 a one-shot DOM write on their next render) try insert_text \
-                                 first (one CDP call, cheap), then type_keystrokes if that \
-                                 also gets discarded (real per-character keyboard events, \
-                                 slower but most durable). Or confirm via the screenshot.",
-                )),
+                Some("page") => Some(("page", BROWSER_TAB_ESCALATION_REASON)),
                 _ => None,
             };
             if let Some((recommended, reason)) = escalation {
@@ -5046,6 +5048,22 @@ mod tests {
         assert_eq!(web_readback_next_rung(true, true), None);
         assert_eq!(web_readback_next_rung(false, false), Some("page"));
         assert_eq!(web_readback_next_rung(false, true), Some("page"));
+    }
+
+    #[test]
+    fn browser_tab_guidance_names_the_typed_browser_tools() {
+        // `page` only reads since the wp1i sync (upstream b13430e0): guidance must
+        // not send a browser-tab caller to its removed page actions.
+        for text in [
+            def().description.as_str(),
+            BROWSER_TAB_NEXT_STEP,
+            BROWSER_TAB_ESCALATION_REASON,
+        ] {
+            for removed in ["execute_javascript", "type_keystrokes", "the `page` tool"] {
+                assert!(!text.contains(removed), "{removed:?} in {text:?}");
+            }
+            assert!(text.contains("browser_type"), "{text:?}");
+        }
     }
 
     #[test]

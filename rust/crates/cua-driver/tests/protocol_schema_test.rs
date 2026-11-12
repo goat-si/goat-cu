@@ -453,6 +453,12 @@ fn removed_legacy_page_actions_are_refused_even_with_the_old_opt_in() {
         let mut driver = McpDriver::spawn().expect("spawn default source-built driver");
         let response = driver.call("page", args.clone());
         assert!(response.is_error(), "{action} must refuse by default");
+        // The launch-time authorization gate still stands in front of them.
+        assert!(
+            response.text().contains("requires unrestricted mode"),
+            "{action}: default refusal must name the trusted launch gate: {}",
+            response.text()
+        );
 
         // The old operator switch no longer enables anything.
         let mut driver = McpDriver::spawn_with_env(&[
@@ -465,6 +471,11 @@ fn removed_legacy_page_actions_are_refused_even_with_the_old_opt_in() {
         assert!(
             response.is_error(),
             "{action} must stay refused when the removed switch is set: {}",
+            response.text()
+        );
+        assert!(
+            response.text().contains("was removed"),
+            "{action}: past the gate the page tool must say the action was removed: {}",
             response.text()
         );
     }
