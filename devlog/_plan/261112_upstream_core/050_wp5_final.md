@@ -35,11 +35,17 @@
 | 39cabbe0 | wp2 review | #288 round-4 test robustness |
 | 98632052 | wp3 review | #279 one meaning for AX perform errors in press_key/right_click/double_click; pointer gate (checked_point) before right/double-click pixel routes; APIDisabled click refusal tests; GOAT.md |
 | b724ece4 | style | rustfmt of this branch's macOS files that were clean on origin/main |
+| 458ff8f6 | docs | wp1b lead-side B2 review, dispatch log, final-record draft (pushed as PR #300 under the earlier authority) |
+| d0e90760 | CI fix | goat-ci on PR #300: Windows serve.rs cfg(unix) from the wp1 sync, clippy items_after_test_module (ax/bindings.rs), expect_err, is_multiple_of |
+| 2a726372 | test | re-pin the ax/bindings.rs glob audit after the pure move |
+| 133b2ef9 | wp1d | sync 465aab0b → 4cf88bae (0.47.16): Linux GTK3 overlay hit test, macOS e2e occluder test, vendored cua-telemetry 0.25.0 |
 
 ### Re-fetch before the last D (2026-11-12)
 
 origin/main `40c6f6eb` (unchanged); agent-desktop main `54855b62` (unchanged); trycua/cua main `465aab0b` (0.47.15), 10 commits after
 `e51f5740` → unit wp1c (013).
+Second re-fetch (~05:40 UTC): origin/main and agent-desktop unchanged; trycua/cua main `4cf88bae` (0.47.16 + cua-sdk 0.25.0), 8 commits
+after `465aab0b` → unit wp1d (014).
 
 ### Follow-ups recorded, not done in this lane
 
