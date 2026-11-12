@@ -1130,6 +1130,8 @@ impl BrowserEngine {
             return Err(security_prompt_refusal(true));
         }
         let prepared_profile = prepare_profile(profile_request)?;
+        // Only the macOS/Linux process-group containment below mutates it.
+        #[cfg_attr(windows, allow(unused_mut))]
         let mut command =
             match driver_owned_browser_command(&executable, &profile_root()?, &prepared_profile) {
                 Ok(command) => command,
