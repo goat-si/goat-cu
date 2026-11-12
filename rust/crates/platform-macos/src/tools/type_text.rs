@@ -868,7 +868,10 @@ fn type_text_outcome_result(
                 s["delivered_chars"] = serde_json::json!(delivered_chars);
             }
         }
-        if untrusted_web_readback {
+        if line_without_return {
+            // The line is in the field: any escalation would send it again.
+            // The next step is a Return via press_key (see the note above).
+        } else if untrusted_web_readback {
             // Web-content AXValue read-back. A real browser TAB → the
             // `page` tool (drives the DOM via CDP) is the reliable rung;
             // an embedded web view (Electron, no CDP) → the element px
@@ -4759,6 +4762,9 @@ mod tests {
         assert_eq!(fields["delivered_chars"], 11);
         assert!(fields.get("retryable").is_none(), "{fields}");
         assert!(fields.get("code").is_none(), "{fields}");
+        // The line is in the field: nothing may recommend sending it again,
+        // in foreground or any other rung (wp1c round-2 review).
+        assert!(fields.get("escalation").is_none(), "{fields}");
         let text = format!("{:?}", line.content);
         assert!(text.contains("Do not repeat type_text"), "{text}");
 
