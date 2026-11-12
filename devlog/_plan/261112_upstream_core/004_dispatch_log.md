@@ -199,3 +199,10 @@ pid 1 → c7cce744 (`a_leaked_marker_never_makes_the_suite_the_lone_child` red a
 with and without a leaked marker, clippy clean). Decisions recorded with review_findings.record.
 2026-11-12: fresh final review before merge dispatched at 7cac46e0 as `cu-final-review-7cac46e0-s24` (a3bd993b, f3107f37, c7cce744;
 codex / system24/deepseek-v4.1-flash / high); 743260c6 (libei flaky test, found by the 7cac46e0 container run) added to its scope.
+2026-11-12: `cu-final-review-7cac46e0-s24` NEAR-PASS (steered at 15:56 UTC past its 45-minute bound): medium, the libei wait counted any
+logged event (a probe Shift tap could release it; not reachable with this fixture, which reports the keyboard) → text parts only; low,
+"Return not pressed" asserted for a post that may have gone out → "Return not confirmed" (red at type_text.rs:4809); low, GOAT.md chord
+codes. All in 7d048914; round 2 with the same reviewer (`cu-final-review-7d048914-r2-s24`, continueFrom) PASS, no findings.
+2026-11-12: the re-fetch before the last D found trycua/cua at 7dc3cc43 → unit wp1h (018). Fresh reviews dispatched at c2067c65, split as in
+earlier units: `cu-review-wp1h-a-c2067c65-s24` (macOS cursor, #287, scale rule) and `cu-review-wp1h-b-c2067c65-s24` (disabled controls,
+history, permissions, releases, completeness; 9b9b29af added to its scope); both returned codex / system24/deepseek-v4.1-flash / high.

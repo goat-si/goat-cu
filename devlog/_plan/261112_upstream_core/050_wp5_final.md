@@ -75,6 +75,10 @@
 | c7cce744 | ff6658cc review | GOAT.md lists which APIDisabled refusals are typed (press_key's menu-chord refusal stays untyped: menu validation may have posted Cmd+F20); Linux fd test marker is `spawned-by-<pid>` |
 | 7cac46e0 | docs | ff6658cc review decisions |
 | 743260c6 | test fix | libei `a_text_stops_when_its_tool_call_is_over` (upstream, unchanged) abandoned the call after a fixed 50 ms settle and failed when the typing thread had sent nothing yet (seen under the receipt's load and 1 in 20 idle runs); it now waits on the server log for the first part (red with a scratch 200 ms typing delay, then 30/30, portal-input 1230 / 15) |
+| 7761e270 | docs | receipt at 7cac46e0, libei fix |
+| 7d048914 | final review before merge | type_text message "Return not confirmed" (a failed post may have gone out); libei wait counts text parts only; GOAT.md names both chord refusal codes |
+| c2067c65 | wp1h | sync 56a69039 → 7dc3cc43 (018): macOS cursor on every display and action marks retired, with GOAT's #287 parked loop and no-guessed-scale rule; disabled Linux/Windows controls indexed and refused; Computer History deprecated (GOAT's start guide too); permissions direct-capture status; installer 0.47.19; vendored cua-telemetry 0.26.0 |
+| 9b9b29af | wp1h | upstream's Windows-only disabled-row test sets GOAT's `checked`/`expanded` (Windows-target check 101 → 0) |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -90,6 +94,8 @@ Final re-fetch (~09:50 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62`
 `4f2aa028`, one in scope (b9e38d1a, #6498) → unit wp1f (016), folded into the wp6 cycle as task wp6/t2.
 Re-fetch after ff6658cc (~11:45 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged; trycua/cua main `56a69039`
 (cua-driver-rs 0.47.19), 2 commits after `b9e38d1a` in `libs/cua-driver`, release bookkeeping only → unit wp1g (017), task wp6/t3.
+Re-fetch before the last D (~16:20 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged; trycua/cua main `7dc3cc43`,
+7 commits after `56a69039` in `libs/cua-driver` (54 files) → unit wp1h (018), task wp6/t4.
 
 ### Follow-ups recorded, not done in this lane
 
@@ -226,6 +232,7 @@ change is provably additive. `contract/manifest.json` and both UniFFI binding se
 | wp1e | 068c9a00 | failures=0 (15 steps): contract 91, contract-gen --check, uniffi --check, contract_parity, schema_consistency, protocol_schema_test 2, check_protocol, macOS invoke_menu 33, windows host 207, Linux container 1168, requalify new tests 2, python compat 2 |
 | whole head | eb04e2a0 | `/tmp/goat-cu-sync/receipt-final.sh` 24 steps, failures=0: kache doctor, host `cargo check --all-targets` (platform-macos, core, cursor-overlay, cua-driver, sdk, contract), core lib + integration, contract lib, cursor-overlay lib, platform-macos lib, platform-windows host, Linux x86_64 and Windows MSVC target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, cargo deny, `cargo build -p cua-driver`, platform-linux host lib, e2e `--tests` check, check_protocol, protocol and output deltas, Wayland helper node checks. Linux container at the same content: cursor-overlay 157, platform-linux --lib --features portal-input 1229 / 15 ignored; default features 1170 / 15 and clippy at ff6658cc (no Rust change after it but fd7b782a's test-only doc) |
 | whole head | 7cac46e0 | the same 24 steps, failures=0. Linux container: cursor-overlay 157, cua-driver-core --lib 1826 / 3, platform-linux --lib 1171 / 15 (with and without a leaked marker) and clippy; portal-input 1229 / 1 failed under the receipt's concurrent load (`a_text_stops_when_its_tool_call_is_over`, a fixed-settle test from upstream), 1230 / 0 rerun idle → fixed in 743260c6 (portal-input 1230 / 15, default 1171 / 15, clippy both, 30/30 standalone) |
+| wp1h | c2067c65 / 9b9b29af | receipt 22/24 at c2067c65 (windows-target, windows-bins: E0063 in upstream's Windows-only test) → both 0 at 9b9b29af; focused suites and the Linux container in 018 |
 
 Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
 
