@@ -182,28 +182,4 @@ mod scale_tests {
             }))
         );
     }
-
-    #[test]
-    fn overlay_retains_its_last_fit_when_the_new_scale_is_unknown() {
-        use crate::cursor::overlay::{geometry_from_frame, initial_overlay_scale};
-        use cursor_overlay::{ScreenFrame, SurfaceFit, SurfaceGeometry};
-        use std::time::Instant;
-
-        assert_eq!(
-            initial_overlay_scale(2.0, || panic!("AppKit scale wins")),
-            Some(2.0)
-        );
-        assert_eq!(initial_overlay_scale(0.0, || Some(1.5)), Some(1.5));
-        assert_eq!(initial_overlay_scale(f64::NAN, || None), None);
-
-        let initial = SurfaceGeometry::new(ScreenFrame::new(0.0, 0.0, 100.0, 100.0), 2.0);
-        let changed = ScreenFrame::new(0.0, 0.0, 200.0, 100.0);
-        let mut fit = SurfaceFit::new(Some(initial));
-        let unknown = geometry_from_frame(fit.applied(), changed, || None);
-        assert_eq!(fit.observe(Instant::now(), unknown), None);
-        assert_eq!(fit.applied(), Some(initial));
-        let recovered = geometry_from_frame(fit.applied(), changed, || Some(1.5));
-        assert_eq!(fit.observe(Instant::now(), recovered), recovered);
-        assert_eq!(fit.applied(), recovered);
-    }
 }

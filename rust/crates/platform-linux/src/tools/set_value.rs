@@ -14,7 +14,7 @@ use crate::atspi::native::{OptionPick, OptionPickSent};
 use super::impl_::{
     attach_focus_guard, background_virtual_key, background_virtual_text, foreground_budget,
     input_error_result, non_ax_escalation, position_named_session_keyboard_cursor,
-    prove_token_element, resolve_cursor_key, resolve_element_local_coords,
+    prove_token_element, refuse_if_disabled, resolve_cursor_key, resolve_element_local_coords,
     spawn_text_write_bounded, stale_observed_element, text_write_stop_result, values_agree,
     window_local_to_screen, x11_pixel_click_no_focus_steal, ToolState,
 };
@@ -160,6 +160,9 @@ impl Tool for SetValueTool {
             Ok(token) => token,
             Err(refusal) => return refusal,
         };
+        if let Some(refusal) = refuse_if_disabled(pid, &resolved, "set_value").await {
+            return refusal;
+        }
         let (token, xid) = match (token, &resolved) {
             (
                 Some(token),

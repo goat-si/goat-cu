@@ -39,6 +39,9 @@ pub struct CachedElement {
     /// D-Bus address for the cached fast paths (same object as `identity`).
     pub object_ref: Option<ObjectRef>,
     pub role: String,
+    /// The snapshot read the node as disabled. A disabled control is indexed
+    /// so its state can be read, but a point hit never picks it.
+    pub disabled: bool,
     /// The node lives inside an embedded web document (bounds need the
     /// document origin, which only a walk resolves).
     pub in_web_content: bool,
@@ -77,6 +80,7 @@ impl AtspiSnapshot {
                         identity,
                         object_ref: node.object_ref.clone(),
                         role: node.role.clone(),
+                        disabled: node.enabled == Some(false),
                         in_web_content: node.in_web_content,
                         bounds: None,
                     },
@@ -131,8 +135,11 @@ pub(crate) fn hit_test(
             let (x, y, w, h) = e.bounds?;
             // The application's own frame is never the control under a
             // point; leave such a hit to the live descent.
-            (w > 0 && h > 0 && !crate::at_point_policy::is_top_level_shell_role(&e.role))
-                .then_some((pos, x, y, w, h, native::is_passive_role(&e.role)))
+            (w > 0
+                && h > 0
+                && !e.disabled
+                && !crate::at_point_policy::is_top_level_shell_role(&e.role))
+            .then_some((pos, x, y, w, h, native::is_passive_role(&e.role)))
         })
         .collect();
     let pos = native::select_click_target(&frames, sx, sy)?;
@@ -342,6 +349,19 @@ mod tests {
                 &serde_json::json!({ "element_token": token_for(id, 0) })
             )
             .is_err());
+    }
+
+    #[test]
+    fn snapshot_hit_test_never_picks_a_disabled_control() {
+        let mut disabled = node_with_role(1, "push button");
+        disabled.enabled = Some(false);
+        let nodes = vec![node_with_role(0, "panel"), disabled];
+        // GOAT: the store-free build_snapshot / hit_test(elements, ..) API
+        // replaces upstream's per-window update_snapshot / forget_window.
+        let snapshot = build_snapshot(&nodes, &[(0, 0, 0, 500, 500), (1, 100, 100, 50, 20)]);
+        assert!(snapshot.retain(1).unwrap().disabled);
+        let (idx, _) = hit_test(&snapshot.elements(), 110, 110).expect("hit");
+        assert_eq!(idx, 0, "a point over a disabled button must not pick it");
     }
 
     #[test]

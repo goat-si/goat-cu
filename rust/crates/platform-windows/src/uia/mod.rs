@@ -1708,13 +1708,12 @@ fn emit_cached_node(
     let raw_has_content = name.as_deref().is_some_and(|s| !s.trim().is_empty())
         || value.as_deref().is_some_and(|s| !s.trim().is_empty());
     let enabled = read_cached_bool(element, UIA_IsEnabledPropertyId, ctx);
-    // Missing UIA state must remain unknown on the structured observation
-    // surface. Action discovery keeps its historical best-effort assumption.
-    let is_enabled = enabled.unwrap_or(true);
+    // A disabled control is indexed and published with `enabled: false`, as on
+    // macOS: enablement is state the caller needs to read, not a reason to hide
+    // the row. The token writers refuse it (`tools::impl_::refuse_if_disabled`).
     let (has_value_pattern, actions) = collect_pattern_evidence(
-        is_enabled,
         || unsafe { cached_pattern(element, UIA_ValuePatternId, ctx) }.is_some(),
-        || detect_cached_actions(element, &control_type, is_enabled, ctx),
+        || detect_cached_actions(element, &control_type, ctx),
     );
     let ProjectedNodeText {
         name,
@@ -1734,7 +1733,7 @@ fn emit_cached_node(
     let selected = read_cached_selected(element, ctx);
     let checked = read_cached_checked(element, ctx);
     let expanded = read_cached_expanded(element, ctx);
-    let is_actionable = !actions.is_empty() && is_enabled;
+    let is_actionable = !actions.is_empty();
     let has_content = name
         .as_deref()
         .map(|s| !s.trim().is_empty())
@@ -1951,12 +1950,8 @@ unsafe fn cached_pattern(
 fn detect_cached_actions(
     element: &IUIAutomationElement,
     control_type: &str,
-    is_enabled: bool,
     ctx: &UiaReadCtx<'_>,
 ) -> Vec<String> {
-    if !is_enabled {
-        return vec![];
-    }
     let mut actions = Vec::new();
     unsafe {
         for (id, action) in [
@@ -2134,6 +2129,9 @@ pub(crate) fn format_node_line(node: &UiaNode) -> String {
         if let Some(h) = &node.help_text {
             attrs.push(format!("help=\"{}\"", h));
         }
+        if node.enabled == Some(false) {
+            attrs.push("enabled=false".to_owned());
+        }
         // States are part of the row so a state-only change shows up in incremental reads,
         // which compare rows.
         if let Some(checked) = node.checked {
@@ -2224,6 +2222,41 @@ fn filter_tree(markdown: &str, query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_disabled_control_row_says_so() {
+        let node = UiaNode {
+            element_index: Some(7),
+            control_type: "CheckBox".into(),
+            name: Some("Reset".into()),
+            value: None,
+            automation_id: Some("chk-reset".into()),
+            help_text: None,
+            actions: vec!["toggle".into()],
+            enabled: Some(false),
+            selected: Some(false),
+            element_ptr: 0,
+            center_x: 0,
+            center_y: 0,
+            rect: None,
+            msaa_role: None,
+            depth: 0,
+            parent_element_index: None,
+            in_web_content: false,
+        };
+        assert_eq!(
+            format_node_line(&node),
+            "- [7] CheckBox \"Reset\" [id=chk-reset enabled=false actions=[toggle]]"
+        );
+        let enabled = UiaNode {
+            enabled: Some(true),
+            ..node
+        };
+        assert_eq!(
+            format_node_line(&enabled),
+            "- [7] CheckBox \"Reset\" [id=chk-reset actions=[toggle]]"
+        );
+    }
 
     #[test]
     fn com_init_accepts_an_existing_apartment_of_either_mode() {

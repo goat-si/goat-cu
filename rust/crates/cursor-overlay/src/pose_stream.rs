@@ -450,7 +450,6 @@ mod tests {
             float: true,
             halo: true,
             rotate,
-            ..CursorOptions::default()
         }
     }
 

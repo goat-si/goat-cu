@@ -386,6 +386,17 @@ pub fn element_showing_observed(element: &cache::CachedElement) -> Result<bool> 
     native::element_showing_ref(object_ref)
 }
 
+/// Whether the exact object a snapshot observed is enabled right now. `None`
+/// when it exposes no state set. Never re-walks.
+pub fn element_enabled_observed(element: &cache::CachedElement) -> Result<Option<bool>> {
+    let Some(object_ref) = element.object_ref.as_ref() else {
+        return Err(
+            native::CachedElementGone("observed element has no D-Bus address".into()).into(),
+        );
+    };
+    native::element_enabled_ref(object_ref)
+}
+
 /// Give an indexed AT-SPI element keyboard focus without activating its window.
 pub fn focus_element(pid: u32, idx: usize) -> Result<bool> {
     native::focus_element(pid, idx)
@@ -1075,6 +1086,7 @@ mod token_dispatch_tests {
                     path: path.into(),
                 }),
                 role: "text".into(),
+                disabled: false,
                 in_web_content: false,
                 bounds: None,
             },

@@ -63,6 +63,20 @@ impl RetainedElement {
             .map_err(|hr| anyhow::anyhow!("UIA SetFocus returned HRESULT 0x{:08X}", hr as u32))
     }
 
+    /// The element's live `IsEnabled`. `None` for an MSAA element or when UIA
+    /// cannot read it.
+    pub fn element_is_enabled(&self) -> Option<bool> {
+        if !self.is_uia() || self.ptr == 0 {
+            return None;
+        }
+        let element = std::mem::ManuallyDrop::new(unsafe {
+            IUIAutomationElement::from_raw(self.ptr as *mut _)
+        });
+        unsafe { element.CurrentIsEnabled() }
+            .ok()
+            .map(|value| value.as_bool())
+    }
+
     pub fn element_has_keyboard_focus(&self) -> Option<bool> {
         if !self.is_uia() {
             return None;

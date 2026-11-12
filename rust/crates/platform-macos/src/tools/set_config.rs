@@ -40,10 +40,10 @@ fn def() -> &'static ToolDef {
             cursor.motion.timing and cursor.motion.effects.<trail|glow|magnet|ripple|squish> are saved there \
             and seed sessions started afterwards (start_session cursor_motion and set_agent_cursor_motion \
             override them; reduced motion wins). cursor.badges (minimal by default, verbose or off) is saved \
-            and applies to every cursor. cursor.float and cursor.halo (on by default), cursor.marks (off by \
-            default) and cursor.rotate (heading by default, lean or off) are saved and apply to every cursor; \
-            each also takes default. fast_path applies now and is not saved. capture_mode is a per-call \
-            argument; the capture_scope key is retired."
+            and applies to every cursor. cursor.float and cursor.halo (on by default) and cursor.rotate \
+            (heading by default, lean or off) are saved and apply to every cursor; each also takes default. \
+            The cursor never draws action marks (cursor.marks is retired and ignored). fast_path applies now \
+            and is not saved. capture_mode is a per-call argument; the capture_scope key is retired."
             .into(),
         input_schema: with_cursor_motion_properties(serde_json::json!({
             "type": "object",

@@ -155,7 +155,7 @@ pub(super) const ENTRIES: &[Entry] = &[
         file: "cursor/overlay.rs",
         item: "run_appkit",
         primitive: "std::thread::spawn",
-        fingerprint: 7844733029246040032,
+        fingerprint: 7198220637949120086,
         occurrence: 1,
         category: Category::Read,
         reason: "overlay renderer service; no application input",

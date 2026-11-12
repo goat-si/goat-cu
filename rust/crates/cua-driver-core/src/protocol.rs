@@ -622,15 +622,18 @@ mod agent_instruction_tests {
     }
 
     #[test]
-    fn the_start_guide_conditionally_consults_history_before_discovery() {
+    fn agents_are_not_sent_to_deprecated_history() {
+        // Computer History is deprecated (upstream 0b6922ba): neither the
+        // initialize instructions nor any platform's start guide sends agents to it.
+        let instructions = initialize_result()["instructions"]
+            .as_str()
+            .expect("initialize result should carry agent instructions")
+            .to_owned();
+        assert!(!instructions.contains("history_status"));
+        assert!(!instructions.contains("history_query"));
         for (_, guide) in start_guides() {
-            assert!(guide.contains("continuation/recent-work"));
-            let status = guide.find("call `history_status`").unwrap();
-            let bounded_query = guide.find("one bounded initial `history_query`").unwrap();
-            let discovery = guide.find("broad discovery").unwrap();
-            assert!(status < bounded_query);
-            assert!(bounded_query < discovery);
-            assert!(guide.contains("if ready"));
+            assert!(!guide.contains("history_status"), "{guide}");
+            assert!(!guide.contains("history_query"), "{guide}");
         }
     }
 }

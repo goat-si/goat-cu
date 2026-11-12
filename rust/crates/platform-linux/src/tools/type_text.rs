@@ -20,9 +20,9 @@ use super::impl_::{
     is_terminal_process, is_webkitgtk_embedder, isolated_hyprland_background,
     isolated_hyprland_refusal, isolated_hyprland_result, isolated_hyprland_task_error,
     named_session_cursor_key, position_named_session_keyboard_cursor, prove_token_element,
-    resolve_cursor_key, spawn_blocking_bounded, spawn_isolated_hyprland, spawn_text_write_bounded,
-    stale_observed_element, terminal_pty_number, text_route_error_result, text_typing_budget,
-    text_write_stop_result, token_failure_structured, typing_budget,
+    refuse_if_disabled, resolve_cursor_key, spawn_blocking_bounded, spawn_isolated_hyprland,
+    spawn_text_write_bounded, stale_observed_element, terminal_pty_number, text_route_error_result,
+    text_typing_budget, text_write_stop_result, token_failure_structured, typing_budget,
     unavailable_chromium_background, unavailable_wayland_focused_input_background,
     unavailable_webkit_keyboard_background, values_agree, KeyRoute, ToolState,
 };
@@ -535,6 +535,9 @@ impl Tool for TypeTextTool {
             Ok(token) => token,
             Err(refusal) => return refusal,
         };
+        if let Some(refusal) = refuse_if_disabled(pid, &resolved, "type_text").await {
+            return refusal;
+        }
         // Characters a keymap cannot type are named in the result, unless the
         // target is a password field or unknown (no element_token).
         let secret = match token.clone() {
