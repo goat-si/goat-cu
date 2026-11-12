@@ -50,6 +50,8 @@
 | 3be03b46 | wp1f | sync 4f2aa028 → b9e38d1a: libxkbcommon 1.0 text functions resolved at run time (Linux; Ubuntu 20.04 loads the driver) |
 | c0205638 | docs | final re-fetch; unit wp1f |
 | b0c7a85a | CI fix | paused-clock batch pacing test runs on its own desktop lane (goat-ci run 43183852970) |
+| 7c5cfcd1 | docs | batch pacing CI fix record; reviews re-dispatched after the GOAT restart |
+| 57e9cae1 | test fix | libei.rs tests compile with `portal-input` again (pre-existing on origin/main since 87e2e869) |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -66,6 +68,8 @@ Final re-fetch (~09:50 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62`
 
 ### Follow-ups recorded, not done in this lane
 
+- CI builds no `platform-linux` tests with `portal-input`, so the libei and portal tests (59 more than the default set) ran nowhere until
+  57e9cae1; adding `--features portal-input` to a Linux unit job would keep them compiling (workflow change left to the maintainers).
 - Linux element tokens are not bound to the process instance (Linux publishes and resolves with `NotChecked`); Windows and macOS are.
   Needs `publish_*_with_instance` + `resolve_for_instance` in platform-linux (020).
 - `browser/prepare.rs:1134`: a `profile_root()` error after profile creation skips cleanup (inherited byte-identical from upstream,
@@ -132,6 +136,13 @@ helper safety harnesses. Logs: /tmp/goat-cu-sync/receipt-final/.
   `ToolRegistry::isolate_desktop` (own coordinator and lane, as tool.rs's lane test does) and `Harness::isolated()`; the same scratch hold
   then passes. `cua-driver-core --lib`: macOS 3x 1823 passed / 3 ignored (kache), Linux container 2x 1826 passed / 3 ignored; clippy
   -D warnings (platform-linux, cua-driver-core) clean. It is the only `start_paused` test in batch_tools.
+- Found by a local x86_64 cross-check at 7c5cfcd1 (`cargo check --target x86_64-unknown-linux-gnu -p cua-driver -p cursor-theme-cli
+  -p cua-driver-sdk -p platform-linux --features cua-driver/portal-input --all-targets`, exit 101): `wayland/libei.rs`'s test module held
+  GOAT's `Emitted` and upstream's `use local_eis::{record, Emitted}` (from 87e2e869, already on origin/main), so `platform-linux` tests
+  did not compile with `portal-input` (11 errors). No CI job builds them with that feature (cua-driver's default features are empty),
+  which is why main stays green. 57e9cae1 imports the upstream one as `EisEmitted`. Linux container: red 11 compile errors →
+  `cargo test --locked -p platform-linux --lib --features portal-input` 1229 passed / 15 ignored, clippy with the feature -D warnings
+  clean; the cross-check then exits 0 (Windows target, Linux x86_64 bins + platform-linux, clippy Linux x86_64 and macOS).
 - PR #300 at b54560e5 (run 43156456005, `PR Linux schema contract and platform unit`):
   `wayland::mutter_display::tests::a_socket_that_never_accepts_fails_at_once_and_leaves_nothing_open` failed 81 vs 79 at
   mutter_display.rs:523 with 1167 other tests passing. The socket path closes its descriptor on every error (`connect_bounded` owns
