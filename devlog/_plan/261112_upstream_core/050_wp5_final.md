@@ -63,6 +63,8 @@
 | 8248c43b | wp1g | sync b9e38d1a → 56a69039 (cua-driver-rs 0.47.19): CHANGELOG entry, published installer version 0.47.18; GOAT keeps its versions (017) |
 | eb04e2a0 | docs | wp1g re-fetch and unit record |
 | fd7b782a | wp1f/CI review | `ToolRegistry::isolate_desktop` doc names its limit: calls dispatched through the registry only (test-only item) |
+| 9f79bc0f, 222d484a | docs | wp1f/CI review decisions; issue table and final receipt at eb04e2a0 |
+| bfef37d8 | final review of 83aeb256/1f2060af | the landed-line hint reads the field before Return (a failed Return post may still have been sent); GNOME parked-float doc wording |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -83,6 +85,8 @@ Re-fetch after ff6658cc (~11:45 UTC): origin/main `40c6f6eb` and agent-desktop `
 
 - #287 round-2 review P3 (rebutted, residual): the macOS parked-wake seam (charge idle time before applying commands) has no direct
   test; the X11 loop has one via `apply_messages_after_wake`. A test needs that drain extracted from the AppKit loop.
+  The final review adds the same for the parked repin wiring (`next_repin_pinned`, `last_repin` at `cursor/overlay.rs:982`,
+  `:1090`): only `parked_wait` and `parked_repin_due` are tested.
 - Linux GTK3 hit test (upstream 7dbc78d1, taken byte-identical in 133b2ef9; final review of the CI/wp1d slice): the `SiblingStacking`
   first-match correction checks only the application's toolkit, so it may apply inside an embedded toolkit's subtree (WebKitGTK web
   process) at `atspi/native.rs:5359`; and its extra AT-SPI round-trips share the 1500 ms `INPUT_QUERY_BUDGET`, where a timeout yields

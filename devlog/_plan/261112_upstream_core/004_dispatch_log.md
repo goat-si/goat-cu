@@ -167,3 +167,9 @@ and `renamed_tool` routes type_text_chars calls to type_text (`cua-driver-core/s
 (050). P3-4 (isolate_desktop doc) accepted → fd7b782a (core check and clippy --all-targets -D warnings exit 0). Decisions recorded with
 review_findings.record. The detached whole-head receipt started last turn was killed at turn end (nohup did not survive); rerun inside
 the turn at eb04e2a0: 24 steps, failures=0 (050).
+2026-11-12: `cu-final-83aeb256-1f2060af-s24`: 83aeb256 PASS, 1f2060af PASS, the wp1e rebuttal HOLDS (step tools come only from
+BATCHABLE_TOOLS at parse time, `batch_tools.rs:2602-2621`, `:2667`; the menu reroute keeps `tool == "click"`; run_script admits no
+invoke_menu and has no fallback). Low: the landed-line hint said to press Return although a failed post may have been sent →
+bfef37d8 (assertion red at type_text.rs:4806, then type_text 61 / 1, --lib 2031 / 48, clippy clean); low: GNOME doc wording →
+bfef37d8; low coverage of the parked repin wiring → recorded residual (050); nit batch_nudge noise → no change. Fresh review of
+bfef37d8 dispatched as `cu-review-bfef37d8-s24` (codex / system24/deepseek-v4.1-flash / high).
