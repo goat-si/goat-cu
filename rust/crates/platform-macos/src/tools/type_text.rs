@@ -741,9 +741,9 @@ fn completed_delivery(delivery: TypeTextDelivery) -> Option<(TypeTextOutcome, bo
 
 /// The next step a browser-tab result names when its AXValue read-back is not
 /// proof that the DOM saw the text.
-const BROWSER_TAB_NEXT_STEP: &str = "In a browser tab check it with get_browser_state and type \
-     with browser_type only if the text did not land; in an embedded web view use the px form \
-     (x,y) only once the screenshot shows it missing.";
+const BROWSER_TAB_NEXT_STEP: &str = "In a browser tab check it with get_browser_state, then type \
+     with browser_type if it did not land; in an embedded web view use the px form (x,y) once the \
+     screenshot shows it missing.";
 
 /// The reason the `page` escalation gives for browser web content: `page` only
 /// reads, so acting on the tab goes through the typed browser tools.
@@ -863,7 +863,7 @@ fn type_text_outcome_result(
         } else if web {
             BROWSER_TAB_NEXT_STEP
         } else {
-            "Read the window to check the text before sending it again."
+            "Check the text in a fresh read of the window."
         };
         let surface = if web {
             "Web content (Chromium / WebKit / Electron): its AXValue read-back is not \
@@ -872,11 +872,12 @@ fn type_text_outcome_result(
             "The window's focused element could not be read, so the AXValue read-back \
              cannot be tied to the target window."
         };
-        // The read-first rule leads, ahead of the char count and the variable
-        // detail (field title, document note), and the next step comes before
-        // the explanation, so run_steps' 300-character step message keeps them.
+        // The read-first rule and its condition lead, ahead of the char count
+        // and the variable detail (field title, document note), and the next
+        // step comes before the explanation, so run_steps' 300-character step
+        // message can never keep a write without its condition.
         (
-            "📨 Sent (unverified), so read the field before typing again —",
+            "📨 Sent (unverified): read the field, and type again only if the text is missing.",
             format!(" {next_step} {surface}"),
         )
     } else if path == PATH_KEY_EVENTS_FG {
@@ -5110,12 +5111,17 @@ mod tests {
             let first_line = text.lines().next().unwrap_or("").to_owned();
             first_line.chars().take(300).collect::<String>()
         };
-        let long = format!(" into AXTextField \"{}\"", "x".repeat(240));
-        let bounded = step_message(long, 99_999);
-        assert!(
-            bounded.contains("read the field before typing again"),
-            "{bounded}"
-        );
+        // Whatever the field title or note, the cut keeps the condition on
+        // typing again, never an unconditional write.
+        for len in 0..=300 {
+            for count in [1, 99_999, 1_234_567] {
+                let bounded = step_message(" ".repeat(len), count);
+                assert!(
+                    bounded.contains("type again only if the text is missing"),
+                    "detail {len}, count {count}: {bounded}"
+                );
+            }
+        }
         let bounded = step_message(String::new(), 99_999);
         assert!(bounded.contains(BROWSER_TAB_NEXT_STEP), "{bounded}");
     }
