@@ -68,8 +68,8 @@ fn def() -> &'static ToolDef {
             Where AX insertion is unsupported (Chromium/Electron) it falls back to CGEvent typing when the \
             route fits the transport budget; longer text is refused with a safe chunk size. In web content \
             (browser tabs, Slack, VS Code) AXValue does not prove the DOM saw the text, so the result is \
-            `effect:\"unverifiable\"`; exact web targets use pointer focus and PID key delivery. For a browser \
-            tab use get_browser_state and browser_type (`page` only reads); for an embedded web view pass `x, y` (no element_token) to pixel-click \
+            `effect:\"unverifiable\"`; exact web targets use pointer focus and PID key delivery. For a Chromium \
+            tab use get_browser_state and browser_type (`page` only reads); for Safari, Firefox or an embedded web view pass `x, y` (no element_token) to pixel-click \
             the field and type in one call (AX-press a closed control open first).".into(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -740,18 +740,20 @@ fn completed_delivery(delivery: TypeTextDelivery) -> Option<(TypeTextOutcome, bo
 }
 
 /// The next step a browser-tab result names when its AXValue read-back is not
-/// proof that the DOM saw the text.
-const BROWSER_TAB_NEXT_STEP: &str = "In a browser tab check it with get_browser_state, then type \
-     with browser_type if it did not land; in an embedded web view use the px form (x,y) once the \
-     screenshot shows it missing.";
+/// proof that the DOM saw the text. The typed browser tools attach to Chromium
+/// only; Safari and Firefox refuse `get_browser_state`, so they take the px form.
+const BROWSER_TAB_NEXT_STEP: &str = "In a Chromium tab check it with get_browser_state, then type \
+     with browser_type if it did not land; in Safari, Firefox or an embedded web view use the px \
+     form (x,y) once the screenshot shows it missing.";
 
 /// The reason the `page` escalation gives for browser web content: `page` only
-/// reads, so acting on the tab goes through the typed browser tools.
+/// reads, so acting on a Chromium tab goes through the typed browser tools and
+/// Safari or Firefox through the px form.
 const BROWSER_TAB_ESCALATION_REASON: &str = "Browser web content — AXValue read-back cannot prove \
      that the DOM observed the input (and AX type_text on a contenteditable is racy). Confirm via \
-     the screenshot or get_browser_state first; if the text did not land, type it with \
-     browser_type (mode insert_text first; keystrokes if a rich-text editor such as Draft.js, \
-     Lexical or Slate discards the insert).";
+     the screenshot or, in Chromium, get_browser_state first; if the text did not land, type it \
+     with browser_type (mode insert_text first; keystrokes if a rich-text editor such as Draft.js, \
+     Lexical or Slate discards the insert), or in Safari and Firefox with the px form (x,y).";
 
 /// The hint for a line that landed without its Return. The dispatch seam keeps
 /// a hint the tool set, so its generic "read before typing again" never applies.
@@ -5064,10 +5066,19 @@ mod tests {
             BROWSER_TAB_NEXT_STEP,
             BROWSER_TAB_ESCALATION_REASON,
         ] {
-            for removed in ["execute_javascript", "type_keystrokes", "the `page` tool"] {
+            for removed in [
+                "execute_javascript",
+                "type_keystrokes",
+                "the `page` tool",
+                "page tool",
+            ] {
                 assert!(!text.contains(removed), "{removed:?} in {text:?}");
             }
             assert!(text.contains("browser_type"), "{text:?}");
+            // The typed browser tools attach to Chromium only; Safari and
+            // Firefox callers are sent to the pixel route instead.
+            assert!(text.contains("Chromium"), "{text:?}");
+            assert!(text.contains("Safari"), "{text:?}");
         }
         // After an unverified send the caller reads first and types again only
         // if the text did not land.

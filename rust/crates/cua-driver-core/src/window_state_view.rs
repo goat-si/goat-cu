@@ -2242,7 +2242,7 @@ mod tests {
     #[test]
     fn boundary_markers_and_completeness_survive_diff_and_no_change() {
         let window = 88002;
-        let (mut content, mut first) = payload("s0000ab01", OLD);
+        let (mut content, mut first) = payload("s0000ab41", OLD);
         first["observation_complete"] = json!(false);
         first["observation_incomplete_reasons"] = json!([{"kind":"budget","detail":"node_budget"}]);
         first["elements"][0]["boundary"] = json!({"reasons":[{"kind":"budget","detail":"node_budget"}], "children_skipped":{"known":3}});
@@ -2253,14 +2253,14 @@ mod tests {
             .unwrap()
             .contains("[+3 more: node_budget]"));
         assert!(text_of(&content).contains("[more: unknown: not_asserted]"));
-        let (mut content, mut second) = payload("s0000ab02", OLD);
+        let (mut content, mut second) = payload("s0000ab42", OLD);
         second["observation_complete"] = json!(false);
         second["observation_incomplete_reasons"] =
             json!([{"kind":"budget","detail":"node_budget"}]);
         second["elements"][0]["boundary"] = json!({"reasons":[{"kind":"budget","detail":"node_budget"}], "children_skipped":{"known":3}});
         second["elements"][1]["boundary"] = json!({"reasons":[{"kind":"unknown","detail":"not_asserted"}], "children_skipped":"unknown"});
         apply(
-            &opts(json!({"since":"s0000ab01"})),
+            &opts(json!({"since":"s0000ab41"})),
             &ctx(window),
             &mut content,
             &mut second,
