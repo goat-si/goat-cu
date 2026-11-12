@@ -210,6 +210,12 @@ pub fn delta_target(args: &Value, session: Option<&str>) -> Option<(i32, u64)> {
     if !mode().deltas() {
         return None;
     }
+    delta_window(args, session)
+}
+
+/// [`delta_target`] without the mode check: the window these arguments
+/// name for `session`.
+fn delta_window(args: &Value, session: Option<&str>) -> Option<(i32, u64)> {
     let pid = args.get("pid").and_then(Value::as_i64).map(|p| p as i32);
     let window = args.get("window_id").and_then(Value::as_u64);
     if let (Some(pid), Some(window)) = (pid, window) {
@@ -323,7 +329,9 @@ mod tests {
     }
 
     /// #288 review: a token maps to its window only for the session that
-    /// recorded the snapshot, and only for an element it listed.
+    /// recorded the snapshot, and only for an element it listed. Read
+    /// through the mode-free lookup, so the test never turns the daemon-wide
+    /// mode on under concurrent `tool::` dispatch tests.
     #[test]
     fn an_element_token_delta_maps_only_its_sessions_snapshot() {
         let _guard = crate::fast_path::tests_lock();
@@ -341,19 +349,17 @@ mod tests {
         );
         let args = json!({ "element_token": crate::element_token::token_for(snapshot, 0) });
         let session = Some("__cua_runtime_x:implicit-direct");
-        apply_config_args(&json!({"fast_path": "on"})).unwrap();
-        let own = delta_target(&args, session);
-        let foreign = delta_target(&args, Some("__cua_runtime_x:other"));
-        let unnamed = delta_target(&args, None);
-        let past_the_list = delta_target(
+        let own = delta_window(&args, session);
+        let foreign = delta_window(&args, Some("__cua_runtime_x:other"));
+        let unnamed = delta_window(&args, None);
+        let past_the_list = delta_window(
             &json!({ "element_token": crate::element_token::token_for(snapshot, 1) }),
             session,
         );
-        let absent = delta_target(
+        let absent = delta_window(
             &json!({ "element_token": crate::element_token::token_for(snapshot + 1, 0) }),
             session,
         );
-        apply_config_args(&json!({"fast_path": "off"})).unwrap();
         assert_eq!(own, Some((77, 9)));
         assert_eq!(
             (foreign, unnamed, past_the_list, absent),

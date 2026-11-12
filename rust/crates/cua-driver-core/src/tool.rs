@@ -2102,12 +2102,16 @@ impl ToolRegistry {
         } else {
             Ok(crate::post_action_wait::PostActionWait::Default)
         };
-        let delta_target = (!in_batch && crate::fast_path::wire::returns_delta(tool))
-            .then(|| {
-                let session = runtime_read_session(&args, context, evidence);
-                crate::fast_path::wire::delta_target(&args, Some(&session))
-            })
-            .flatten();
+        // The session derivation clones the arguments, so it runs only when
+        // the mode attaches deltas at all.
+        let delta_target = (!in_batch
+            && crate::fast_path::wire::returns_delta(tool)
+            && crate::fast_path::mode().deltas())
+        .then(|| {
+            let session = runtime_read_session(&args, context, evidence);
+            crate::fast_path::wire::delta_target(&args, Some(&session))
+        })
+        .flatten();
         let mut result = match wait {
             Ok(wait) => {
                 crate::post_action_wait::scope(
@@ -4622,10 +4626,9 @@ fn restore_public_runtime_value(value: &mut Value, runtime_prefix: &str) -> bool
 mod runtime_isolation_tests {
     use super::{
         canonical_proposed_path, namespace_runtime_args, publish_action_result,
-        restore_public_runtime_result, try_admit_text_input,
-        DesktopCall, DesktopLane, DesktopLease, TrustedInvocationEvidence,
-        DISPATCH_AUTHORIZATION_CONTEXT, DISPATCH_RUNTIME_SCOPE,
-        DISPATCH_TRUSTED_INVOCATION_EVIDENCE,
+        restore_public_runtime_result, try_admit_text_input, DesktopCall, DesktopLane,
+        DesktopLease, TrustedInvocationEvidence, DISPATCH_AUTHORIZATION_CONTEXT,
+        DISPATCH_RUNTIME_SCOPE, DISPATCH_TRUSTED_INVOCATION_EVIDENCE,
     };
     use crate::{
         authorization::PermissionMode,
@@ -6510,12 +6513,28 @@ allow:
                 .expect("the read's runtime session")
                 .to_owned()
         };
+        let prefix = super::runtime_read_session(
+            &serde_json::json!({"session": "p"}),
+            &context,
+            &super::TrustedInvocationEvidence::default(),
+        )
+        .strip_suffix('p')
+        .expect("a namespaced label")
+        .to_owned();
 
         for args in [
             serde_json::json!({"pid": 77, "window_id": 9, "session": "delta-owner"}),
             serde_json::json!({"pid": 77, "window_id": 9}),
+            serde_json::json!({"pid": 77, "window_id": 9, "session": ""}),
+            serde_json::json!({"pid": 77, "window_id": 9, "session": format!("{prefix}already")}),
         ] {
-            registry.invoke("get_window_state", args.clone()).await;
+            *read_args.lock().unwrap() = None;
+            let result = registry.invoke("get_window_state", args.clone()).await;
+            assert!(
+                read_args.lock().unwrap().is_some(),
+                "{args} was not dispatched: {:?}",
+                result.content
+            );
             let derived = super::runtime_read_session(
                 &args,
                 &context,
