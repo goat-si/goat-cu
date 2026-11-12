@@ -831,15 +831,15 @@ fn type_text_outcome_result(
     let (mark, note) = if verified {
         ("✅ Inserted", String::new())
     } else if line_without_return {
-        // "do not repeat" leads, so a run_steps step message (capped at 300
-        // characters) keeps it whatever the field title and error text; the
-        // Return advice matches LINE_WITHOUT_RETURN_HINT.
+        // Both instructions lead, ahead of the char count and the variable
+        // detail (field title, document note, error text), so a run_steps step
+        // message capped at 300 characters keeps them; the Return advice
+        // matches LINE_WITHOUT_RETURN_HINT.
         (
-            "📨 Inserted the line (do not repeat type_text, which would insert it again); Return not \
-             pressed:",
-            " To submit, read the field first: if it still holds the line unsubmitted and has \
-             focus, press Return with press_key."
-                .to_string(),
+            "📨 Inserted the line, Return not pressed — do not repeat type_text, which would insert \
+             it again; to submit, read the field first: if it still holds the line unsubmitted and \
+             has focus, press Return with press_key. Inserted",
+            String::new(),
         )
     } else if untrusted_web_readback {
         let web = web_area == Some(WebAreaClassification::WebContent);
@@ -4796,11 +4796,13 @@ mod tests {
         let text = format!("{:?}", line.content);
         // The text says the same as the hint: never type the line again, and
         // press Return only after reading the field (a failed post may have
-        // been sent). "do not repeat" leads, so run_steps' 300-character step
-        // message keeps it whatever the field title and error text.
+        // been sent). Both instructions come before the char count and the
+        // variable detail, so run_steps' 300-character step message keeps them.
         let repeat = text.find("do not repeat type_text").expect(&text);
-        assert!(repeat < text.find("char(s)").expect(&text), "{text}");
-        assert!(text.contains("read the field first"), "{text}");
+        let count = text.find("char(s)").expect(&text);
+        assert!(repeat < count, "{text}");
+        let read_first = text.find("read the field first").expect(&text);
+        assert!(read_first < count, "{text}");
         assert!(!text.contains("check that the field has focus"), "{text}");
         // The dispatch seam's recovery hint must not frame a re-type either.
         let mut annotated = completed_text_result(outcome(), true, 12, false, false, "");
