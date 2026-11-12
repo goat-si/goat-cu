@@ -25,8 +25,9 @@ float eases out and the cursor parks upright, so the macOS, Windows, X11, and
 Wayland overlays stop rendering while it waits out its idle-hide delay; the
 next move, click, action cue, snap, re-show, theme change or motion change
 starts the float again. On GNOME Shell, where the shell helper draws the
-cursor, a re-show or theme change does not reach the helper, so a parked float
-there starts again only with the next move. The cursor fades out after its
+cursor, the helper does not start a parked float again on a re-show or theme
+change, so a parked float there starts again only with the next move. The
+cursor fades out after its
 idle-hide delay. Turn the float off with
 `cua-driver config set cursor.float off`; a resting cursor is then still as
 soon as activity settles. A cursor that parked while the float was off stays

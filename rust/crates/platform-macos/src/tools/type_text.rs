@@ -741,8 +741,11 @@ fn completed_delivery(delivery: TypeTextDelivery) -> Option<(TypeTextOutcome, bo
 
 /// The hint for a line that landed without its Return. The dispatch seam keeps
 /// a hint the tool set, so its generic "read before typing again" never applies.
+/// A Return whose post failed may still have been sent, so pressing it waits on
+/// a read of the field.
 const LINE_WITHOUT_RETURN_HINT: &str = "The line is in the field; do not type it again. To submit \
-     it, confirm the field still has focus, then press Return with press_key.";
+     it, read the field first: if it still holds the line unsubmitted and has focus, press Return \
+     with press_key.";
 
 /// The result of a delivered text outcome. A shortfall is a retryable partial,
 /// except a single-line submit whose line landed without its Return: repeating
@@ -4801,6 +4804,9 @@ mod tests {
             .to_owned();
         assert!(!hint.contains("typing again"), "{hint}");
         assert!(hint.contains("press_key"), "{hint}");
+        // A failed Return post may still have been sent, so pressing Return
+        // waits on a read of the field (final review of 83aeb256).
+        assert!(hint.contains("read the field first"), "{hint}");
 
         let partial = completed_text_result(outcome(), false, 12, false, false, "");
         assert_eq!(partial.is_error, Some(true));
