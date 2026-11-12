@@ -693,8 +693,10 @@ impl Tool for TypeTextTool {
                 );
                 return super::not_editable::account_focus_receipt(result, px_receipt);
             }
-            Ok(Ok(TypeTextDelivery::Typed(outcome))) => Ok(Ok((outcome, false))),
-            Ok(Ok(TypeTextDelivery::LineWithoutReturn(outcome))) => Ok(Ok((outcome, true))),
+            Ok(Ok(
+                delivery @ (TypeTextDelivery::Typed(_) | TypeTextDelivery::LineWithoutReturn(_)),
+            )) => Ok(Ok(completed_delivery(delivery)
+                .expect("a typed or line-without-return delivery is completed"))),
             Ok(Ok(TypeTextDelivery::InvalidArguments(reason))) => {
                 return super::invalid_arguments(reason)
             }
@@ -723,6 +725,24 @@ impl Tool for TypeTextTool {
         super::not_editable::account_focus_receipt(result, px_receipt)
     }
 }
+
+/// The outcome of a delivery an actuator completed, and whether it is a
+/// single-line submit's line that landed without its Return (never a
+/// retryable partial); `None` for invalid arguments or a refusal.
+fn completed_delivery(delivery: TypeTextDelivery) -> Option<(TypeTextOutcome, bool)> {
+    match delivery {
+        TypeTextDelivery::Typed(outcome) => Some((outcome, false)),
+        TypeTextDelivery::LineWithoutReturn(outcome) => Some((outcome, true)),
+        TypeTextDelivery::InvalidArguments(_)
+        | TypeTextDelivery::Refused(_)
+        | TypeTextDelivery::SynthesisRefused { .. } => None,
+    }
+}
+
+/// The hint for a line that landed without its Return. The dispatch seam keeps
+/// a hint the tool set, so its generic "read before typing again" never applies.
+const LINE_WITHOUT_RETURN_HINT: &str = "The line is in the field; do not type it again. To submit \
+     it, confirm the field still has focus, then press Return with press_key.";
 
 /// The result of a delivered text outcome. A shortfall is a retryable partial,
 /// except a single-line submit whose line landed without its Return: repeating
@@ -871,6 +891,7 @@ fn type_text_outcome_result(
         if line_without_return {
             // The line is in the field: any escalation would send it again.
             // The next step is a Return via press_key (see the note above).
+            s["hint"] = serde_json::json!(LINE_WITHOUT_RETURN_HINT);
         } else if untrusted_web_readback {
             // Web-content AXValue read-back. A real browser TAB → the
             // `page` tool (drives the DOM via CDP) is the reliable rung;
@@ -4767,6 +4788,19 @@ mod tests {
         assert!(fields.get("escalation").is_none(), "{fields}");
         let text = format!("{:?}", line.content);
         assert!(text.contains("Do not repeat type_text"), "{text}");
+        // The dispatch seam's recovery hint must not frame a re-type either.
+        let mut annotated = completed_text_result(outcome(), true, 12, false, false, "");
+        cua_driver_core::recovery_hint::annotate(
+            "type_text",
+            &cua_driver_core::recovery_hint::Seed::from_args(&serde_json::json!({})),
+            &mut annotated,
+        );
+        let hint = annotated.structured_content.expect("structured result")["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(!hint.contains("typing again"), "{hint}");
+        assert!(hint.contains("press_key"), "{hint}");
 
         let partial = completed_text_result(outcome(), false, 12, false, false, "");
         assert_eq!(partial.is_error, Some(true));
@@ -4774,6 +4808,25 @@ mod tests {
         assert_eq!(fields["code"], "type_text_incomplete");
         assert_eq!(fields["retryable"], true);
         assert_eq!(fields["retry_from_character"], 11);
+    }
+
+    /// Only a line that landed without its Return is marked, so the gate in
+    /// `completed_text_result` never makes it a retryable partial (wp1c review).
+    #[test]
+    fn completed_deliveries_mark_only_the_landed_line() {
+        let outcome = || TypeTextOutcome {
+            detail: String::new(),
+            path: PATH_AX,
+            verified: false,
+            delivered_chars: Some(11),
+            web_area: WebAreaClassification::NonWebContent,
+        };
+        let typed = completed_delivery(TypeTextDelivery::Typed(outcome())).expect("typed");
+        assert!(!typed.1);
+        let line = completed_delivery(TypeTextDelivery::LineWithoutReturn(outcome()))
+            .expect("line without return");
+        assert!(line.1);
+        assert!(completed_delivery(TypeTextDelivery::InvalidArguments("x".into())).is_none());
     }
 
     #[test]
