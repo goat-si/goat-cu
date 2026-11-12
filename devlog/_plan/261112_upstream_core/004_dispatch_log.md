@@ -224,3 +224,9 @@ system24/deepseek-v4.1-flash / high, as requested).
 2026-11-12: all three reviews steered at ~19:40 UTC past their bounds. `cu-review-wp1j-c8a91fc0-s24` PASS (two upstream-design lows →
 050 follow-ups). `cu-review-wp1k-bc02a591-s24` NEAR-PASS: medium, upstream's Linux/Windows attach-default reason is false for GOAT's
 adapters → a2539a20 (text only, `browser::platform` 4 passed); lows recorded.
+2026-11-12: `cu-review-wp1i-190a160e-s24` NEAR-PASS: medium-low, macOS `type_text` guidance still named `page`'s removed actions →
+7cab649b (red at type_text.rs:5065, then type_text 62 / 1); low, the removed-page-action test now asserts both refusals → 7cab649b;
+two informational notes → 050 follow-ups. wp1k round 2 (`continueFrom`, same reviewer) dispatched for a2539a20.
+2026-11-12: wp1k round 2 `cu-review-wp1k-a2539a20-r2b-s24` PASS (both reasons accurate, text only); its two record nits (019c's
+byte-identical claim now stale, so the reason strings are registered as a GOAT patch to keep; 050's parser line restored to the
+false-failure / vacuous distinction) fixed in the records. Receipt at 7cab649b: 24/24.

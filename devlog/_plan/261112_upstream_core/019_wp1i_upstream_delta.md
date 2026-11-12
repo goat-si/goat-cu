@@ -75,3 +75,18 @@ missing in any file except the intended ones listed here.
 
 NOT RUN: Windows and Linux runtime (no live bookmark/CDP path remains to exercise), the GTK3 and web e2e harnesses, PowerShell
 installer tests, a live GOAT session calling the deprecated `get_accessibility_tree`.
+
+Review `cu-review-wp1i-190a160e-s24` (steered at ~19:40 UTC past its bound): NEAR-PASS. It confirmed completeness (42 modified, 1 added,
+2 removed = 45), no GOAT line lost beyond the intended sites, `page` read-only end to end, the deprecation notice placement, and that GOAT's
+three `tools/list` readers tolerate the `deprecated` key. Findings:
+
+1. Medium-low, fixed in 7cab649b: macOS `type_text` (description, the web next-step note, the `page` escalation reason) still sent a
+   browser-tab caller to `page`'s removed `execute_javascript` / `insert_text` / `type_keystrokes`; upstream's file has the same text.
+   Now: check the field first, then `get_browser_state` + `browser_type` if the text did not land; the escalation tag stays `page`.
+   `browser_tab_guidance_names_the_typed_browser_tools` red at type_text.rs:5065, then `tools::type_text` 62 passed / 1 ignored.
+2. Low, fixed in 7cab649b: upstream's replacement test only checked `is_error`; it now asserts the default refusal names the
+   unrestricted-mode launch gate and, past it, "was removed" (texts observed by a probe run first); `protocol_schema_test` 2 / 1 ignored.
+3. Informational, 050 follow-up: `page` keeps `read_only: false` (as upstream), so page reads are still recorded and batch-scoped as
+   mutations.
+4. Informational, 050 follow-up: the `deprecated` key sits at the top level of each `tools/list` entry, outside the MCP `Tool` shape;
+   GOAT's readers accept it, a strict third-party client might not.

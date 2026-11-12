@@ -90,6 +90,8 @@
 | bc02a591 | wp1k | sync d17e70f5 → 52306ab4 (019c): upstream's accepted-browser-defaults test, which reads GOAT's three adapters and passes |
 | aeb89b8c | docs | wp1k record, receipt at bc02a591 |
 | a2539a20 | wp1k review | the Linux/Windows reasons for keeping the attach-background default say the attach fronts the browser while it opens the setup page, then restores focus |
+| d789e198 | docs | wp1j and wp1k review outcomes |
+| 7cab649b | wp1i review | macOS `type_text` browser-tab guidance names `get_browser_state` + `browser_type` instead of `page`'s removed actions; the removed-page-action test asserts both refusals |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -191,8 +193,15 @@ after `d17e70f5` (core `browser/platform.rs` only) → unit wp1k (019c), task wp
   timeout while the tab's mutation lock is held (`browser/tools.rs:1783`; `dom_event` has the same shape at `:1594`); the click
   readback reads the target's `value` in-process on a tab the secret fence may cover (`:73`, compared and dropped, never published);
   the ref-targeted trusted dialog branch (`:1943`) has no test.
-- wp1k review: `every_platform_declares_the_browser_platform_defaults_it_accepts` never reads the reasons, and its source parser would
-  miss a second `impl BrowserPlatform` block or count a `#[cfg]`-gated override; neither exists in GOAT's adapters today.
+- wp1k review: `every_platform_declares_the_browser_platform_defaults_it_accepts` never reads the reasons. Its source parser would
+  miss a second `impl BrowserPlatform` block (the test then fails falsely) or count a `#[cfg]`-gated override (the check becomes
+  vacuous); neither shape exists in GOAT's adapters today (019c). GOAT patch to keep on the next sync: the two Linux/Windows reason
+  strings in `browser/platform.rs`'s `ACCEPTED_DEFAULTS` (a2539a20).
+- wp1i review: `page` keeps `read_only: false`, `idempotent: false`, `open_world: true` (`cua-driver-core/src/page.rs:106-109`,
+  identical upstream), so a page read is recorded into trajectories, pushes a PiP frame and is batch-scoped as a mutation; GOAT never calls
+  `page`. And the `deprecated` marker sits at the top level of each `tools/list` entry (`tool.rs:414-419`, forwarded by `proxy.rs`
+  and `sdk_adapter.rs`), outside the MCP `Tool` shape: GOAT's readers (`check_protocol.py`, `AcpMcpStdioBridge.ts`,
+  `McpNativeSession.swift`) tolerate it; a strict third-party validator might not.
 
 ### Issue dispositions (path:line at the final head)
 
@@ -284,6 +293,8 @@ and a `deprecated` entry only). `contract/manifest.json` and both UniFFI binding
 | whole head | c8a91fc0 | `TMPDIR=/private/tmp`: the same 24 steps, failures=0: core-lib 1827 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2036 / 48, windows-host 200, linux-host 110, target checks, clippy macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol compatible, protocol delta problems 0, output delta adds only `process_instance`, helper tests |
 | wp1k | bc02a591 | `browser::platform` 4 passed (new test included); Linux container core 1831 / 3 |
 | whole head | bc02a591 | `TMPDIR=/private/tmp`: the same 24 steps, failures=0: core-lib 1828 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2036 / 48, windows-host 200, linux-host 110, target checks, clippy macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol compatible, protocol delta problems 0, output delta adds only `process_instance`, helper tests |
+| review fixes | a2539a20, 7cab649b | `browser::platform` 4 passed; `browser_tab_guidance_names_the_typed_browser_tools` red (exit 101, type_text.rs:5065) then `tools::type_text` 62 / 1; `protocol_schema_test` 2 / 1 ignored after a probe run recorded both refusal texts |
+| whole head | 7cab649b | `TMPDIR=/private/tmp`: the same 24 steps, failures=0: core-lib 1828 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2037 / 48, windows-host 200, linux-host 110, Linux and Windows target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol compatible in every launch form (get_guide reworded, not protocol), protocol delta problems 0, output delta adds only `process_instance`, helper tests. No Linux code after 190a160e beyond core (Linux container core 1831 / 3 at bc02a591) |
 
 Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
 

@@ -28,3 +28,11 @@ which front the browser while opening its setup page and then restore focus (Lin
 `Restore` on every desktop; Windows `browser_setup_ui.rs:281/328/364`) → a2539a20 rewords both (text only; `browser::platform` 4 passed).
 Low, recorded: the test never reads the reasons, and its source parser would miss a second impl block (a false failure) or count a
 feature-gated override (vacuous); neither shape exists in GOAT's adapters today.
+
+Round 2 `cu-review-wp1k-a2539a20-r2b-s24` (same reviewer, `continueFrom`): PASS. Both reasons match the adapters (Linux fronts only to open the
+setup page and restores under `setup: Restore` on every desktop; Windows restores the prior window unless input may be unread; the
+flag also covers a `ctrl+w` close, so "an Enter" is the narrower wording), and the change is text only.
+
+**GOAT patch to keep on the next sync.** Since a2539a20, `rust/crates/cua-driver-core/src/browser/platform.rs` is no longer
+byte-identical to 52306ab4: the Linux and Windows `existing_profile_attach_background_limitation` reasons in `ACCEPTED_DEFAULTS`
+describe GOAT's adapters. A later sync that conflicts there keeps GOAT's two strings.
