@@ -3,6 +3,7 @@
 Found at the re-fetch after c678bba8 (2026-11-12 ~18:45 UTC): trycua/cua main `d17e70f5`, 2 commits after `7f2252fb` (wp1i, 019),
 both in `libs/cua-driver` (12 files); goat-cu origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged. Base/upstream copies:
 `/tmp/goat-cu-upstream/7f2252fb…`, `/tmp/goat-cu-upstream/d17e70f5…`; diff `/tmp/goat-cu-upstream/wp1i/d17e70f5.diff`.
+Sync commit c8a91fc0.
 
 | Commit | Scope | Disposition |
 |---|---|---|
@@ -21,4 +22,6 @@ No protocol change (no schema touched); the installer pin is unchanged (0.47.22 
 |---|---|---|
 | upstream's new tests against the parent's `tools.rs`: `cargo test -p cua-driver-core --lib browser::v2_tests::trusted` | 101 | 4 of the 5 new tests fail (v2_tests.rs:4517, :4537, :4565, :4647); `trusted_coordinate_click_has_no_target_to_read_back` passes before and after (it asserts no readback) |
 | `cargo test -p cua-driver-core --lib browser::v2_tests` with the merge | 0 | 120 passed |
+| Linux container: `cua-driver-core --lib`; clippy `-D warnings` (core, platform-linux) | 0 / 0 | 1830 passed / 3 ignored; clean |
+| `TMPDIR=/private/tmp zsh /tmp/goat-cu-sync/receipt-final.sh` at c8a91fc0 | 0 | 24 steps, failures=0: core-lib 1827 / 3, macos-lib 2036 / 48, windows-host 200, linux-host 110, check_protocol compatible, protocol delta problems 0 (050) |
 NOT RUN: a live Chromium trusted click against a page.

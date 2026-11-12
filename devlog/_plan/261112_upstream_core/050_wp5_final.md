@@ -84,6 +84,8 @@
 | ed282703 | wp1h review A | macOS AX click drops the retired `ShowFocusRect` send (upstream's removal the merge had not re-applied) |
 | 79766176 | docs | wp1h reviews, follow-ups, receipt at ed282703 |
 | 190a160e | wp1i | sync 7dc3cc43 → 7f2252fb (019): `page` keeps only `get_text`/`query_dom` (page actions, their switch, the Windows bookmark bridge and GOAT's `page_dispatch.rs` removed; `goat/compat` records the non-additive `page` schema); `replay_trajectory`, `install_ffmpeg`, `get_accessibility_tree` deprecated with a notice and a `tools/list` marker; Perception frozen; installer download retry; releases 0.47.20/0.47.21 and cua-sdk 0.27.0 (GOAT versions kept, vendored cua-telemetry 0.27.0); macOS pixel restore no longer tracks `page` |
+| c678bba8 | docs | wp1i record, receipt at 190a160e |
+| c8a91fc0 | wp1j | sync 7f2252fb → d17e70f5 (019b): a ref-targeted trusted `browser_click` reports its bounded target readback (confirmed / unverifiable); release 0.47.22 CHANGELOG (GOAT versions kept) |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -104,6 +106,8 @@ Re-fetch before the last D (~16:20 UTC): origin/main `40c6f6eb` and agent-deskto
 Re-fetch after 79766176 (2026-11-12 ~18:00 UTC, repeated ~18:15 UTC after the GOAT restart): origin/main `40c6f6eb` and agent-desktop
 `54855b62` unchanged; trycua/cua main `7f2252fb`, 11 commits after `7dc3cc43`, 7 of them in `libs/cua-driver` (45 files) → unit
 wp1i (019), task wp6/t5.
+Re-fetch after c678bba8 (~18:45 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged; trycua/cua main `d17e70f5`, 2 commits
+after `7f2252fb`, both in `libs/cua-driver` (12 files) → unit wp1j (019b), task wp6/t6.
 
 ### Follow-ups recorded, not done in this lane
 
@@ -264,6 +268,8 @@ and a `deprecated` entry only). `contract/manifest.json` and both UniFFI binding
 | whole head | ed282703 | 24 steps, failures=0: core-lib 1825 / 3, core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 207, linux-host 110, Linux and Windows target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol (compatible in every launch form; daemon 0.8.0 = 0.8.0), protocol delta problems 0 (only `invoke_menu.delivery_mode`; set_config/type_text reworded), output delta adds only `process_instance`, helper tests. Linux container at c2067c65 (no Linux code after it): platform-linux 1173 / 15, portal-input 1232 / 15, cursor-overlay 158, core 1826 / 3, clippy both feature sets |
 | wp1i | 190a160e | failing first `page_actions_never_hold_the_restore_wait` (red 101, then green); focused suites, cross checks and the Linux container in 019 |
 | whole head | 190a160e | `TMPDIR=/private/tmp` (see follow-ups): 24 steps, failures=0: core-lib 1822 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2036 / 48, windows-host 200, linux-host 110, Linux and Windows target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol (compatible in every launch form with the `page` entry), protocol delta problems 0, output delta adds only `process_instance`, helper tests. Linux container at 190a160e content: platform-linux 1173 / 15, portal-input 1232 / 15, cursor-overlay 158, core 1825 / 3, clippy both feature sets. A first run with `TMPDIR=/tmp` failed core-lib on six Perception sandbox tests (environment, see follow-ups) and was stopped |
+| wp1j | c8a91fc0 | upstream's new trusted-click tests red against the parent's `tools.rs` (4 of 5, exit 101), `browser::v2_tests` 120 with the merge; Linux container core 1830 / 3, clippy core + platform-linux clean |
+| whole head | c8a91fc0 | `TMPDIR=/private/tmp`: the same 24 steps, failures=0: core-lib 1827 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2036 / 48, windows-host 200, linux-host 110, target checks, clippy macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol compatible, protocol delta problems 0, output delta adds only `process_instance`, helper tests |
 
 Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
 
