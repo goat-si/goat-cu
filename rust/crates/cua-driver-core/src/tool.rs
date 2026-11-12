@@ -6545,9 +6545,15 @@ allow:
 
         let adapter_args =
             serde_json::json!({"pid": 77, "window_id": 9, "_session_id": "transport-7"});
-        registry
+        *read_args.lock().unwrap() = None;
+        let result = registry
             .invoke_from_trusted_adapter("get_window_state", adapter_args.clone())
             .await;
+        assert!(
+            read_args.lock().unwrap().is_some(),
+            "the trusted adapter read was not dispatched: {:?}",
+            result.content
+        );
         let mut public = adapter_args;
         let evidence = super::TrustedInvocationEvidence::extract_from_adapter_args(&mut public);
         assert_eq!(
