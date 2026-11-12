@@ -92,6 +92,8 @@
 | a2539a20 | wp1k review | the Linux/Windows reasons for keeping the attach-background default say the attach fronts the browser while it opens the setup page, then restores focus |
 | d789e198 | docs | wp1j and wp1k review outcomes |
 | 7cab649b | wp1i review | macOS `type_text` browser-tab guidance names `get_browser_state` + `browser_type` instead of `page`'s removed actions; the removed-page-action test asserts both refusals |
+| b3a6a07e | docs | wp1i and wp1k review outcomes, receipt at 7cab649b |
+| af4e914b | wp1l | sync 52306ab4 → 228b5a4d (019d): release 0.47.23 CHANGELOG entry; GOAT versions kept |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -116,6 +118,8 @@ Re-fetch after c678bba8 (~18:45 UTC): origin/main `40c6f6eb` and agent-desktop `
 after `7f2252fb`, both in `libs/cua-driver` (12 files) → unit wp1j (019b), task wp6/t6.
 Re-fetch after ffc428c2 (~19:00 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged; trycua/cua main `52306ab4`, 1 commit
 after `d17e70f5` (core `browser/platform.rs` only) → unit wp1k (019c), task wp6/t7.
+Re-fetch after b3a6a07e (~20:10 UTC): origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged; trycua/cua main `228b5a4d`, the 0.47.23
+release (CHANGELOG and version files only) → unit wp1l (019d), task wp6/t8.
 
 ### Follow-ups recorded, not done in this lane
 

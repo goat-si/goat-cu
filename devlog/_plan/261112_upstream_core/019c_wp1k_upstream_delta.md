@@ -6,7 +6,7 @@ unchanged. Diff `/tmp/goat-cu-upstream/wp1i/52306ab4.diff`, merge `/tmp/goat-cu-
 
 | Commit | Scope | Disposition |
 |---|---|---|
-| 52306ab4 (#7504, fixes trycua/cua#2884) | each platform adapter's accepted `BrowserPlatform` defaults are declared with a reason (`ACCEPTED_DEFAULTS`), and `every_platform_declares_the_browser_platform_defaults_it_accepts` reads the trait and the three adapter impls and fails when the declared and real sets differ; doc comment on the trait | IN (GOAT's file equalled the base; the merged file is byte-identical to 52306ab4) |
+| 52306ab4 (#7504, fixes trycua/cua#2884) | each platform adapter's accepted `BrowserPlatform` defaults are declared with a reason (`ACCEPTED_DEFAULTS`), and `every_platform_declares_the_browser_platform_defaults_it_accepts` reads the trait and the three adapter impls and fails when the declared and real sets differ; doc comment on the trait | IN (GOAT's file equalled the base; at bc02a591 the merged file is byte-identical to 52306ab4; a2539a20 then rewords two reasons, see the GOAT patch note below) |
 
 The test reads GOAT's own adapters (`platform-{linux,macos,windows}`), so it checks GOAT's overrides, not upstream's: it passes, meaning GOAT
 leaves exactly the declared defaults in place on each platform. No protocol, version or vendor change.
