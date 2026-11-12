@@ -64,3 +64,10 @@ system24/deepseek-v4.1-flash / reasoningEffort=high, status running.
 system24/deepseek-v4.1-flash / reasoningEffort=high.
 2026-11-12: `cu-wp3-287-s24-261112` completed; lead verified (156 overlay tests), added the GNOME helper `park` field, committed
 a5e2bbde. Fresh review dispatched — `cu-wp3-287-review-s24-261112`, returned codex / system24/deepseek-v4.1-flash / reasoningEffort=high.
+2026-11-12: `cu-wp2-review-288-s24-261112` (#288) completed NEAR-PASS → 0d163dd1 (P2 accepted, P3 ×2 accepted, P3 rebutted); round 2
+`cu-wp2-review-288-r2-s24-261112` (continueFrom) NEAR-PASS → fb4f50e0 (P2 accepted: session-agnostic window mapping replaced by the
+caller's derived read session); round 3 `cu-wp2-review-288-r3-s24-261112` dispatched. All returned codex / system24/deepseek-v4.1-flash / high.
+2026-11-12: `cu-wp2-review-ab-r2-s24-261112` (#299 round 2) PASS with 3 P3 (1 rebutted, 2 accepted). `cu-wp2b-299-lw-s24-261112`
+completed; lead moved the listings' first pass before enumeration, committed 0654beae; round 3 `cu-wp2-review-ab-r3-s24-261112`
+dispatched (continueFrom), returned codex / system24/deepseek-v4.1-flash / reasoningEffort=high. Decisions recorded with
+review_findings.record for every round.
