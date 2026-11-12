@@ -223,6 +223,9 @@ coordinator), an ancestor of the local head.
   the `ActionResult`. Follow-up: give both their capabilities and the action-result projection. The contract doc names the carve-out
   (GOAT patch to keep on the next sync). Also stale: `tool.rs:990-999` says `type_text_chars` is registered on Linux; no roster
   registers it.
+- wp1m morph review (34f79cb5): `every_native_input_tool_publishes_the_action_result` is capability-derived, so a future native-input tool
+  that advertises no capability and is not an action-result tool passes unseen. Smallest fix: a GOAT test with a per-platform expected
+  set of native-input tool names, `select_text` and `menu_bar_extras` listed as the current exceptions.
 - Final review rounds 2-3 (informational): an embedded web view after pixel focus reads "do not repeat it" next to the mark's "type
   again only if the text is missing" (the px rung is terminal); the non-web branch says "read the field" where the field could not be
   read; with a field title over ~27 characters the browser-tab step's px clause falls past run_steps' 300-character cut (the read and
