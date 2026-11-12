@@ -1462,7 +1462,10 @@ impl ToolRegistry {
     /// Give this registry its own desktop coordinator and input lane. A test on
     /// a paused clock needs it: while a step waits for the process-wide ones,
     /// which other tests' actions hold, its runtime idles and the clock jumps
-    /// to the step's deadline.
+    /// to the step's deadline. It covers calls dispatched through this
+    /// registry only: a tool body that calls [`DesktopCall::acquire`] or
+    /// `desktop_lease::acquire_owned` itself still waits on the process-wide
+    /// lane, so a paused-clock test needs a tool that does neither.
     #[cfg(test)]
     pub(crate) fn isolate_desktop(&mut self) {
         self.desktop_coordinator = Box::leak(Box::new(tokio::sync::Mutex::new(())));
