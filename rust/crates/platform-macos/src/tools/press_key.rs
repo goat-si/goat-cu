@@ -734,7 +734,11 @@ impl Tool for PressKeyTool {
         };
         let window_id_arg = args.opt_u64("window_id");
         let evidence = crate::process_identity::evidence(&args, pid).await;
-        let resolved = match latency::resolve(|| self.state.snapshots.resolve_for_instance(pid, &args, evidence)) {
+        let resolved = match latency::resolve(|| {
+            self.state
+                .snapshots
+                .resolve_for_instance(pid, &args, evidence)
+        }) {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -1854,6 +1858,17 @@ fn chord_in_scope(pid: i32, wid: u32, combo: super::menu_equivalent::Combo) -> C
             env.validation,
             (initial_error, env.disabled_note),
         ),
+        // The app never received the press: the step reports the refusal
+        // after handing the window back, and nothing else is sent.
+        ChordDecision::NotDelivered { err } => chord_press_outcome(
+            scope,
+            found.path.join(" > "),
+            wid,
+            env.action.expect("press has action"),
+            err,
+            env.validation,
+            (None, env.disabled_note),
+        ),
     }
 }
 
@@ -1878,6 +1893,11 @@ enum ChordDecision {
         err: crate::ax::bindings::AXError,
         initial_error: Option<crate::ax::bindings::AXError>,
     },
+    /// A press the app never received (accessibility disabled): nothing was
+    /// sent, so nothing follows it — no second press, no key chord.
+    NotDelivered {
+        err: crate::ax::bindings::AXError,
+    },
 }
 
 fn decide_chord(env: &mut impl ChordEnv) -> ChordDecision {
@@ -1899,13 +1919,21 @@ fn decide_chord(env: &mut impl ChordEnv) -> ChordDecision {
             return ChordDecision::Unbound;
         }
         let err = env.press(initial == Some(false));
-        if err == crate::ax::bindings::kAXErrorSuccess
-            || !super::click::perform_error_proves_nothing_was_sent(err)
-        {
-            return ChordDecision::Pressed {
-                err,
-                initial_error: None,
-            };
+        // One meaning per perform error (#277, #279). Only a fall-through
+        // proves nothing was sent, so only it may press again or post keys;
+        // an error that may have acted stops here, and a proved non-delivery
+        // sends nothing else either.
+        match super::click::perform_outcome(err) {
+            cua_driver_core::mutation::WriteOutcome::FallThrough(_) => {}
+            cua_driver_core::mutation::WriteOutcome::StopNotDelivered(_) => {
+                return ChordDecision::NotDelivered { err }
+            }
+            _ => {
+                return ChordDecision::Pressed {
+                    err,
+                    initial_error: None,
+                }
+            }
         }
         initial_error = Some(err);
     }
@@ -2208,7 +2236,7 @@ fn chord_press_step(
             disabled,
             validation,
         }
-    } else if super::click::perform_error_proves_nothing_was_sent(err) {
+    } else if super::click::perform_sent_nothing(err) {
         chord_refusal_after_hand_back(path, err, validation, notes)
     } else {
         ChordStep::Pressed {
@@ -2565,7 +2593,12 @@ pub(super) mod tests {
             for (error, warned) in [
                 (crate::ax::bindings::kAXErrorSuccess, true),
                 (crate::ax::bindings::kAXErrorCannotComplete, true),
-                (crate::ax::bindings::kAXErrorInvalidUIElement, false),
+                // #279: an error after a sent press may have acted.
+                (crate::ax::bindings::kAXErrorInvalidUIElement, true),
+                (crate::ax::bindings::kAXErrorIllegalArgument, true),
+                // Nothing was sent, or it was proved not delivered.
+                (crate::ax::bindings::kAXErrorActionUnsupported, false),
+                (crate::ax::bindings::kAXErrorAPIDisabled, false),
             ] {
                 let step = super::chord_press_step(
                     "Edit > Item".into(),
@@ -2759,6 +2792,8 @@ pub(super) mod tests {
 
     #[test]
     fn chord_rechecks_binding_after_a_proven_no_dispatch_error() {
+        // ActionUnsupported proves nothing was sent (a fall-through), so the
+        // route may press again, after re-reading the binding.
         let mut env = FakeChord {
             save: false,
             initial: Some(true),
@@ -2767,7 +2802,7 @@ pub(super) mod tests {
             bound: true,
             flip_after_first: true,
             bound_reads: 0,
-            error: crate::ax::bindings::kAXErrorInvalidUIElement,
+            error: crate::ax::bindings::kAXErrorActionUnsupported,
             presses: 0,
             validations: 0,
             reads: 0,
@@ -2800,6 +2835,15 @@ pub(super) mod tests {
                 ),
                 String::new(),
             ),
+            ChordDecision::NotDelivered { err } => super::chord_press_step(
+                "Edit > Item".into(),
+                42,
+                "AXPress",
+                err,
+                validation,
+                (None, disabled.then(|| "disabled observation".to_owned())),
+                String::new(),
+            ),
             ChordDecision::Keys(_) => {
                 let (outcome, note) = super::run_keys_under_scope(
                     (),
@@ -2828,8 +2872,8 @@ pub(super) mod tests {
             .structured_content
             .expect("structured result");
         let (effect, code, sent) = match *decision {
-            ChordDecision::Pressed { err, .. }
-                if err == crate::ax::bindings::kAXErrorInvalidUIElement =>
+            ChordDecision::Pressed { err, .. } | ChordDecision::NotDelivered { err }
+                if super::super::click::perform_sent_nothing(err) =>
             {
                 ("refused", Some("background_unavailable"), false)
             }
@@ -2837,6 +2881,7 @@ pub(super) mod tests {
                 ("unverifiable", None, false)
             }
             ChordDecision::Pressed { .. } => ("unverifiable", Some("ax_action_unverified"), false),
+            ChordDecision::NotDelivered { .. } => unreachable!("a non-delivery sent nothing"),
             ChordDecision::Keys(_) if bound => ("suspected_noop", None, true),
             ChordDecision::Keys(_) | ChordDecision::Unbound => {
                 ("refused", Some("window_not_key"), false)
@@ -2870,8 +2915,9 @@ pub(super) mod tests {
     fn chord_decisions_cover_ax_results_enabled_save_front_and_binding() {
         use super::ChordDecision as D;
         use crate::ax::bindings::{
-            kAXErrorCannotComplete as ambiguous, kAXErrorInvalidUIElement as invalid,
-            kAXErrorSuccess as ok,
+            kAXErrorAPIDisabled as disabled_api, kAXErrorActionUnsupported as unsupported,
+            kAXErrorCannotComplete as ambiguous, kAXErrorIllegalArgument as illegal,
+            kAXErrorInvalidUIElement as invalid, kAXErrorSuccess as ok,
         };
         let cases = [
             (
@@ -3000,14 +3046,16 @@ pub(super) mod tests {
                 1,
                 0,
             ),
+            // #279: only a fall-through proves nothing was sent, so only it
+            // validates and posts keys, or presses again.
             (
                 false,
                 Some(true),
                 Some(false),
                 true,
                 true,
-                invalid,
-                D::Keys(Some(invalid)),
+                unsupported,
+                D::Keys(Some(unsupported)),
                 1,
                 1,
             ),
@@ -3017,12 +3065,55 @@ pub(super) mod tests {
                 Some(true),
                 true,
                 true,
+                unsupported,
+                D::Pressed {
+                    err: unsupported,
+                    initial_error: Some(unsupported),
+                },
+                2,
+                0,
+            ),
+            // An error after a sent press may have acted: one press, no
+            // validation, no keys, no second press, whatever enablement reads.
+            (
+                false,
+                Some(true),
+                Some(false),
+                true,
+                true,
                 invalid,
                 D::Pressed {
                     err: invalid,
-                    initial_error: Some(invalid),
+                    initial_error: None,
                 },
-                2,
+                1,
+                0,
+            ),
+            (
+                false,
+                Some(true),
+                Some(true),
+                true,
+                true,
+                illegal,
+                D::Pressed {
+                    err: illegal,
+                    initial_error: None,
+                },
+                1,
+                0,
+            ),
+            // A press the app never received stops the chord: nothing else
+            // is sent.
+            (
+                false,
+                Some(true),
+                Some(false),
+                true,
+                true,
+                disabled_api,
+                D::NotDelivered { err: disabled_api },
+                1,
                 0,
             ),
         ];

@@ -30,6 +30,14 @@ Some macOS click paths refuse instead of guessing, by design. These show up as r
   it is not settable", not as a target that changed (#281).
 - After an AX press was sent, IllegalArgument and InvalidUIElement are unverifiable ("may have
   acted"), not failures: a press can tear its element down before the reply (#277, #279).
+  The same rule covers press_key menu chords (AXPress/AXPick), right_click AXShowMenu and
+  double_click AXOpen: such an error is reported as unverifiable and is never followed by a second
+  press, a key chord or a pixel click. Only ActionUnsupported and NotImplemented (nothing was sent)
+  move on to the next route; APIDisabled is refused as not delivered, with nothing else sent.
+- A right_click or double_click pixel route, including a fallback after AXShowMenu or AXOpen, posts
+  only at the element's checked center: pointer admission for the exact window, a readable frame and
+  window bounds, the center inside the window and on the element. A clipped, scrolled-out or
+  occluded element is refused with nothing sent (#272 review).
 - A background pixel click that the fast-path check moves outside the window frame is refused with
   the moved point; nothing is sent (#286).
 

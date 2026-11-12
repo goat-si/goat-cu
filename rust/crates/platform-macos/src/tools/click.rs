@@ -1538,7 +1538,11 @@ impl ClickTool {
 
         let window_id_arg = args.opt_u64("window_id");
         let evidence = crate::process_identity::evidence(&args, pid).await;
-        let resolved = match latency::resolve(|| self.state.snapshots.resolve_for_instance(pid, &args, evidence)) {
+        let resolved = match latency::resolve(|| {
+            self.state
+                .snapshots
+                .resolve_for_instance(pid, &args, evidence)
+        }) {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -6045,13 +6049,141 @@ impl std::fmt::Display for ClickWriteFailure {
 }
 impl std::error::Error for ClickWriteFailure {}
 
+/// The failure for an AX action whose perform return the core write-outcome
+/// rule calls not delivered (accessibility disabled): the app never received
+/// it, so the disposition is `NOT_DELIVERED` and only prior input can make it
+/// suspected instead.
+fn perform_error_failure(
+    ax_action: &str,
+    err: crate::ax::bindings::AXError,
+    chain: &cua_driver_core::mutation::ChainResult,
+) -> ClickWriteFailure {
+    ClickWriteFailure {
+        message: format!("AXUIElementPerformAction({ax_action}) returned {err}"),
+        disposition: chain
+            .error_disposition(
+                cua_driver_core::mutation::Postcondition::Indeterminate,
+                false,
+            )
+            .expect("unconfirmed write"),
+    }
+}
+
+#[cfg(test)]
+mod perform_error_failure_tests {
+    use super::{element_click_failure, perform_error_failure, perform_outcome};
+    use crate::ax::bindings::{
+        kAXErrorAPIDisabled, kAXErrorActionUnsupported, kAXErrorCannotComplete,
+        kAXErrorIllegalArgument, kAXErrorInvalidUIElement, kAXErrorNotImplemented,
+    };
+    use cua_driver_contract::ErrorDisposition;
+    use cua_driver_core::mutation::{ChainResult, PriorInput, Reason, WriteOutcome};
+
+    /// The click's APIDisabled rule (#279): an accessibility-disabled perform
+    /// proves nothing was sent, so it reaches the caller as the
+    /// `action_unavailable` refusal with `dispatched: false`, never as an
+    /// unverifiable action the caller would read the window for.
+    #[test]
+    fn accessibility_disabled_press_is_refused_as_not_delivered() {
+        let outcome = perform_outcome(kAXErrorAPIDisabled);
+        assert_eq!(
+            outcome,
+            WriteOutcome::StopNotDelivered(Reason::PermissionDenied)
+        );
+        let chain = ChainResult::from_recorded(vec![outcome], PriorInput::None).expect("one write");
+        assert!(chain.no_input());
+        let failure = perform_error_failure("AXPress", kAXErrorAPIDisabled, &chain);
+        let result = element_click_failure(&failure.into());
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.disposition, Some(ErrorDisposition::NOT_DELIVERED));
+        let structured = result.structured_content.expect("a coded refusal");
+        assert_eq!(structured["code"], "action_unavailable");
+        assert_eq!(structured["effect"], "refused");
+        assert_eq!(structured["dispatched"], false);
+    }
+
+    /// The same perform after input that may have been delivered is not a
+    /// refusal: the click cannot claim nothing was sent.
+    #[test]
+    fn accessibility_disabled_press_after_prior_input_is_not_a_refusal() {
+        let chain = ChainResult::from_recorded(
+            vec![perform_outcome(kAXErrorAPIDisabled)],
+            PriorInput::MayHaveDelivered,
+        )
+        .expect("one write");
+        assert!(!chain.no_input());
+        let result = element_click_failure(
+            &perform_error_failure("AXPress", kAXErrorAPIDisabled, &chain).into(),
+        );
+        assert_eq!(result.is_error, Some(true));
+        assert_ne!(
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("dispatched")),
+            Some(&serde_json::json!(false))
+        );
+    }
+
+    /// One meaning per perform error (#277, #279). Only a fall-through proves
+    /// nothing was sent; every other non-success that is not a proved refusal
+    /// may have acted.
+    #[test]
+    fn perform_outcome_keeps_one_meaning_per_error() {
+        assert_eq!(perform_outcome(0), WriteOutcome::Delivered);
+        assert_eq!(
+            perform_outcome(kAXErrorActionUnsupported),
+            WriteOutcome::FallThrough(Reason::Unsupported)
+        );
+        assert_eq!(
+            perform_outcome(kAXErrorNotImplemented),
+            WriteOutcome::FallThrough(Reason::NotImplemented)
+        );
+        assert_eq!(
+            perform_outcome(kAXErrorAPIDisabled),
+            WriteOutcome::StopNotDelivered(Reason::PermissionDenied)
+        );
+        assert_eq!(
+            perform_outcome(kAXErrorCannotComplete),
+            WriteOutcome::StopUncertain(Reason::CannotComplete)
+        );
+        for uncertain in [kAXErrorIllegalArgument, kAXErrorInvalidUIElement] {
+            assert!(
+                matches!(perform_outcome(uncertain), WriteOutcome::StopUncertain(_)),
+                "{uncertain} after a sent press may have acted"
+            );
+        }
+    }
+}
+
 /// The core write-outcome rule for a sent AX Perform that returned `err`.
-fn perform_outcome(err: crate::ax::bindings::AXError) -> cua_driver_core::mutation::WriteOutcome {
+///
+/// Every route that sends an AX action classifies its return through this
+/// function (#277, #279): `Delivered` acted, `FallThrough` proves nothing was
+/// sent so another rung may run, `StopNotDelivered` proves the app never got
+/// it, and everything else — `IllegalArgument` and `InvalidUIElement`
+/// included, since a press can tear its element down before the reply — may
+/// have acted and must never be resent.
+pub(super) fn perform_outcome(
+    err: crate::ax::bindings::AXError,
+) -> cua_driver_core::mutation::WriteOutcome {
     crate::ax::write_outcome::native_write_outcome(
         crate::ax::write_outcome::NativeWriteKind::Perform,
         true,
         &crate::ax::write_outcome::Settable::Unknown(crate::ax::bindings::kAXErrorFailure),
         err,
+    )
+}
+
+/// Whether a non-success perform return proves the app did not act on it:
+/// nothing was sent (`FallThrough`) or it was proved not delivered
+/// (`StopNotDelivered`). Every other return may have acted, so no route may
+/// follow it with another actuation.
+pub(super) fn perform_sent_nothing(err: crate::ax::bindings::AXError) -> bool {
+    use cua_driver_core::mutation::WriteOutcome;
+    matches!(
+        perform_outcome(err),
+        WriteOutcome::FallThrough(_) | WriteOutcome::StopNotDelivered(_)
     )
 }
 
@@ -6430,31 +6562,6 @@ mod selection_write_outcome_tests {
             );
         }
     }
-}
-
-/// Whether a non-success `AXUIElementPerformAction` return proves the app
-/// never received the action. Only the accessibility client's own refusals
-/// do: a bad argument, a dead element reference, or accessibility turned off.
-/// Every other code comes back after the request reached the app, which may
-/// have acted on it; Apple documents that `kAXErrorCannotComplete` (the app
-/// did not answer within the messaging timeout) does not mean the action
-/// failed, and Finder opens a row and returns `kAXErrorAttributeUnsupported`.
-///
-/// Used by the press_key menu-chord, right_click AXShowMenu and double_click
-/// AXOpen routes to choose a fallback. The click AX press path does not use
-/// it: it follows the core write-outcome rule (`perform_outcome`), under
-/// which IllegalArgument and InvalidUIElement after a sent press stay
-/// uncertain (#277, #279).
-pub(super) fn perform_error_proves_nothing_was_sent(err: crate::ax::bindings::AXError) -> bool {
-    use crate::ax::bindings::{
-        kAXErrorAPIDisabled, kAXErrorIllegalArgument, kAXErrorInvalidUIElement,
-    };
-    [
-        kAXErrorIllegalArgument,
-        kAXErrorInvalidUIElement,
-        kAXErrorAPIDisabled,
-    ]
-    .contains(&err)
 }
 
 /// The outcome of a coordinate selection click that was delivered but whose
@@ -7095,16 +7202,7 @@ fn perform_ax_click(
             outcome,
             cua_driver_core::mutation::WriteOutcome::StopNotDelivered(_)
         ) {
-            return Err(ClickWriteFailure {
-                message: format!("AXUIElementPerformAction({ax_action}) returned {err}"),
-                disposition: chain
-                    .error_disposition(
-                        cua_driver_core::mutation::Postcondition::Indeterminate,
-                        false,
-                    )
-                    .expect("unconfirmed write"),
-            }
-            .into());
+            return Err(perform_error_failure(ax_action, err, &chain).into());
         }
         // Only the classified fall-through may hand control to the caller.
         if fallback_selection && post_press_should_select(err) {

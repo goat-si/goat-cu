@@ -606,9 +606,16 @@ fn an_axopen_that_may_have_opened_is_not_followed_by_clicks() {
         assert!(matches!(&performed, Performed::AxOpen(m) if m.contains("may have opened")));
     }
     assert!(fake.posts().is_empty());
-    // An AXOpen error proving nothing was sent falls back to checked clicks
-    // in the foreground only.
+    // #279: IllegalArgument after a sent AXOpen may have opened the item.
     fake.ax_open_result = kAXErrorIllegalArgument;
+    for foreground in [false, true] {
+        let performed = run_blocking(&fake, 3, 2, true, foreground).unwrap();
+        assert!(matches!(&performed, Performed::AxOpen(m) if m.contains("may have opened")));
+    }
+    assert!(fake.posts().is_empty());
+    // An AXOpen fall-through proves nothing was sent: it falls back to
+    // checked clicks in the foreground only.
+    fake.ax_open_result = crate::ax::bindings::kAXErrorActionUnsupported;
     assert!(run_blocking(&fake, 3, 2, true, false).is_err());
     assert!(fake.posts().is_empty());
     run_blocking(&fake, 3, 2, true, true).unwrap();
@@ -1444,4 +1451,67 @@ async fn cancelling_an_element_multi_click_keeps_the_lease_until_input_finishes(
         .and_then(|cursor| cursor.position)
         .expect("cursor moved");
     assert_eq!((position.x, position.y), CENTER);
+}
+
+/// #272 review: right_click's pixel fallback (after a semantic gate that
+/// ignores ancestor clipping) and double_click's pixel route post only at the
+/// element's checked center; a clipped, scrolled-out or occluded element, or
+/// an unreadable window, refuses before any event.
+#[test]
+fn right_and_double_click_pixel_routes_post_only_at_a_checked_point() {
+    let cases: Vec<Case> = vec![
+        ("pointer gate", Box::new(|f| f.permitted = false)),
+        ("no frame", Box::new(|f| f.rect = None)),
+        ("no window bounds", Box::new(|f| f.bounds = None)),
+        (
+            "clipped out of the window",
+            Box::new(|f| f.bounds = Some([0.0, 0.0, 120.0, 600.0])),
+        ),
+        (
+            "occluded",
+            Box::new(|f| f.hit = Hit::Elsewhere("AXRow".into())),
+        ),
+        ("no hit", Box::new(|f| f.hit = Hit::Nothing)),
+    ];
+    for (label, setup) in cases {
+        let mut fake = Fake::new(1);
+        setup(&mut fake);
+        let posts = std::cell::Cell::new(0);
+        let error = super::super::right_click::pixel_right_click_at(&fake, "[4]", |_| {
+            posts.set(posts.get() + 1);
+            Ok(())
+        })
+        .expect_err(label);
+        assert!(
+            error.to_string().contains("nothing was sent"),
+            "{label}: {error}"
+        );
+        for foreground in [false, true] {
+            let error =
+                super::super::double_click::pixel_double_click_at(&fake, 4, foreground, |_| {
+                    posts.set(posts.get() + 1);
+                    Ok(())
+                })
+                .expect_err(label);
+            assert!(
+                error.to_string().contains("nothing was sent"),
+                "{label}: {error}"
+            );
+        }
+        assert_eq!(posts.get(), 0, "{label}");
+    }
+    let fake = Fake::new(1);
+    let mut points = Vec::new();
+    super::super::right_click::pixel_right_click_at(&fake, "[4]", |point| {
+        points.push(*point);
+        Ok(())
+    })
+    .unwrap();
+    super::super::double_click::pixel_double_click_at(&fake, 4, true, |point| {
+        points.push(*point);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(points.len(), 2);
+    assert!(points.iter().all(|point| point.screen == CENTER));
 }
