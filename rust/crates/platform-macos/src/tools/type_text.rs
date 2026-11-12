@@ -693,7 +693,8 @@ impl Tool for TypeTextTool {
                 );
                 return super::not_editable::account_focus_receipt(result, px_receipt);
             }
-            Ok(Ok(TypeTextDelivery::Typed(outcome))) => Ok(Ok(outcome)),
+            Ok(Ok(TypeTextDelivery::Typed(outcome))) => Ok(Ok((outcome, false))),
+            Ok(Ok(TypeTextDelivery::LineWithoutReturn(outcome))) => Ok(Ok((outcome, true))),
             Ok(Ok(TypeTextDelivery::InvalidArguments(reason))) => {
                 return super::invalid_arguments(reason)
             }
@@ -702,29 +703,9 @@ impl Tool for TypeTextTool {
         };
 
         let result = match result {
-            Ok(Ok(outcome)) if outcome.delivered_chars.is_some_and(|n| n < char_count) => {
-                let delivered_chars = outcome.delivered_chars.unwrap_or_default();
-                let mut result = ToolResult::error(format!(
-                    "type_text incomplete: delivered {delivered_chars} of {char_count} character(s){}; retry only the remaining suffix",
-                    outcome.detail
-                ))
-                .with_structured(serde_json::json!({
-                    "code": "type_text_incomplete",
-                    "path": outcome.path,
-                    "effect": "partial",
-                    "requested_chars": char_count,
-                    "delivered_chars": delivered_chars,
-                    "retryable": true,
-                    "retry_from_character": delivered_chars,
-                }));
-                if outcome.path == PATH_AX {
-                    result =
-                        result.with_disposition(cua_driver_contract::ErrorDisposition::DELIVERED);
-                }
-                result
-            }
-            Ok(Ok(outcome)) => type_text_outcome_result(
+            Ok(Ok((outcome, line_without_return))) => completed_text_result(
                 outcome,
+                line_without_return,
                 char_count,
                 used_pixel_focus,
                 crate::browser::electron_js::ElectronJs::is_electron(pid),
@@ -743,12 +724,54 @@ impl Tool for TypeTextTool {
     }
 }
 
+/// The result of a delivered text outcome. A shortfall is a retryable partial,
+/// except a single-line submit whose line landed without its Return: repeating
+/// the call would insert the line again (wp1c review).
+fn completed_text_result(
+    outcome: TypeTextOutcome,
+    line_without_return: bool,
+    char_count: usize,
+    used_pixel_focus: bool,
+    electron: bool,
+    suffix: &str,
+) -> ToolResult {
+    if !line_without_return && outcome.delivered_chars.is_some_and(|n| n < char_count) {
+        let delivered_chars = outcome.delivered_chars.unwrap_or_default();
+        let mut result = ToolResult::error(format!(
+            "type_text incomplete: delivered {delivered_chars} of {char_count} character(s){}; retry only the remaining suffix",
+            outcome.detail
+        ))
+        .with_structured(serde_json::json!({
+            "code": "type_text_incomplete",
+            "path": outcome.path,
+            "effect": "partial",
+            "requested_chars": char_count,
+            "delivered_chars": delivered_chars,
+            "retryable": true,
+            "retry_from_character": delivered_chars,
+        }));
+        if outcome.path == PATH_AX {
+            result = result.with_disposition(cua_driver_contract::ErrorDisposition::DELIVERED);
+        }
+        return result;
+    }
+    type_text_outcome_result(
+        outcome,
+        char_count,
+        used_pixel_focus,
+        electron,
+        suffix,
+        line_without_return,
+    )
+}
+
 fn type_text_outcome_result(
     outcome: TypeTextOutcome,
     char_count: usize,
     used_pixel_focus: bool,
     electron: bool,
     suffix: &str,
+    line_without_return: bool,
 ) -> ToolResult {
     let TypeTextOutcome {
         detail,
@@ -784,6 +807,13 @@ fn type_text_outcome_result(
     // right next rung.
     let (mark, note) = if verified {
         ("✅ Inserted", String::new())
+    } else if line_without_return {
+        (
+            "📨 Inserted the line, Return not pressed:",
+            " — the line is in the field. Do not repeat type_text, which would insert it again; \
+             to submit, check that the field has focus and press Return with press_key."
+                .to_string(),
+        )
     } else if untrusted_web_readback {
         let web = web_area == Some(WebAreaClassification::WebContent);
         let next_step = if electron_web_content && used_pixel_focus {
@@ -1176,6 +1206,9 @@ enum BackgroundKeyboardPolicy {
 /// posted (`Refused`) and the caller must return the structured refusal.
 enum TypeTextDelivery {
     Typed(TypeTextOutcome),
+    /// A single-line submit whose line was proven inserted but whose Return
+    /// was not pressed (see [`SubmitStep::LineWithoutReturn`]).
+    LineWithoutReturn(TypeTextOutcome),
     InvalidArguments(String),
     Refused(BackgroundRefusal),
     SynthesisRefused {
@@ -1577,80 +1610,94 @@ fn single_line_submit_body<'a>(role: &str, text: &'a str) -> Option<&'a str> {
     (!body.is_empty() && !body.contains(['\n', '\r', '\t'])).then_some(body)
 }
 
-/// Why a single-line submit's Return was withheld.
+/// Why the insert of a single-line submit was not proven, so its Return was
+/// not sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SubmitWithhold {
-    /// The keyboard policy does not allow a pid-routed key.
-    PolicyRefusesKeys,
-    /// The write's read-back did not prove the line landed.
-    InsertNotReadBack,
-    /// The written field is not proven to hold keyboard focus.
-    FieldNotFocused,
+    /// The field read back unchanged.
+    FieldUnchanged,
+    /// Only part of the line read back.
+    PartialInsert,
+    /// The read-back cannot prove the line landed in this field: unreadable,
+    /// web content, or a target not bound to the requested window.
+    InsertNotProven,
 }
 
 impl SubmitWithhold {
+    fn of(progress: TypedProgress) -> Self {
+        match progress {
+            TypedProgress::Unchanged => Self::FieldUnchanged,
+            TypedProgress::Partial(_) => Self::PartialInsert,
+            TypedProgress::Complete | TypedProgress::Unverifiable => Self::InsertNotProven,
+        }
+    }
+
     fn reason(self) -> &'static str {
         match self {
-            Self::PolicyRefusesKeys => "the keyboard policy does not allow pid-routed keys",
-            Self::InsertNotReadBack => "the field did not read back the inserted line",
-            Self::FieldNotFocused => "the field does not hold keyboard focus",
+            Self::FieldUnchanged => "the field did not change",
+            Self::PartialInsert => "only part of the line read back",
+            Self::InsertNotProven => "the insert could not be proven for this field",
         }
     }
 }
 
-/// What the background AX rung does with the Return of a single-line submit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SubmitPlan {
-    /// Not a single-line submit: nothing extra is sent.
+/// What the background AX rung reports for a single-line submit (#7352 port).
+#[derive(Debug, PartialEq, Eq)]
+enum SubmitStep {
+    /// Not a single-line submit: the rung's ordinary outcomes apply.
     NotASubmit,
-    /// The body was proven inserted and the field holds focus: press Return.
-    SendReturn,
-    /// The line was written but the Return must not be sent.
-    WithholdReturn(SubmitWithhold),
+    /// The line was proven inserted and its Return was pressed.
+    Submitted {
+        /// The field did not hold focus and a focus write was sent first.
+        focused_first: bool,
+    },
+    /// The line was proven inserted but its Return was not pressed: the field
+    /// did not hold focus, or the key post failed. Not an error a caller would
+    /// retry, since that would insert the line again.
+    LineWithoutReturn { suffix: String },
+    /// The insert itself was not proven, so no Return was sent; the ordinary
+    /// partial or unconfirmed outcome applies.
+    InsertNotProven(SubmitWithhold),
 }
 
-/// The Return is a pid-routed key that reaches whichever field holds focus, so
-/// it goes out only for a proof that the body landed in the focused field.
-fn submit_plan(
+/// Decide and run the Return of a single-line submit. The Return is a
+/// pid-routed key that reaches whichever field holds focus, so it goes out only
+/// after the insert is proven (`Complete`, which needs a bound target) and
+/// `focus` confirms the written field holds keyboard focus. `focus` answers
+/// `(confirmed, focus_write_sent)`; neither closure runs for a text that is
+/// not a submit or whose insert was not proven.
+fn submit_step(
     submit_body: Option<&str>,
     progress: TypedProgress,
-    keyboard_allowed: bool,
-    focus_confirmed: bool,
-) -> SubmitPlan {
+    focus: impl FnOnce() -> (bool, bool),
+    press_return: impl FnOnce() -> anyhow::Result<()>,
+) -> SubmitStep {
     if submit_body.is_none() {
-        return SubmitPlan::NotASubmit;
+        return SubmitStep::NotASubmit;
     }
     if progress != TypedProgress::Complete {
-        return SubmitPlan::WithholdReturn(SubmitWithhold::InsertNotReadBack);
+        return SubmitStep::InsertNotProven(SubmitWithhold::of(progress));
     }
-    if !keyboard_allowed {
-        return SubmitPlan::WithholdReturn(SubmitWithhold::PolicyRefusesKeys);
-    }
-    if !focus_confirmed {
-        return SubmitPlan::WithholdReturn(SubmitWithhold::FieldNotFocused);
-    }
-    SubmitPlan::SendReturn
-}
-
-/// How a proven single-line insert reports its Return: `(verified,
-/// delivered_chars, detail suffix)`. The body already landed, so a failed key
-/// post must not turn the call into an error: a retry would insert the line
-/// again.
-fn submit_return_report(
-    pressed: &anyhow::Result<()>,
-    text: &str,
-    body: &str,
-) -> (bool, usize, String) {
-    match pressed {
-        Ok(()) => (true, text.chars().count(), ", then pressed Return".into()),
-        Err(error) => (
-            false,
-            body.chars().count(),
-            format!(
-                "; pressing Return failed ({error}), so it may not have been sent: read the field \
-                 before repeating it"
+    let (confirmed, focus_sent) = focus();
+    if !confirmed {
+        let sent = if focus_sent {
+            " (a focus write was sent)"
+        } else {
+            ""
+        };
+        return SubmitStep::LineWithoutReturn {
+            suffix: format!(
+                "; Return was not sent because the field does not hold keyboard focus{sent}"
             ),
-        ),
+        };
+    }
+    match press_return() {
+        Ok(()) => SubmitStep::Submitted {
+            focused_first: focus_sent,
+        },
+        Err(error) => SubmitStep::LineWithoutReturn {
+            suffix: format!("; pressing Return failed ({error}), so it may not have been sent"),
+        },
     }
 }
 
@@ -3426,86 +3473,93 @@ fn type_text_in_key_window(
                 let document = document_after_ax_insert(ax_progress, || unsafe {
                     crate::document_edit::ensure_marked_after_ax_write(pid, element, false)
                 });
-                // The Return reaches whichever field holds focus, so the rung
-                // proves the written element is that field, while the element
-                // is still live. A window-addressed request takes the strict
-                // window-aware check; a pid-only one the pid-wide check. Only a
-                // submit needs this, so an ordinary insert writes no focus.
-                let focus_confirmed =
-                    ax_progress == TypedProgress::Complete && submit_body.is_some() && {
-                        let _ = crate::input::ax_actions::focus_element(element as usize);
-                        match window_id {
-                            Some(wid) => element_has_exact_app_focus(pid, wid, element as usize),
-                            None => crate::input::ax_actions::element_has_keyboard_focus(
-                                pid,
-                                element as usize,
-                            ),
+                // A single-line submit: the Return goes out only after the
+                // insert is proven and the written field holds keyboard focus,
+                // checked while the element is still live. `Complete` needs a
+                // bound target, so the window is known whenever focus is asked.
+                let step = submit_step(
+                    submit_body,
+                    ax_progress,
+                    || {
+                        let Some(wid) = window_id else {
+                            return (false, false);
+                        };
+                        let ptr = element as usize;
+                        if element_has_exact_app_focus(pid, wid, ptr) {
+                            return (true, false);
                         }
-                    };
+                        let _ = crate::input::ax_actions::focus_element(ptr);
+                        (element_has_exact_app_focus(pid, wid, ptr), true)
+                    },
+                    || crate::input::keyboard::press_key(pid, "return", &[]),
+                );
                 if owns {
                     unsafe {
                         CFRelease(element as _);
                     }
                 }
-                let submit =
-                    submit_plan(submit_body, ax_progress, keyboard_allowed, focus_confirmed);
                 let idx_str = || idx_opt.map(|i| format!(" [{i}]")).unwrap_or_default();
-                match submit {
-                    SubmitPlan::SendReturn => {
-                        let pressed = crate::input::keyboard::press_key(pid, "return", &[]);
-                        let (verified, delivered, suffix) =
-                            submit_return_report(&pressed, text, submit_body.unwrap_or(text));
+                match step {
+                    SubmitStep::NotASubmit => {}
+                    SubmitStep::Submitted { focused_first } => {
+                        let focused = if focused_first {
+                            ", focused the field"
+                        } else {
+                            ""
+                        };
                         return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
+                            detail: format!(
+                                " into{} {role} \"{title}\"{}{focused}, then pressed Return",
+                                idx_str(),
+                                document.note().trim_end_matches('.')
+                            ),
+                            path: PATH_AX,
+                            verified: true,
+                            delivered_chars: Some(text.chars().count()),
+                            web_area: outcome_web_area,
+                        }));
+                    }
+                    SubmitStep::LineWithoutReturn { suffix } => {
+                        return Ok(TypeTextDelivery::LineWithoutReturn(TypeTextOutcome {
                             detail: format!(
                                 " into{} {role} \"{title}\"{}{suffix}",
                                 idx_str(),
                                 document.note().trim_end_matches('.')
                             ),
                             path: PATH_AX,
-                            verified,
-                            delivered_chars: Some(delivered),
+                            verified: false,
+                            delivered_chars: submit_body.map(|body| body.chars().count()),
                             web_area: outcome_web_area,
                         }));
                     }
-                    SubmitPlan::WithholdReturn(reason) => {
-                        let insert_proven = ax_progress == TypedProgress::Complete;
-                        return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
-                            detail: if insert_proven {
-                                format!(
-                                    " into{} {role} \"{title}\"{}; Return was not sent because {}",
-                                    idx_str(),
-                                    document.note().trim_end_matches('.'),
-                                    reason.reason()
-                                )
-                            } else if let TypedProgress::Partial(delivered) = ax_progress {
+                    SubmitStep::InsertNotProven(reason) => {
+                        let reason = reason.reason();
+                        let (detail, delivered_chars) = match ax_progress {
+                            TypedProgress::Partial(delivered) => (
                                 format!(
                                     " via partial AX write into{} {role} \"{title}\"; delivered \
-                                     {delivered} char(s), and Return was not sent because {}",
-                                    idx_str(),
-                                    reason.reason()
-                                )
-                            } else {
+                                     {delivered} char(s), and Return was not sent because {reason}",
+                                    idx_str()
+                                ),
+                                Some(delivered),
+                            ),
+                            _ => (
                                 format!(
                                     " via AX write into{} {role} \"{title}\"; Return was not sent \
-                                     because {}",
-                                    idx_str(),
-                                    reason.reason()
-                                )
-                            },
+                                     because {reason}",
+                                    idx_str()
+                                ),
+                                None,
+                            ),
+                        };
+                        return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
+                            detail,
                             path: PATH_AX,
                             verified: false,
-                            // Without proof the line landed, no count is claimed.
-                            delivered_chars: match ax_progress {
-                                TypedProgress::Complete => {
-                                    submit_body.map(|body| body.chars().count())
-                                }
-                                TypedProgress::Partial(delivered) => Some(delivered),
-                                TypedProgress::Unchanged | TypedProgress::Unverifiable => None,
-                            },
+                            delivered_chars,
                             web_area: outcome_web_area,
                         }));
                     }
-                    SubmitPlan::NotASubmit => {}
                 }
                 if ax_progress == TypedProgress::Complete {
                     let idx_str = idx_opt.map(|i| format!(" [{i}]")).unwrap_or_default();
@@ -3967,6 +4021,7 @@ mod u32_outcome_tests {
                 false,
                 false,
                 "",
+                false,
             );
             assert_eq!(
                 result.structured_content.as_ref().unwrap()["effect"],
@@ -4116,6 +4171,7 @@ mod u32_outcome_tests {
             false,
             false,
             "",
+            false,
         );
         assert!(projected.content.iter().any(|item| matches!(item, cua_driver_core::protocol::Content::Text { text, .. } if text.contains("may keep the old content"))));
     }
@@ -4580,49 +4636,95 @@ mod tests {
         }
     }
 
-    /// The Return reaches whichever field holds focus, so the rung sends it
-    /// only for a proof that the body landed in the confirmed focused field.
+    /// wp1c review: the rung's submit decision. Return goes out only after a
+    /// proven insert and a confirmed focus; nothing extra runs for a text that
+    /// is not a submit or whose insert was not proven; a failed or withheld
+    /// Return keeps the inserted line.
     #[test]
-    fn submit_return_needs_a_complete_readback_and_confirmed_focus() {
-        use SubmitPlan::*;
-        use SubmitWithhold::*;
+    fn a_submit_presses_return_only_after_a_proven_insert_and_confirmed_focus() {
+        use std::cell::Cell;
+        use SubmitStep::*;
         use TypedProgress::*;
         let body = Some("netflix.com");
-        assert_eq!(submit_plan(body, Complete, true, true), SendReturn);
-        // Without proven insertion the Return could submit a partial line.
-        for progress in [Partial(4), Unchanged, Unverifiable] {
+        let run = |body: Option<&str>,
+                   progress: TypedProgress,
+                   focus: (bool, bool),
+                   press: anyhow::Result<()>| {
+            let (focus_calls, press_calls) = (Cell::new(0), Cell::new(0));
+            let step = submit_step(
+                body,
+                progress,
+                || {
+                    focus_calls.set(focus_calls.get() + 1);
+                    focus
+                },
+                || {
+                    press_calls.set(press_calls.get() + 1);
+                    press
+                },
+            );
+            (step, focus_calls.get(), press_calls.get())
+        };
+
+        assert_eq!(
+            run(body, Complete, (true, false), Ok(())),
+            (
+                Submitted {
+                    focused_first: false
+                },
+                1,
+                1
+            )
+        );
+        assert_eq!(
+            run(body, Complete, (true, true), Ok(())),
+            (
+                Submitted {
+                    focused_first: true
+                },
+                1,
+                1
+            )
+        );
+        // Unfocused: the line stays, no Return.
+        let (step, _, presses) = run(body, Complete, (false, true), Ok(()));
+        assert_eq!(presses, 0);
+        assert!(
+            matches!(&step, LineWithoutReturn { suffix } if suffix.contains("does not hold keyboard focus (a focus write was sent)")),
+            "{step:?}"
+        );
+        // A failed Return post keeps the line too.
+        let (step, _, presses) = run(
+            body,
+            Complete,
+            (true, false),
+            Err(anyhow::anyhow!("refused")),
+        );
+        assert_eq!(presses, 1);
+        assert!(
+            matches!(&step, LineWithoutReturn { suffix } if suffix.contains("refused") && suffix.contains("may not have been sent")),
+            "{step:?}"
+        );
+        // An unproven insert sends nothing else and says why.
+        for (progress, reason) in [
+            (Partial(4), SubmitWithhold::PartialInsert),
+            (Unchanged, SubmitWithhold::FieldUnchanged),
+            (Unverifiable, SubmitWithhold::InsertNotProven),
+        ] {
             assert_eq!(
-                submit_plan(body, progress, true, true),
-                WithholdReturn(InsertNotReadBack),
-                "progress={progress:?}"
+                run(body, progress, (true, false), Ok(())),
+                (InsertNotProven(reason), 0, 0),
+                "{progress:?}"
             );
         }
-        // A pid-routed key is only allowed by an Allowed policy.
-        assert_eq!(
-            submit_plan(body, Complete, false, true),
-            WithholdReturn(PolicyRefusesKeys)
-        );
-        assert_eq!(
-            submit_plan(body, Complete, true, false),
-            WithholdReturn(FieldNotFocused)
-        );
-        // No single-line submit body: the rung sends nothing extra, whatever
-        // the read-back and focus say.
+        // Not a submit: nothing extra, whatever the read-back says.
         for progress in [Complete, Partial(4), Unchanged, Unverifiable] {
-            for (allowed, focused) in [(true, true), (true, false), (false, true)] {
-                assert_eq!(
-                    submit_plan(None, progress, allowed, focused),
-                    NotASubmit,
-                    "progress={progress:?} allowed={allowed} focused={focused}"
-                );
-            }
+            assert_eq!(
+                run(None, progress, (true, false), Ok(())),
+                (NotASubmit, 0, 0)
+            );
         }
-    }
-
-    /// A role that is not a single-line field, a multi-line text, or text with
-    /// an embedded control character never becomes a submit.
-    #[test]
-    fn only_a_single_line_field_with_one_trailing_return_is_a_submit() {
+        // Not a single-line submit text or role.
         for (role, text) in [
             ("AXTextArea", "line\n"),
             ("AXTextField", "a\nb\n"),
@@ -4630,36 +4732,42 @@ mod tests {
             ("AXTextField", "netflix.com"),
             ("AXTextField", ""),
         ] {
-            let body = single_line_submit_body(role, text);
-            assert_eq!(body, None, "role={role} text={text:?}");
-            assert_eq!(
-                submit_plan(body, TypedProgress::Complete, true, true),
-                SubmitPlan::NotASubmit,
-                "role={role} text={text:?}"
-            );
+            assert_eq!(single_line_submit_body(role, text), None, "{role} {text:?}");
         }
     }
 
-    /// wp1c: the body of a proven submit landed, so a Return that failed to
-    /// post reports the inserted line and an unverified Return instead of an
-    /// error a caller would retry (inserting the line twice).
+    /// wp1c review: a line that landed without its Return is reported as an
+    /// unverified insert, never as the retryable `type_text_incomplete` error
+    /// whose retry would insert the line again. An ordinary shortfall keeps
+    /// the retryable partial.
     #[test]
-    fn a_failed_return_after_a_proven_insert_reports_the_line_not_an_error() {
-        let (verified, delivered, suffix) =
-            submit_return_report(&Ok(()), "netflix.com\n", "netflix.com");
-        assert!(verified);
-        assert_eq!(delivered, 12);
-        assert_eq!(suffix, ", then pressed Return");
+    fn a_line_without_its_return_is_not_a_retryable_partial() {
+        let outcome = || TypeTextOutcome {
+            detail: " into AXTextField \"Address\"; Return was not sent because the field does \
+                     not hold keyboard focus"
+                .into(),
+            path: PATH_AX,
+            verified: false,
+            delivered_chars: Some(11),
+            web_area: WebAreaClassification::NonWebContent,
+        };
+        let line = completed_text_result(outcome(), true, 12, false, false, "");
+        assert_ne!(line.is_error, Some(true), "{line:?}");
+        let fields = line.structured_content.clone().expect("structured result");
+        assert_eq!(fields["effect"], "unverifiable");
+        assert_eq!(fields["verified"], false);
+        assert_eq!(fields["delivered_chars"], 11);
+        assert!(fields.get("retryable").is_none(), "{fields}");
+        assert!(fields.get("code").is_none(), "{fields}");
+        let text = format!("{:?}", line.content);
+        assert!(text.contains("Do not repeat type_text"), "{text}");
 
-        let failed = Err(anyhow::anyhow!("key post refused"));
-        let (verified, delivered, suffix) =
-            submit_return_report(&failed, "netflix.com\n", "netflix.com");
-        assert!(!verified, "the Return is not confirmed");
-        assert_eq!(delivered, 11, "only the proven body counts");
-        assert!(
-            suffix.contains("key post refused") && suffix.contains("may not have been sent"),
-            "{suffix}"
-        );
+        let partial = completed_text_result(outcome(), false, 12, false, false, "");
+        assert_eq!(partial.is_error, Some(true));
+        let fields = partial.structured_content.expect("structured result");
+        assert_eq!(fields["code"], "type_text_incomplete");
+        assert_eq!(fields["retryable"], true);
+        assert_eq!(fields["retry_from_character"], 11);
     }
 
     #[test]
@@ -4978,7 +5086,7 @@ mod secure_read_tests {
         assert!(!outcome.verified);
         assert_eq!(outcome.delivered_chars, None);
         assert_eq!(outcome.path, PATH_AX);
-        let result = type_text_outcome_result(outcome, 3, false, false, "");
+        let result = type_text_outcome_result(outcome, 3, false, false, "", false);
         assert!(result.content.iter().any(|content| matches!(content, cua_driver_core::protocol::Content::Text { text, .. } if text.contains("may keep the old content"))));
         let structured = result.structured_content.unwrap();
         assert_eq!(structured["effect"], "unverifiable");
