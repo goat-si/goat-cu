@@ -41,6 +41,11 @@
 | 133b2ef9 | wp1d | sync 465aab0b → 4cf88bae (0.47.16): Linux GTK3 overlay hit test, macOS e2e occluder test, vendored cua-telemetry 0.25.0 |
 | 1ec667ea | wp1c review | a line that landed without its Return is LineWithoutReturn (unverified, not the retryable type_text_incomplete); submit_step / completed_text_result pure decisions with call-site tests; focus written only when needed and disclosed; per-read-back withhold reasons |
 | 0f0d4b70 | wp3c review | #279 rule extended: a native scroll-bar AXPress error that may have acted ends the call (no second wheel scroll); proven non-delivery and pointer-gate refusals in right/double-click are coded refusals; press_key's semantic AXConfirm/AXCancel perform goes through the write-outcome classifier; GOAT.md |
+| 019c3858 | CI fix | Linux `mutter_display` descriptor-count test runs alone in a child test process (goat-ci run 43156456005) |
+| cd815162, 5c760643, d5e23ca6, d0fb0350 | docs | wp3, wp4, wp1b, wp1c close-outs with path:line; final-review replacement record; receipt-helper fix; browser flake |
+| 88c70460 | docs | third re-fetch; unit wp1e (015) |
+| b5aa4734 | contract | `contract/manifest.json` regenerated for the #299 `process_instance` outputs (`cua-contract-gen -- all --check` exit 1 → 0) |
+| 068c9a00 | wp1e | sync 4cf88bae → 4f2aa028 (0.47.18): `invoke_menu` `delivery_mode` contract (manifest and UniFFI bindings regenerated), hyprland requalify channel, CHANGELOG, installer version, vendored cua-telemetry 0.25.2 |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -122,3 +127,36 @@ helper safety harnesses. Logs: /tmp/goat-cu-sync/receipt-final/.
   plain cargo; Xvfb installed for the two X11 tests): named test green; the scratch sibling held across the child run green; a scratch
   typo in the child filter red; full `platform-linux --lib` 3× 1168 passed / 15 ignored; clippy `-p platform-linux -p cua-driver-core
   --all-targets -D warnings` exit 0.
+
+### Protocol record (check_protocol.py on 068c9a00, darwin-universal baseline)
+
+`python3 goat/compat/check_protocol.py --candidate rust/target/debug/cua-driver --candidate-version 0.40.1-goat.1 --baseline-key
+darwin-universal` exit 0: "protocol-compatible with the baseline in every GOAT launch form"; daemon contract 0.8.0 = 0.8.0. This lane adds,
+in both the embedded-proxy and direct-embedded forms, `invoke_menu` optional argument `delivery_mode` (wp1e) and the output-only
+`process_instance` on `get_window_state`, `list_apps.apps[]`, `list_windows.windows[]` (#299; the output delta script reports nothing
+removed). The other "added optional argument(s)" lines compare against that older frozen baseline and predate this lane:
+`/tmp/goat-cu-sync/proto_delta.py` against the 0.40.1-goat.1 release binary (this lane's base release) on 068c9a00 reports 65 = 65 tools in
+both forms, added [], removed [], the one optional argument `invoke_menu.delivery_mode`, descriptions reworded for `set_config` and
+`type_text` (not protocol), daemon 0.8.0 = 0.8.0, problems 0; the same script found no added optional argument after wp1 (010), and the
+check_protocol output differs from the 9bd0e96c receipt only by the two `invoke_menu` lines. No allowed-changes entry is needed: each
+change is provably additive. `contract/manifest.json` and both UniFFI binding sets pass their generators' `--check` (wp1e receipt).
+
+### Per-phase receipts (kache doctor exit 0 in each; `cxc receipt test`)
+
+| Phase | Head | Result |
+|---|---|---|
+| wp2 | 019c3858 | failures=0: core fast_path 57, snapshot_store 74, read_session 1; macOS process_identity 27, list_windows 10, list_apps 5, get_window_state 88, fast_path_guard 1, lease_wiring 22; host linux process_instances 3, windows process_instance 10 |
+| wp3 | cd815162 | failures=0: platform-macos --lib 2026 passed / 48 ignored; cursor-overlay --lib 157; clippy -p platform-macos --all-targets -D warnings |
+| wp4 | 5c760643 | failures=0: core actionability 26, post_action_wait 6, session 186; macOS actionability 55, element_pointer 30, get_window_state 88 |
+| wp1b | d5e23ca6 | failures=0 (fixed helper): core browser 329, cursor-overlay 157, e2e standalone_browser_behavior 3, macOS security_prompt 10, browser 104, Linux container platform-linux 1168 |
+| wp1c | d0fb0350 | failures=0: macOS type_text 60, type_text_chars 4, e2e check, Linux container platform-linux 1168 |
+| wp1e | 068c9a00 | failures=0 (15 steps): contract 91, contract-gen --check, uniffi --check, contract_parity, schema_consistency, protocol_schema_test 2, check_protocol, macOS invoke_menu 33, windows host 207, Linux container 1168, requalify new tests 2, python compat 2 |
+
+Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
+
+### Review state for the exact head
+
+Earlier rounds per unit are in 004. The whole-branch final review of 12e47ec6 failed in provider compaction; the commits without a review
+of their final form are under narrow fresh reviews: `cu-delta-review-019c3858-s24` (0f0d4b70, 019c3858), `cu-final-287-e354f982-s24`,
+`cu-final-wp1c-1ec667ea-s24`, `cu-final-ci-wp1d-s24` (d0e90760, 2a726372, 133b2ef9), `cu-wp1e-review-068c9a00-s24` (b5aa4734, 068c9a00).
+Docs-only commits are not reviewed separately.
