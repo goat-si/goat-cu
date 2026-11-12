@@ -133,3 +133,19 @@ an older helper ignores the extra field. The helper's 33 ms repaint timer is unc
 Pre-existing (not this lane): building cua-driver-core for cursor-overlay alone warns `LocatorRegistry::Borrowed` / `Locator::new` unused
 (batch_tools/locate.rs:957/:977, test-only callers); identical on origin/main 40c6f6eb and in the wp1 receipt's overlay log.
 NOT RUN: Linux/Windows overlay suites and the GNOME helper (no Linux/GNOME host); manual overlay observation.
+
+## wp3 close-out on HEAD 019c3858
+
+Paths are under `rust/crates/`; line numbers are at 019c3858. #272 is wp4 (040).
+
+| Issue | Disposition | Code | Failing-first test |
+|---|---|---|---|
+| #286 | FIXED | `platform-macos/src/tools/click.rs:3439` `point_outside_frame` and `:3447` `relocated_point`, shared by the requested-point check and the fast-path relocation; refused before the cursor moves | `click.rs:5647` `a_relocated_background_point_outside_the_frame_is_refused` |
+| #287 | FIXED (option 2: bounded float, then park) | `cursor-overlay/src/cursor_pose.rs:94` `REST_PARK_SECS`, `:101` `rest_amplitude`, `:112` `rest_parked`; `render_state.rs:386` `has_resting_motion`; macOS overlay parks without frame ticks and wakes at `idle_fade_wait` (`platform-macos/src/cursor/overlay.rs:773`) | cursor_pose.rs / render_map.rs / pose_stream.rs tests above; e354f982's macOS parking test |
+| #279 | FIXED | focus retry: `platform-macos/src/tools/hotkey.rs:168` `focus_retry_allowed`, `:184` `focus_with_retry`. One meaning for AX perform errors: `click.rs:6167` `perform_outcome`; `press_key.rs:1923` `decide_chord`; `right_click.rs:1612` and `input/ax_actions.rs:526` `ActionNotDelivered` → `tools/mod.rs:107` `not_delivered_refusal`; `scroll.rs:1485`–`:1508` (a scroll-bar press that may have acted ends the call); `input/ax_actions.rs:641` `perform_ax_action` classified. Pixel fallbacks post only at `element_pointer.rs:254` `checked_point` (`right_click.rs:1751`, `double_click.rs:475`) | `hotkey.rs:897`, `click.rs:6132` `perform_outcome_keeps_one_meaning_per_error`, 98632052's 8 and 0f0d4b70's 4 red tests |
+| #281 | FIXED (#281.2, #281.3); #281.1 documented in GOAT.md | `click.rs:4231` `SelectionUnavailable` | `click.rs:5586` `a_selection_target_that_is_not_settable_says_so` |
+| #283 | FIXED (#283.2 dead `hand_back` removed, 393c49e2); #283.1 documented in GOAT.md; live smoke NOT RUN | — | — |
+
+Review state: wp3/wp4 review of 393c49e2 FAIL (2 P2) → 98632052; wp3c review of 98632052 NEAR-PASS (2 P2, 1 P3) → 0f0d4b70; #287
+round 1 NEAR-PASS → e354f982 (round 2 stalled at the GOAT restart; its scope is in `cu-final-review-12e47ec6-s24`). The delta review of
+0f0d4b70 and 019c3858 (`cu-delta-review-019c3858-s24`) is pending; wp3 closes after it returns.
