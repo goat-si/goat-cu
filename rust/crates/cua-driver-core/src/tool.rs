@@ -1459,6 +1459,16 @@ impl ToolRegistry {
         registry
     }
 
+    /// Give this registry its own desktop coordinator and input lane. A test on
+    /// a paused clock needs it: while a step waits for the process-wide ones,
+    /// which other tests' actions hold, its runtime idles and the clock jumps
+    /// to the step's deadline.
+    #[cfg(test)]
+    pub(crate) fn isolate_desktop(&mut self) {
+        self.desktop_coordinator = Box::leak(Box::new(tokio::sync::Mutex::new(())));
+        self.desktop_lane = Box::leak(Box::new(DesktopLane::new(STALE_LANE_WAIT)));
+    }
+
     /// Construct a registry with a provider installed by a trusted embedding
     /// host. Public tool calls and transport metadata cannot replace it.
     pub fn new_with_protected_consent_provider(
