@@ -84,7 +84,10 @@ impl Tool for LaunchAppTool {
         {
             return super::key_restore_pending_refusal("launch_app", None, None);
         }
-        crate::window_change_detector::note_intentional_activation();
+        crate::focus_arbiter::note_intentional();
+        // Every lease and demotion below belongs to this launch: a driver
+        // activation after this point is not undone.
+        let watch = crate::focus_arbiter::UndoWatch::arm();
         let bundle_id = args.opt_str("bundle_id");
         let name = args.opt_str("name");
         let mut located = None;
@@ -311,11 +314,13 @@ impl Tool for LaunchAppTool {
         if let Ok(Ok((pid, _, _, _))) = &launch_result {
             if let Some(prior) = prior_frontmost {
                 if *pid != prior {
-                    let targeted_lease = crate::focus_steal::FocusStealPreventer::begin_suppression(
-                        Some(*pid),
-                        prior,
-                        "LaunchAppTool.post",
-                    );
+                    let targeted_lease =
+                        crate::focus_steal::FocusStealPreventer::begin_suppression_for(
+                            Some(*pid),
+                            prior,
+                            "LaunchAppTool.post",
+                            watch.clone(),
+                        );
                     // Now safe to drop the wildcard — targeted is armed.
                     drop(wildcard_lease);
                     // Hold the targeted lease long enough to cover the
@@ -351,7 +356,7 @@ impl Tool for LaunchAppTool {
                     // the same tokio tick the lease dropped), demote it.
                     // Loop 5x200ms = 1s of post-window coverage. Each
                     // iteration is cheap (one frontmost_pid + maybe one
-                    // activate_pid call) so this stays well under the
+                    // reactivate_app call) so this stays well under the
                     // RPC budget even when the demote keeps working.
                     let mut demotion_succeeded = true;
                     for _ in 0..5 {
@@ -360,7 +365,11 @@ impl Tool for LaunchAppTool {
                             // Not frontmost — nothing to do this tick.
                             continue;
                         }
-                        let activated = crate::apps::activate_pid(prior);
+                        // The driver or the user fronted it: stand down.
+                        if watch.decide() == crate::focus_arbiter::Decision::Leave {
+                            break;
+                        }
+                        let activated = crate::apps::reactivate_app(prior);
                         let still_frontmost = crate::apps::frontmost_pid() == Some(*pid);
                         if still_frontmost {
                             tracing::warn!(
@@ -427,19 +436,27 @@ impl Tool for LaunchAppTool {
                         let launched_pid = *pid;
                         let prior_pid = prior;
                         crate::input::worker_context::spawn_async(async move {
-                            let _lease = crate::focus_steal::FocusStealPreventer::begin_suppression(
-                                Some(launched_pid),
-                                prior_pid,
-                                "LaunchAppTool.watchdog",
-                            );
+                            let _lease =
+                                crate::focus_steal::FocusStealPreventer::begin_suppression_for(
+                                    Some(launched_pid),
+                                    prior_pid,
+                                    "LaunchAppTool.watchdog",
+                                    watch.clone(),
+                                );
                             let mut late_activations = 0u32;
                             for _ in 0..32 {
                                 // 32 × 250ms = 8s
                                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                                if crate::apps::frontmost_pid() == Some(launched_pid) {
-                                    late_activations += 1;
-                                    let _ = crate::apps::activate_pid(prior_pid);
+                                if crate::apps::frontmost_pid() != Some(launched_pid) {
+                                    continue;
                                 }
+                                // The driver activated an app since, or the
+                                // user just switched to it: stand down.
+                                if watch.decide() == crate::focus_arbiter::Decision::Leave {
+                                    break;
+                                }
+                                late_activations += 1;
+                                let _ = crate::apps::reactivate_app(prior_pid);
                             }
                             if late_activations > 0 {
                                 tracing::warn!(

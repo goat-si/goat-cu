@@ -101,6 +101,22 @@ pub(super) fn invalid_arguments(
     pre_dispatch_refusal("invalid_arguments", message)
 }
 
+/// The coded refusal for an [`ActionNotDelivered`] error, if `error` is one.
+/// It is typed `NOT_DELIVERED` as well, which is what
+/// `ToolResult::proves_no_input` reads, so a `run_steps` step that sent
+/// nothing is not counted as possibly delivered.
+///
+/// [`ActionNotDelivered`]: crate::input::ax_actions::ActionNotDelivered
+pub(super) fn not_delivered_refusal(
+    error: &anyhow::Error,
+) -> Option<cua_driver_core::protocol::ToolResult> {
+    let not_delivered = error.downcast_ref::<crate::input::ax_actions::ActionNotDelivered>()?;
+    Some(
+        pre_dispatch_refusal(not_delivered.code, not_delivered.message.clone())
+            .with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED),
+    )
+}
+
 fn native_window_id(
     window_id: Option<u64>,
 ) -> Result<Option<u32>, cua_driver_core::protocol::ToolResult> {
@@ -118,6 +134,24 @@ mod snapshot_window_id_tests {
         assert_eq!(result.is_error, Some(true));
         let structured = result.structured_content.expect("structured refusal");
         assert_eq!(structured["code"], "invalid_arguments");
+        assert_eq!(structured["effect"], "refused");
+        assert_eq!(structured["dispatched"], false);
+    }
+
+    /// A proven non-delivery is typed NOT_DELIVERED, so a batch step that sent
+    /// nothing is not counted as possibly delivered (wp3c delta review).
+    #[test]
+    fn an_action_that_was_not_delivered_is_typed_not_delivered() {
+        let error = anyhow::Error::new(crate::input::ax_actions::ActionNotDelivered {
+            code: "action_unavailable",
+            message: "the AX API is disabled".into(),
+        });
+        let refusal = super::not_delivered_refusal(&error).expect("coded refusal");
+        assert_eq!(
+            refusal.disposition,
+            Some(cua_driver_contract::ErrorDisposition::NOT_DELIVERED)
+        );
+        let structured = refusal.structured_content.expect("structured refusal");
         assert_eq!(structured["effect"], "refused");
         assert_eq!(structured["dispatched"], false);
     }
@@ -293,7 +327,7 @@ mod pid_window_target_tests {
 /// sends process-scoped key events anyway. `None` leaves the call refused.
 fn pid_focused_window(pid: i64) -> Option<u64> {
     let pid = i32::try_from(pid).ok()?;
-    crate::ax::bindings::focused_window_id_of_pid(pid).map(u64::from)
+    crate::ax::bindings::focused_window_ids_of_pid(pid).map(|window| u64::from(window.root))
 }
 
 fn pid_window_guarded<T: Tool + 'static>(
@@ -602,6 +636,20 @@ pub(crate) fn element_disabled_result(
     disabled_refusal(pid, window_id, disabled, suggest_foreground)
 }
 
+/// The `element_disabled` refusal for a dispatch error that is an
+/// [`crate::input::ax_actions::ElementDisabled`], or `None` for any other error.
+pub(crate) fn element_disabled_error(
+    pid: i32,
+    window_id: u32,
+    error: &anyhow::Error,
+    foreground: bool,
+) -> Option<cua_driver_core::protocol::ToolResult> {
+    let disabled = error.downcast_ref::<crate::input::ax_actions::ElementDisabled>()?;
+    Some(element_disabled_result(
+        pid, window_id, disabled, foreground,
+    ))
+}
+
 fn disabled_refusal(
     pid: i32,
     window_id: u32,
@@ -631,6 +679,7 @@ fn disabled_refusal(
 /// cursor or input work. The snapshot's `enabled` can be stale. A foreground
 /// call into an app that is not frontmost skips the read: activation can
 /// enable the control, so a read before activation would refuse a live target.
+/// Such a caller must read it again after activation, immediately before input.
 pub(crate) async fn refuse_if_disabled(
     pid: i32,
     window_id: u32,
@@ -740,7 +789,8 @@ pub(crate) fn default_window_for_pid(args: &mut serde_json::Value) {
     else {
         return;
     };
-    let window_id = crate::ax::bindings::focused_window_id_of_pid(pid).or_else(|| {
+    let focused = crate::ax::bindings::focused_window_ids_of_pid(pid).map(|window| window.root);
+    let window_id = focused.or_else(|| {
         crate::windows::all_windows()
             .into_iter()
             .filter(|window| window.pid == pid && window.is_on_screen && window.layer == 0)
@@ -1800,16 +1850,24 @@ impl ToolState {
 
 /// The target pid of an element-addressable call. An explicit `pid` wins; a
 /// call that carries only an `element_token` takes the pid the token was
-/// minted for, as the schemas promise ("the token carries it").
+/// minted for, as the schemas promise ("the token carries it"). A pid that
+/// draws a system security or consent prompt is refused: its windows are the
+/// user's to answer.
 pub(super) fn target_pid(
     state: &ToolState,
     args: &serde_json::Value,
 ) -> Result<i32, cua_driver_core::protocol::ToolResult> {
     use cua_driver_core::tool_args::ArgsExt;
-    if args.get("pid").is_some_and(|pid| !pid.is_null()) {
-        return args.require_i32("pid");
-    }
-    if let Some(pid) = state.snapshots.pid_for_token(args) {
+    let pid = if args.get("pid").is_some_and(|pid| !pid.is_null()) {
+        Some(args.require_i32("pid")?)
+    } else {
+        state.snapshots.pid_for_token(args)
+    };
+    if let Some(pid) = pid {
+        crate::security_prompt::refuse_pid(
+            cua_driver_core::security_prompt::PromptInput::from_args(args),
+            pid,
+        )?;
         return Ok(pid);
     }
     if args
@@ -2272,6 +2330,118 @@ mod session_config_guard_tests {
     }
 }
 
+/// Input addressed to a process that draws a security prompt is refused
+/// before the tool does anything else, in every mode but unrestricted.
+/// Removing the pid guard from any of these routes fails here.
+#[cfg(test)]
+mod security_prompt_target_tests {
+    use super::*;
+    use crate::security_prompt::fixture::{PromptShown, PROMPT_PID};
+    use cua_driver_core::security_prompt::{ALLOW_ARG, SECURITY_PROMPT_PROTECTED};
+    use cua_driver_core::tool::Tool;
+
+    fn tools() -> Vec<(&'static str, Box<dyn Tool>, serde_json::Value)> {
+        let state = Arc::new(ToolState::new(false, false, None));
+        let pid = PROMPT_PID;
+        vec![
+            (
+                "click",
+                Box::new(click::ClickTool::new(state.clone())),
+                serde_json::json!({"pid": pid, "window_id": 1, "x": 5, "y": 5}),
+            ),
+            (
+                "double_click",
+                Box::new(double_click::DoubleClickTool::new(state.clone())),
+                serde_json::json!({"pid": pid, "window_id": 1, "x": 5, "y": 5}),
+            ),
+            (
+                "right_click",
+                Box::new(right_click::RightClickTool::new(state.clone())),
+                serde_json::json!({"pid": pid, "window_id": 1, "x": 5, "y": 5}),
+            ),
+            (
+                "scroll",
+                Box::new(scroll::ScrollTool::new(state.clone())),
+                serde_json::json!({"pid": pid, "window_id": 1, "direction": "down"}),
+            ),
+            (
+                "drag",
+                Box::new(drag::DragTool::new(state.clone())),
+                serde_json::json!({"pid": pid, "window_id": 1, "from_x": 1, "from_y": 1, "to_x": 2, "to_y": 2}),
+            ),
+            (
+                "type_text",
+                Box::new(type_text::TypeTextTool::new(state.clone())),
+                serde_json::json!({"pid": pid, "window_id": 1, "text": "x"}),
+            ),
+            (
+                "type_text_chars",
+                Box::new(type_text_chars::TypeTextCharsTool::new(state.clone())),
+                serde_json::json!({"pid": pid, "text": "x"}),
+            ),
+            (
+                "press_key",
+                Box::new(press_key::PressKeyTool::new(state.clone())),
+                serde_json::json!({"pid": pid, "window_id": 1, "key": "return"}),
+            ),
+            (
+                "hotkey",
+                Box::new(hotkey::HotkeyTool::new(state.clone())),
+                serde_json::json!({"pid": pid, "window_id": 1, "keys": ["cmd", "a"]}),
+            ),
+            (
+                "set_value",
+                Box::new(set_value::SetValueTool::new(state.clone())),
+                serde_json::json!({"pid": pid, "window_id": 1, "element_index": 0, "value": "x"}),
+            ),
+            (
+                "invoke_menu",
+                Box::new(invoke_menu::InvokeMenuTool),
+                serde_json::json!({"pid": pid, "window_id": 1, "path": ["File", "Close"]}),
+            ),
+        ]
+    }
+
+    fn code(result: &cua_driver_core::protocol::ToolResult) -> Option<String> {
+        let structured = result.structured_content.as_ref()?;
+        structured
+            .pointer("/refusal/code")
+            .or_else(|| structured.get("code"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    }
+
+    #[tokio::test]
+    async fn input_addressed_to_a_prompt_owner_is_refused() {
+        let _prompt = PromptShown::start();
+        for (name, tool, args) in tools() {
+            let result = tool.invoke(args).await;
+            assert_eq!(result.is_error, Some(true), "{name}");
+            assert_eq!(
+                code(&result).as_deref(),
+                Some(SECURITY_PROMPT_PROTECTED),
+                "{name}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unrestricted_mode_lets_the_call_past_the_prompt_guard() {
+        let _prompt = PromptShown::start();
+        for (name, tool, mut args) in tools() {
+            args[ALLOW_ARG] = serde_json::json!(true);
+            let result = tool.invoke(args).await;
+            // The fixture pid is not a real process, so the call fails later
+            // for that reason; it must not fail for the prompt.
+            assert_ne!(
+                code(&result).as_deref(),
+                Some(SECURITY_PROMPT_PROTECTED),
+                "{name}: {result:?}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod cursor_overlay_facility_tests {
     use super::*;
@@ -2424,7 +2594,7 @@ mod pixel_focus_readback_tests {
 
 #[cfg(test)]
 mod recording_start_guard_tests {
-    use cua_driver_core::recording::RecordingSession;
+    use cua_driver_core::recording::{RecordingSession, StopBy};
     use cua_driver_core::session::fire_session_end;
 
     #[test]
@@ -2457,7 +2627,7 @@ mod recording_start_guard_tests {
         let ok = rec.start(dir.to_str().unwrap(), false, Some(sid));
         assert!(ok.is_ok(), "start for a live session owner must succeed");
         assert!(rec.current_state().enabled);
-        let _ = rec.stop_owner(Some(sid));
+        let _ = rec.stop(StopBy::Owner(sid));
     }
 
     #[test]
@@ -2469,7 +2639,7 @@ mod recording_start_guard_tests {
         let ok = rec.start(dir.to_str().unwrap(), false, None);
         assert!(ok.is_ok(), "anonymous start must never be gated");
         assert!(rec.current_state().enabled);
-        let _ = rec.stop_owner(None);
+        let _ = rec.stop(StopBy::Anyone);
     }
 }
 
@@ -2744,5 +2914,88 @@ mod element_disabled_tests {
         let structured = result.structured_content.expect("structured");
         assert_eq!(structured["code"], "element_disabled");
         assert!(structured.get("escalation").is_none(), "{structured}");
+    }
+}
+
+#[cfg(test)]
+mod not_delivered_batch_tests {
+    use async_trait::async_trait;
+    use cua_driver_core::{
+        authorization::PermissionMode,
+        protocol::ToolResult,
+        session_authorization::{SessionAuthorizationRegistry, SessionModeCeiling},
+        tool::{Tool, ToolDef, ToolRegistry},
+    };
+    use serde_json::Value;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// An action whose AX route provably sent nothing.
+    struct UndeliveredAction(ToolDef);
+
+    #[async_trait]
+    impl Tool for UndeliveredAction {
+        fn def(&self) -> &ToolDef {
+            &self.0
+        }
+
+        async fn invoke(&self, _args: Value) -> ToolResult {
+            let error = anyhow::Error::new(crate::input::ax_actions::ActionNotDelivered {
+                code: "action_unavailable",
+                message: "AXShowMenu was not delivered; nothing was sent.".into(),
+            });
+            super::not_delivered_refusal(&error).expect("coded refusal")
+        }
+    }
+
+    /// wp3c delta review: a `run_steps` step answered by
+    /// `not_delivered_refusal` reports `delivery: "not_delivered"`, and the
+    /// batch that sent nothing is typed NOT_DELIVERED rather than DELIVERED.
+    #[tokio::test]
+    async fn a_batch_step_refused_as_not_delivered_counts_as_not_delivered() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(UndeliveredAction(ToolDef {
+            name: "right_click".into(),
+            description: "undelivered action".into(),
+            input_schema: serde_json::json!({"type": "object", "additionalProperties": true}),
+            read_only: false,
+            destructive: false,
+            idempotent: false,
+            open_world: false,
+        })));
+        registry.register_session_tools();
+        let registry = Arc::new(registry);
+        registry.init_self_weak();
+        let ceiling = SessionModeCeiling::for_trusted_sessions(
+            [PermissionMode::Unrestricted],
+            true,
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+        )
+        .expect("ceiling");
+        let context = SessionAuthorizationRegistry::with_ceiling(ceiling)
+            .compatibility_context(PermissionMode::Unrestricted, None)
+            .expect("context");
+
+        let batch = registry
+            .invoke_with_context(
+                "run_steps",
+                serde_json::json!({"steps": [
+                    {"tool": "right_click", "args": {"pid": 42, "window_id": 7}}
+                ]}),
+                context,
+            )
+            .await;
+        assert_eq!(batch.is_error, Some(true));
+        assert_eq!(
+            batch.disposition,
+            Some(cua_driver_contract::ErrorDisposition::NOT_DELIVERED),
+            "a batch whose only step sent nothing delivered nothing"
+        );
+        let structured = batch.structured_content.expect("batch structured");
+        let step = &structured["steps"][0];
+        assert_eq!(step["delivery"], "not_delivered", "{structured}");
+        assert_eq!(step["code"], "action_unavailable", "{structured}");
+        assert_eq!(step["effect"], "refused", "{structured}");
     }
 }

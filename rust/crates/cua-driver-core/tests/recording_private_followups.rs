@@ -28,7 +28,32 @@ fn failed_video_start_removes_precreated_output() {
         .unwrap();
     assert!(!root.path().join("recording.mp4").exists());
     assert!(matches!(load(root.path()), Err(LoadError::VideoMissing(_))));
-    session.stop_owner(None).unwrap();
+    session.stop(cua_driver_core::recording::StopBy::Anyone).unwrap();
+}
+
+#[test]
+fn a_refused_final_session_write_is_reported_in_state() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("recording");
+    std::fs::create_dir(&dir).unwrap();
+    let session = RecordingSession::new();
+    session.start(dir.to_str().unwrap(), false, None).unwrap();
+    // The directory the recording opened is replaced before stop.
+    std::fs::rename(&dir, root.path().join("moved")).unwrap();
+    std::fs::create_dir(&dir).unwrap();
+    let stopped = session.stop(cua_driver_core::recording::StopBy::Anyone);
+    assert!(stopped.is_err(), "the final session.json write is refused");
+    let state = session.current_state();
+    assert!(!state.enabled);
+    assert!(
+        state
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("recording directory changed")),
+        "a caller reading state sees why the stop failed: {:?}",
+        state.last_error
+    );
+    assert!(!dir.join("session.json").exists());
 }
 
 fn render_fixture(planted_link: bool) {

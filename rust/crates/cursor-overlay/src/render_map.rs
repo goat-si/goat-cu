@@ -785,6 +785,70 @@ mod tests {
         assert!(!core.needs_frame_tick());
     }
 
+    // GOAT #287: the resting float plays for a bounded window and then parks
+    // upright, so a settled default cursor stops demanding frames while its
+    // idle-hide countdown still runs. Parking at exactly 0 keeps the arrow
+    // upright instead of freezing it mid-tilt.
+    #[test]
+    fn a_visible_resting_default_cursor_parks_until_idle_fade() {
+        use crate::cursor_pose::{FLOAT_EASE_IN_SECS, FLOAT_HOLD_SECS, FLOAT_REST_SECS};
+        let mut map = map();
+        let core = placed(&mut map, DEFAULT_CURSOR_KEY);
+        core.options_override = Some(crate::CursorOptions::default());
+        core.motion.idle_hide_ms = 20_000.0;
+        settle(core);
+        assert!(core.has_resting_motion(), "floats in its first seconds");
+        assert!(map.needs_frame_tick());
+
+        // Tick past the float window, still well inside the 20 s idle delay.
+        let window = FLOAT_HOLD_SECS + FLOAT_EASE_IN_SECS + FLOAT_REST_SECS + FLOAT_EASE_IN_SECS;
+        let core = &mut map.cursors[DEFAULT_CURSOR_KEY];
+        while core.float_hold_secs < window + 1.0 {
+            core.tick_motion(1.0 / 60.0);
+        }
+        assert!(core.is_revealed(), "still inside the idle delay");
+        assert!(!core.has_resting_motion(), "a parked cursor rests still");
+        assert_eq!(
+            core.float_offset(),
+            crate::cursor_pose::FloatOffset::ZERO,
+            "parked upright, never mid-tilt"
+        );
+        assert_eq!(core.painted_rotation(), 0.0);
+        assert!(!core.needs_frame_tick(), "no frames while parked");
+        assert!(!map.needs_frame_tick());
+
+        // The idle fade still comes due and wakes the loop for its pixels.
+        let wait = map.idle_fade_wait().expect("idle fade deadline");
+        assert!(wait > Duration::ZERO && wait <= Duration::from_secs(20));
+        let core = &mut map.cursors[DEFAULT_CURSOR_KEY];
+        core.tick_motion(wait.as_secs_f64() + 0.001);
+        assert!(core.idle_fade_in_progress());
+        assert!(core.needs_frame_tick(), "the fade animates pixels");
+
+        // A move restarts the hold at its arrival, so a cursor that parked
+        // floats again once the next action lands.
+        let core = &mut map.cursors[DEFAULT_CURSOR_KEY];
+        core.apply_command_base(
+            OverlayCommand::MoveTo {
+                x: 180.0,
+                y: 140.0,
+                end_heading_radians: 0.0,
+                target: None,
+            },
+            false,
+            false,
+        );
+        let mut ticks = 0;
+        while core.trajectory.is_some() {
+            core.tick_motion(1.0 / 60.0);
+            ticks += 1;
+            assert!(ticks < 2_000, "the move arrives");
+        }
+        assert!(core.float_hold_secs < window, "the arrival restarts it");
+        core.tick_motion(FLOAT_HOLD_SECS + FLOAT_EASE_IN_SECS + 0.1);
+        assert!(core.has_resting_motion(), "floats after the move lands");
+    }
+
     // A never-hiding cursor stays on screen indefinitely, so its resting
     // motion would keep the overlay rendering forever. It rests still and the
     // overlay quiesces, which the hosted Wayland CPU certification enforces.

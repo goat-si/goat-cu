@@ -246,7 +246,7 @@ async fn run_steps_and_recordings_never_carry_a_fill() {
 
     // An agent's call through the registry is refused before admission
     // proves the tab: no browser call at all, so no consent prompt either.
-    registry.recording.stop_owner(None).unwrap();
+    registry.recording.stop(crate::recording::StopBy::Anyone).unwrap();
     let calls_before = f.state.lock().unwrap().calls.len();
     let agent = registry
         .invoke_with_context(

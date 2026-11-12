@@ -91,6 +91,16 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::build(false)
+    }
+
+    /// A harness whose registry has its own desktop coordinator and lane, for
+    /// tests on a paused clock (see `ToolRegistry::isolate_desktop`).
+    fn isolated() -> Self {
+        Self::build(true)
+    }
+
+    fn build(isolate_desktop: bool) -> Self {
         let mut registry = ToolRegistry::new();
         let mut calls = std::collections::HashMap::new();
         let pacings: Arc<Mutex<Vec<(String, crate::step_pacing::StepPacing)>>> = Arc::default();
@@ -158,6 +168,9 @@ impl Harness {
             }));
         }
         registry.register_session_tools();
+        if isolate_desktop {
+            registry.isolate_desktop();
+        }
         let registry = Arc::new(registry);
         registry.init_self_weak();
         Self {
@@ -1384,7 +1397,10 @@ async fn observation_inherits_the_window_and_stays_bounded() {
 
 #[tokio::test(start_paused = true)]
 async fn pauses_between_steps_but_not_after_the_last() {
-    let harness = Harness::new();
+    // Only the first step's deadline is the trigger below; the second has a
+    // real budget, which this paused clock would reach at once while the step
+    // waited for a desktop lane another test holds.
+    let harness = Harness::isolated();
     let mut plan = super::Plan::parse(
         &harness.registry,
         &json!({"delay_ms": 120, "steps": [

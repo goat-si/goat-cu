@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use crate::apps;
 use crate::ax::bindings::{
-    copy_children, copy_element_attr, copy_string_attr, element_screen_center, kAXErrorSuccess,
-    perform_action, AXUIElementRef,
+    copy_children, copy_element_attr, copy_string_attr, element_screen_center, perform_action,
+    AXError, AXUIElementRef,
 };
 use crate::focus_guard;
 use crate::window_change_detector::WindowChangeDetector;
@@ -187,8 +187,11 @@ impl ScrollTool {
                 {
                     return refusal;
                 }
+                let prompt = cua_driver_core::security_prompt::PromptInput::from_args(&args);
                 let result = latency::spawn_action_blocking(move || {
-                    crate::input::mouse::scroll_wheel_desktop(x, y, delta_y, delta_x, amount)
+                    crate::input::mouse::scroll_wheel_desktop(
+                        prompt, x, y, delta_y, delta_x, amount,
+                    )
                 })
                 .await;
                 match result {
@@ -200,7 +203,11 @@ impl ScrollTool {
                         "path": "hid",
                         "effect": "unverifiable"
                     })),
-                    Ok(Err(error)) => ToolResult::error(format!("desktop scroll failed: {error}")),
+                    Ok(Err(error)) => {
+                        crate::security_prompt::tool_result(&error).unwrap_or_else(|| {
+                            ToolResult::error(format!("desktop scroll failed: {error}"))
+                        })
+                    }
                     Err(error) => ToolResult::error(format!("desktop scroll task failed: {error}")),
                 }
             })
@@ -227,7 +234,12 @@ impl ScrollTool {
         };
         let by = args.str_or("by", "line");
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match latency::resolve(|| self.state.snapshots.resolve(pid, &args)) {
+        let evidence = crate::process_identity::evidence(&args, pid).await;
+        let resolved = match latency::resolve(|| {
+            self.state
+                .snapshots
+                .resolve_for_instance(pid, &args, evidence)
+        }) {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -298,10 +310,10 @@ impl ScrollTool {
                 let direction_for_ax = direction.clone();
                 let by_for_ax = by.clone();
                 let foreground = delivery_mode.is_foreground();
-                let ax_result =
-                    latency::spawn_action_blocking(move || -> anyhow::Result<(bool, bool)> {
+                let ax_result = latency::spawn_action_blocking(
+                    move || -> anyhow::Result<(NativeScroll, bool)> {
                         if foreground {
-                            let mut delivered = false;
+                            let mut delivered = NativeScroll::NotAttempted;
                             let fronted = crate::input::skylight::with_foreground_assist(
                                 pid as libc::pid_t,
                                 wid,
@@ -332,10 +344,11 @@ impl ScrollTool {
                                 false,
                             ))
                         }
-                    })
-                    .await;
+                    },
+                )
+                .await;
                 match ax_result {
-                    Ok(Ok((true, fronted))) => {
+                    Ok(Ok((NativeScroll::Pressed, fronted))) => {
                         return ToolResult::text(format!(
                         "✅ Scrolled native macOS control {direction} by {by} × {amount} through AX."
                     ))
@@ -345,7 +358,24 @@ impl ScrollTool {
                         "effect": "unverifiable"
                     }));
                     }
-                    Ok(Ok((false, _))) => {}
+                    Ok(Ok((NativeScroll::NotAttempted, _))) => {}
+                    // A scroll-bar press that may have acted is not followed
+                    // by a wheel scroll (#279, wp3c review).
+                    Ok(Ok((NativeScroll::MayHaveActed(err), fronted))) => {
+                        return ToolResult::text(format!(
+                            "⚠️ Pressed the native scroll bar {direction}, but the app returned AX \
+                             error {err}, which does not mean it failed: it may have scrolled. \
+                             Read the window before scrolling again."
+                        ))
+                        .with_structured(serde_json::json!({
+                            "path": if fronted { "ax_fg" } else { "ax" },
+                            "verified": false,
+                            "effect": "unverifiable"
+                        }));
+                    }
+                    Ok(Ok((NativeScroll::NotDelivered(err), fronted))) => {
+                        return native_scroll_not_delivered(err, fronted);
+                    }
                     Ok(Err(error)) => {
                         return ToolResult::error(format!("Native AX scroll failed: {error}"));
                     }
@@ -1432,27 +1462,68 @@ impl WheelVerdict {
     }
 }
 
+/// What the native text-area scroll-bar route did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeScroll {
+    /// Not a native text area with scroll-bar buttons, or the first press
+    /// proved nothing was sent: the wheel route may run.
+    NotAttempted,
+    /// At least one press was delivered.
+    Pressed,
+    /// A press returned an error that may have acted: nothing else is sent.
+    MayHaveActed(AXError),
+    /// The first press was proved not delivered: nothing was sent.
+    NotDelivered(AXError),
+}
+
+/// Press a scroll-bar button `amount` times, classifying every return by the
+/// core write-outcome rule (`click::perform_outcome`, #279).
+fn press_scroll_button(
+    amount: usize,
+    mut press: impl FnMut() -> AXError,
+    mut pause: impl FnMut(),
+) -> NativeScroll {
+    use cua_driver_core::mutation::WriteOutcome;
+    let mut pressed = false;
+    for _ in 0..amount.max(1) {
+        let err = press();
+        match super::click::perform_outcome(err) {
+            WriteOutcome::Delivered => {
+                pressed = true;
+                pause();
+            }
+            WriteOutcome::FallThrough(_) | WriteOutcome::StopNotDelivered(_) if pressed => {
+                return NativeScroll::Pressed;
+            }
+            WriteOutcome::FallThrough(_) => return NativeScroll::NotAttempted,
+            WriteOutcome::StopNotDelivered(_) => return NativeScroll::NotDelivered(err),
+            _ => return NativeScroll::MayHaveActed(err),
+        }
+    }
+    NativeScroll::Pressed
+}
+
 unsafe fn scroll_native_text_area(
     element: AXUIElementRef,
     direction: &str,
     by: &str,
     amount: usize,
-) -> bool {
+) -> NativeScroll {
     if copy_string_attr(element, "AXRole").as_deref() != Some("AXTextArea") {
-        return false;
+        return NativeScroll::NotAttempted;
     }
     let Some(scroll_area) = copy_element_attr(element, "AXParent") else {
-        return false;
+        return NativeScroll::NotAttempted;
     };
     if copy_string_attr(scroll_area, "AXRole").as_deref() != Some("AXScrollArea") {
         CFRelease(scroll_area as CFTypeRef);
-        return false;
+        return NativeScroll::NotAttempted;
     }
     let mut buttons = Vec::new();
     collect_ax_buttons(scroll_area, 0, &mut buttons);
     CFRelease(scroll_area as CFTypeRef);
     if buttons.is_empty() {
-        return false;
+        return NativeScroll::NotAttempted;
     }
 
     let reverse = direction == "up";
@@ -1462,16 +1533,14 @@ unsafe fn scroll_native_text_area(
         0
     };
     let index = base + usize::from(reverse);
-    let mut delivered = false;
-    if let Some(target) = buttons.get(index).copied() {
-        for _ in 0..amount.max(1) {
-            if perform_action(target, "AXPress") != kAXErrorSuccess {
-                break;
-            }
-            delivered = true;
-            std::thread::sleep(std::time::Duration::from_millis(30));
-        }
-    }
+    let delivered = match buttons.get(index).copied() {
+        Some(target) => press_scroll_button(
+            amount,
+            || perform_action(target, "AXPress"),
+            || std::thread::sleep(std::time::Duration::from_millis(30)),
+        ),
+        None => NativeScroll::NotAttempted,
+    };
     for button in buttons {
         CFRelease(button as CFTypeRef);
     }
@@ -1498,9 +1567,46 @@ unsafe fn collect_ax_buttons(
     }
 }
 
+/// The result of a native AX scroll proven not delivered: a coded refusal,
+/// or a plain error when this call fronted the window first, which is input
+/// of its own. The refusal is typed `NOT_DELIVERED` so a batch reads it as
+/// proof nothing was sent.
+fn native_scroll_not_delivered(err: AXError, fronted: bool) -> ToolResult {
+    let message = format!("Native AX scroll was not delivered (AX error {err}); nothing was sent.");
+    if fronted {
+        ToolResult::error(format!(
+            "{message} The window was brought to the front first."
+        ))
+    } else {
+        super::pre_dispatch_refusal("action_unavailable", message)
+            .with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A native scroll proven not delivered is typed NOT_DELIVERED unless this
+    /// call fronted the window first, which is input of its own (wp3c delta
+    /// review).
+    #[test]
+    fn a_native_scroll_that_was_not_delivered_is_typed_unless_the_window_was_fronted() {
+        use crate::ax::bindings::kAXErrorAPIDisabled;
+        let refused = native_scroll_not_delivered(kAXErrorAPIDisabled, false);
+        assert_eq!(
+            refused.disposition,
+            Some(cua_driver_contract::ErrorDisposition::NOT_DELIVERED)
+        );
+        assert_eq!(
+            refused.structured_content.expect("coded refusal")["code"],
+            "action_unavailable"
+        );
+        let fronted = native_scroll_not_delivered(kAXErrorAPIDisabled, true);
+        assert_eq!(fronted.is_error, Some(true));
+        assert_eq!(fronted.disposition, None);
+        assert!(fronted.structured_content.is_none());
+    }
 
     #[test]
     fn an_electron_reveal_that_was_sent_is_never_reported_as_refused() {
@@ -2247,6 +2353,71 @@ mod tests {
             text_of(&result).starts_with("scroll: invalid arguments:"),
             "{}",
             text_of(&result)
+        );
+    }
+}
+
+#[cfg(test)]
+mod wp3c_review_tests {
+    use super::{press_scroll_button, NativeScroll};
+    use crate::ax::bindings::{
+        kAXErrorAPIDisabled, kAXErrorActionUnsupported, kAXErrorCannotComplete,
+        kAXErrorIllegalArgument, kAXErrorInvalidUIElement, kAXErrorNotImplemented, kAXErrorSuccess,
+        AXError,
+    };
+
+    fn run(returns: &[AXError], amount: usize) -> (NativeScroll, usize) {
+        let presses = std::cell::Cell::new(0);
+        let step = press_scroll_button(
+            amount,
+            || {
+                let at = presses.get();
+                presses.set(at + 1);
+                returns.get(at).copied().unwrap_or(kAXErrorSuccess)
+            },
+            || {},
+        );
+        (step, presses.get())
+    }
+
+    /// wp3c review: a scroll-bar press that may have acted is never followed
+    /// by the wheel route; only a press that proves nothing was sent lets it
+    /// run, and a proved non-delivery sends nothing.
+    #[test]
+    fn a_scroll_bar_press_that_may_have_acted_is_not_followed_by_a_wheel() {
+        let ok = kAXErrorSuccess;
+        assert_eq!(run(&[ok, ok, ok], 3), (NativeScroll::Pressed, 3));
+        assert_eq!(
+            run(&[kAXErrorActionUnsupported], 3),
+            (NativeScroll::NotAttempted, 1)
+        );
+        assert_eq!(
+            run(&[kAXErrorNotImplemented], 3),
+            (NativeScroll::NotAttempted, 1)
+        );
+        assert_eq!(
+            run(&[kAXErrorAPIDisabled], 3),
+            (NativeScroll::NotDelivered(kAXErrorAPIDisabled), 1)
+        );
+        for err in [
+            kAXErrorIllegalArgument,
+            kAXErrorInvalidUIElement,
+            kAXErrorCannotComplete,
+        ] {
+            assert_eq!(
+                run(&[err], 3),
+                (NativeScroll::MayHaveActed(err), 1),
+                "{err}"
+            );
+            assert_eq!(
+                run(&[ok, err], 3),
+                (NativeScroll::MayHaveActed(err), 2),
+                "{err}"
+            );
+        }
+        assert_eq!(
+            run(&[ok, kAXErrorActionUnsupported], 3),
+            (NativeScroll::Pressed, 2)
         );
     }
 }

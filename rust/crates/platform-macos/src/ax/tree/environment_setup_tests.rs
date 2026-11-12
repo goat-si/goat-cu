@@ -708,7 +708,10 @@ fn shared_entry_preserves_application_creation_failure() {
     assert!(!observed.legacy.truncated);
     assert_eq!(
         observed.legacy.window_scope,
-        Some(WindowScope::AxUnresolved { ax_window_count: 0 })
+        Some(WindowScope::AxUnresolved {
+                ax_window_count: 0,
+                ax_windows_error: None,
+            })
     );
     assert_eq!(*environment.trace.borrow(), ["create"]);
     assert_eq!(

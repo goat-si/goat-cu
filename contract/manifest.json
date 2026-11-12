@@ -2759,6 +2759,10 @@
             "minimum": 0,
             "type": "integer"
           },
+          "process_instance": {
+            "description": "Opaque label of the process instance that owned pid when this answer was read (its kernel start time on macOS, Linux and Windows). Compare for equality only: the same pid with a different label is a different process, the earlier one having exited. Absent when it could not be read or did not hold for the whole answer.",
+            "type": "string"
+          },
           "returned_element_count": {
             "minimum": 0,
             "type": [
@@ -3456,7 +3460,8 @@
       ],
       "capabilities": [
         "menu.path.invoke",
-        "accessibility.menu.native"
+        "accessibility.menu.native",
+        "input.delivery_mode"
       ],
       "annotations": {
         "read_only": false,
@@ -3472,6 +3477,14 @@
         "additionalProperties": false,
         "description": "Exact, immediate-child application menu path to resolve and invoke through\nthe operating system's accessibility API. Path labels are matched after\ntrimming surrounding whitespace and otherwise remain case-sensitive. On\nmacOS, three periods in a label also match the ellipsis character that\nnative menu titles use (`Save As...` finds `Save As…`).",
         "properties": {
+          "delivery_mode": {
+            "description": "`background` (default) never takes the user's keyboard or pointer and refuses with\n`background_unavailable` when the item can only be reached by opening a menu. `foreground`\nis the explicit escalation that may activate the window and open menus. Linux honors it;\nmacOS and Windows accept it and keep their existing menu behavior.",
+            "enum": [
+              "background",
+              "foreground"
+            ],
+            "type": "string"
+          },
           "path": {
             "description": "Menu labels from the top-level menu to the item, e.g. `[\"File\", \"Save As...\"]`\n(1 to 16 labels).",
             "items": {
@@ -4011,6 +4024,10 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "process_instance": {
+                  "description": "Opaque label of the process instance that owned pid when this answer was read (its kernel start time on macOS, Linux and Windows). Compare for equality only: the same pid with a different label is a different process, the earlier one having exited. Absent when it could not be read or did not hold for the whole answer.",
+                  "type": "string"
+                },
                 "running": {
                   "type": "boolean"
                 }
@@ -4285,6 +4302,10 @@
                     "integer",
                     "null"
                   ]
+                },
+                "process_instance": {
+                  "description": "Opaque label of the process instance that owned pid when this answer was read (its kernel start time on macOS, Linux and Windows). Compare for equality only: the same pid with a different label is a different process, the earlier one having exited. Absent when it could not be read or did not hold for the whole answer.",
+                  "type": "string"
                 },
                 "space_ids": {
                   "items": {

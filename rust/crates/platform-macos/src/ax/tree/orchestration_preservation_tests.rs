@@ -296,7 +296,10 @@ fn production_root_creation_failure_follows_legacy_return() {
     assert!(result.offscreen_rows.is_empty());
     assert_eq!(
         result.window_scope,
-        Some(WindowScope::AxUnresolved { ax_window_count: 0 })
+        Some(WindowScope::AxUnresolved {
+                ax_window_count: 0,
+                ax_windows_error: None,
+            })
     );
     assert!(result.nodes_skipped);
     assert!(!result.truncated);
@@ -369,7 +372,10 @@ fn production_unresolved_scope_follows_legacy_return() {
         run_scenario(super::environment_evidence_tests::Scenario::NoMatch, None);
     assert_eq!(
         observed.legacy.window_scope,
-        Some(WindowScope::AxUnresolved { ax_window_count: 0 })
+        Some(WindowScope::AxUnresolved {
+                ax_window_count: 0,
+                ax_windows_error: None,
+            })
     );
     assert!(observed.legacy.nodes.is_empty());
     assert_eq!(observed.legacy.tree_markdown, "");

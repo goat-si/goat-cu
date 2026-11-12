@@ -9,12 +9,12 @@ use cua_driver_core::{
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::atspi::native::OptionPickSent;
+use crate::atspi::native::{OptionPick, OptionPickSent};
 
 use super::impl_::{
     attach_focus_guard, background_virtual_key, background_virtual_text, foreground_budget,
     input_error_result, non_ax_escalation, position_named_session_keyboard_cursor,
-    prove_token_element, resolve_cursor_key, resolve_element_local_coords,
+    prove_token_element, refuse_if_disabled, resolve_cursor_key, resolve_element_local_coords,
     spawn_text_write_bounded, stale_observed_element, text_write_stop_result, values_agree,
     window_local_to_screen, x11_pixel_click_no_focus_steal, ToolState,
 };
@@ -160,6 +160,9 @@ impl Tool for SetValueTool {
             Ok(token) => token,
             Err(refusal) => return refusal,
         };
+        if let Some(refusal) = refuse_if_disabled(pid, &resolved, "set_value").await {
+            return refusal;
+        }
         let (token, xid) = match (token, &resolved) {
             (
                 Some(token),
@@ -238,7 +241,7 @@ impl Tool for SetValueTool {
         //    typed like a user would: click the field (real pointer), select
         //    all, type, commit with Tab.
         let is_combo = token.observed.role.eq_ignore_ascii_case("combo box");
-        let wayland = crate::wayland::wayland_input_enabled();
+        let wayland = crate::wayland::is_wayland();
         let background_route = !delivery.is_foreground()
             && !wayland
             && crate::input::real_pointer_input_available()
@@ -298,6 +301,7 @@ impl Tool for SetValueTool {
                     crate::interaction::with_x11_foreground(
                         win,
                         crate::input::ForegroundOptions::pointer(),
+                        crate::interaction::session_policy().menu,
                         || {
                             gated_steps(
                                 &key_gate,
@@ -339,8 +343,14 @@ impl Tool for SetValueTool {
                                     .map(|_| ())
                             }),
                             Box::new(|| {
-                                background_virtual_text(&cursor_id, pid, win, &value_for_keys)
-                                    .map(|_| ())
+                                background_virtual_text(
+                                    &cursor_id,
+                                    pid,
+                                    win,
+                                    &value_for_keys,
+                                    crate::input::TypePacing::default(),
+                                )
+                                .map(|_| ())
                             }),
                             Box::new(|| {
                                 background_virtual_key(&cursor_id, pid, win, "Tab", &[]).map(|_| ())
@@ -442,31 +452,20 @@ fn pick_from_popup(
             return Ok(());
         }
         if foreground {
-            crate::interaction::with_x11_foreground(
-                win,
-                crate::input::ForegroundOptions::keyboard(),
-                || gated_route(gate, || crate::input::send_key_xtest("Escape", &[])),
-            )
-            .map(|_| ())
+            // Inside the click's transaction: the target still has the focus.
+            // The gate still covers it, so a closed gate sends nothing.
+            gated_route(gate, || crate::input::send_key_xtest("Escape", &[]))
         } else {
             gated_route(gate, || {
                 background_virtual_key(cursor_id, pid, win, "Escape", &[]).map(|_| ())
             })
         }
     };
-    let pick = || -> anyhow::Result<String> {
-        let deadline = std::time::Instant::now() + POPUP_OPTIONS_WAIT;
-        loop {
-            // The native call enters the gate only right before DoAction.
-            match crate::atspi::activate_option_token_gated(token, value, gate) {
-                Ok(Some(name)) => return Ok(name),
-                Ok(None) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-                Ok(None) => anyhow::bail!("the combo box popup listed no options"),
-                Err(error) => return Err(error),
-            }
-        }
+    let pick = || {
+        // The native call enters the gate only right before DoAction.
+        pick_listed_option(value, POPUP_OPTIONS_WAIT, || {
+            crate::atspi::activate_option_token_gated(token, value, gate)
+        })
     };
     let open_and_pick = || -> anyhow::Result<()> {
         // A pick that may have changed the control ends here: no Escape
@@ -481,10 +480,13 @@ fn pick_from_popup(
         .map(|_| ())
     };
     if foreground {
+        // Open, pick and close in one transaction, so the restore runs once
+        // the popup is gone instead of closing it before the pick.
         let (sx, sy) = window_local_to_screen(win, lx, ly)?;
         crate::interaction::with_x11_foreground(
             win,
             crate::input::ForegroundOptions::pointer(),
+            crate::interaction::session_policy().menu,
             || {
                 gated_route(gate, || {
                     crate::input::send_click_xtest_desktop(
@@ -493,10 +495,10 @@ fn pick_from_popup(
                         1,
                         1,
                     )
-                })
+                })?;
+                open_and_pick()
             },
         )?;
-        open_and_pick()?;
         return Ok(None);
     }
     let (_, guard) = crate::input::focus_guard::guarded(Some(pid), || {
@@ -522,6 +524,36 @@ fn gated_steps<'a>(
     Ok(())
 }
 
+/// Retry `activate` until the opened popup answers with its options or
+/// `wait` runs out, then pick the option `value` names. A popup whose every
+/// read answered and that still lists no options has no option `value`
+/// names: the same `no_such_option` refusal as an unknown option. One whose
+/// options could not be read stays an error, since a populated popup can be
+/// unreadable too.
+fn pick_listed_option(
+    value: &str,
+    wait: std::time::Duration,
+    mut activate: impl FnMut() -> anyhow::Result<OptionPick>,
+) -> anyhow::Result<String> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        let pick = activate()?;
+        let waiting = std::time::Instant::now() < deadline;
+        match pick {
+            OptionPick::Picked { name } => return Ok(name),
+            OptionPick::NoMatch { options } => {
+                return Err(crate::atspi::no_such_option(value, &options))
+            }
+            OptionPick::NoOptions | OptionPick::Unavailable if waiting => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            OptionPick::NoOptions => return Err(crate::atspi::no_such_option(value, &[])),
+            OptionPick::Unavailable => {
+                anyhow::bail!("the combo box popup's options could not be read")
+            }
+        }
+    }
+}
 async fn read_back(token: crate::atspi::TokenElement) -> Option<String> {
     tokio::task::spawn_blocking(move || crate::atspi::read_value_token(&token))
         .await
@@ -715,6 +747,56 @@ mod set_value_tests {
             true,
         );
         assert_eq!(matched.structured_content.unwrap()["verified"], true);
+    }
+
+    #[test]
+    fn a_combo_box_listing_no_options_refuses_the_value_and_changes_nothing() {
+        let mut attempts = 0;
+        let error = pick_listed_option("Blue", std::time::Duration::ZERO, || {
+            attempts += 1;
+            Ok(OptionPick::NoOptions)
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert!(crate::atspi::native::is_no_such_option(&error), "{error}");
+        // goat: the refusal never echoes the requested value.
+        assert!(!error.to_string().contains("Blue"), "{error}");
+        let refused = no_such_option_result(3, &error, false);
+        assert_eq!(refused.is_error, Some(true));
+        let s = refused.structured_content.unwrap();
+        assert_eq!(s["code"], "option_not_found");
+        assert_eq!(s["effect"], "none");
+        assert_eq!(
+            s["detail"],
+            "no option matching the requested value; it lists no options"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_popup_is_never_reported_as_having_no_such_option() {
+        let error = pick_listed_option("Blue", std::time::Duration::ZERO, || {
+            Ok(OptionPick::Unavailable)
+        })
+        .unwrap_err();
+        assert!(!crate::atspi::native::is_no_such_option(&error), "{error}");
+    }
+
+    #[test]
+    fn a_popup_that_lists_its_options_late_still_gets_the_pick() {
+        let mut attempts = 0;
+        let picked = pick_listed_option("Blue", std::time::Duration::from_secs(5), || {
+            attempts += 1;
+            Ok(match attempts {
+                1 => OptionPick::Unavailable,
+                2 => OptionPick::NoOptions,
+                _ => OptionPick::Picked {
+                    name: "Blue".to_owned(),
+                },
+            })
+        })
+        .unwrap();
+        assert_eq!(picked, "Blue");
+        assert_eq!(attempts, 3);
     }
 
     #[test]

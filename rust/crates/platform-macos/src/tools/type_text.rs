@@ -44,6 +44,7 @@ use crate::focus_guard;
 use crate::window_change_detector::WindowChangeDetector;
 use core_foundation::base::CFRelease;
 use cua_driver_core::background_input::BackgroundRefusal;
+use cua_driver_core::security_prompt::PromptInput;
 
 use super::ToolState;
 
@@ -68,7 +69,7 @@ fn def() -> &'static ToolDef {
             route fits the transport budget; longer text is refused with a safe chunk size. In web content \
             (browser tabs, Slack, VS Code) AXValue does not prove the DOM saw the text, so the result is \
             `effect:\"unverifiable\"`; exact web targets use pointer focus and PID key delivery. For a browser \
-            tab use the `page` tool; for an embedded web view pass `x, y` (no element_token) to pixel-click \
+            tab use get_browser_state and browser_type (`page` only reads); for an embedded web view pass `x, y` (no element_token) to pixel-click \
             the field and type in one call (AX-press a closed control open first).".into(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -89,7 +90,7 @@ fn def() -> &'static ToolDef {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 200,
-                    "description": "Ms between characters in the CGEvent fallback. Default 30."
+                    "description": "Ms between characters in the CGEvent fallback. Default 30 (0 for a terminal): one paced key per character. 0 sends characters in batched key events, fast, which some native fields take only the first character of."
                 },
                 "scope": { "type": "string", "enum": ["window", "desktop"], "default": "window", "description": "\"desktop\" with no pid/window_id types into the frontmost app." },
                 "delivery_mode": {
@@ -158,7 +159,7 @@ impl Tool for TypeTextTool {
             let text =
                 cua_driver_core::text_sanitize::strip_trailing_agent_protocol_tags(&input.text)
                     .into_owned();
-            let delay_ms = args.u64_or("delay_ms", 30).min(200);
+            let delay_ms = args.u64_or("delay_ms", DEFAULT_DELAY_MS).min(200);
             if let Some(refusal) = synthesis_preflight(
                 TextDeliveryRoute::UnicodeSynthesis,
                 text.chars().count(),
@@ -199,9 +200,11 @@ impl Tool for TypeTextTool {
             let posted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let posted_ref = posted.clone();
 
+            let prompt = PromptInput::from_args(&args);
             let result = latency::spawn_action_blocking(move || {
                 super::not_editable::desktop_dispatch_guard(checked_pid, true)?;
                 crate::input::keyboard::type_text_global_with_guard(
+                    prompt,
                     &text,
                     delay_ms,
                     || {
@@ -287,10 +290,13 @@ impl Tool for TypeTextTool {
                         "path": "hid",
                         "effect": "unverifiable"
                     })),
-                Ok(Err(error)) => super::not_editable::account_focus_receipt(
-                    text_delivery_failure("desktop type_text failed", &error),
-                    None,
-                ),
+                Ok(Err(error)) => match crate::security_prompt::tool_result(&error) {
+                    Some(refusal) => refusal,
+                    None => super::not_editable::account_focus_receipt(
+                        text_delivery_failure("desktop type_text failed", &error),
+                        None,
+                    ),
+                },
                 Err(error) => ToolResult::text(format!(
                     "The desktop typing task failed ({error}); it may have posted input before                      failing. Read fresh state before retrying."
                 ))
@@ -323,7 +329,12 @@ impl Tool for TypeTextTool {
             );
         }
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match latency::resolve(|| self.state.snapshots.resolve(pid, &args)) {
+        let evidence = crate::process_identity::evidence(&args, pid).await;
+        let resolved = match latency::resolve(|| {
+            self.state
+                .snapshots
+                .resolve_for_instance(pid, &args, evidence)
+        }) {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -345,7 +356,7 @@ impl Tool for TypeTextTool {
             if crate::terminal::is_terminal_pid(pid) {
                 0
             } else {
-                30
+                DEFAULT_DELAY_MS
             }
         });
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
@@ -621,6 +632,7 @@ impl Tool for TypeTextTool {
         let is_terminal_target = crate::terminal::is_terminal_pid(pid);
 
         let blocking_policy = keyboard_policy.clone();
+        let prompt = PromptInput::from_args(&args);
         let native_guard = element_guard.clone();
         let result = focus_guard::with_focus_suppressed(
             Some(pid),
@@ -648,6 +660,7 @@ impl Tool for TypeTextTool {
                             focused_key_route: !delivery_mode.is_foreground()
                                 && element_ptr.is_some()
                                 && crate::input::skylight::is_focus_without_raise_available(),
+                            prompt,
                         },
                     )
                 })
@@ -680,7 +693,10 @@ impl Tool for TypeTextTool {
                 );
                 return super::not_editable::account_focus_receipt(result, px_receipt);
             }
-            Ok(Ok(TypeTextDelivery::Typed(outcome))) => Ok(Ok(outcome)),
+            Ok(Ok(
+                delivery @ (TypeTextDelivery::Typed(_) | TypeTextDelivery::LineWithoutReturn(_)),
+            )) => Ok(Ok(completed_delivery(delivery)
+                .expect("a typed or line-without-return delivery is completed"))),
             Ok(Ok(TypeTextDelivery::InvalidArguments(reason))) => {
                 return super::invalid_arguments(reason)
             }
@@ -689,29 +705,9 @@ impl Tool for TypeTextTool {
         };
 
         let result = match result {
-            Ok(Ok(outcome)) if outcome.delivered_chars.is_some_and(|n| n < char_count) => {
-                let delivered_chars = outcome.delivered_chars.unwrap_or_default();
-                let mut result = ToolResult::error(format!(
-                    "type_text incomplete: delivered {delivered_chars} of {char_count} character(s){}; retry only the remaining suffix",
-                    outcome.detail
-                ))
-                .with_structured(serde_json::json!({
-                    "code": "type_text_incomplete",
-                    "path": outcome.path,
-                    "effect": "partial",
-                    "requested_chars": char_count,
-                    "delivered_chars": delivered_chars,
-                    "retryable": true,
-                    "retry_from_character": delivered_chars,
-                }));
-                if outcome.path == PATH_AX {
-                    result =
-                        result.with_disposition(cua_driver_contract::ErrorDisposition::DELIVERED);
-                }
-                result
-            }
-            Ok(Ok(outcome)) => type_text_outcome_result(
+            Ok(Ok((outcome, line_without_return))) => completed_text_result(
                 outcome,
+                line_without_return,
                 char_count,
                 used_pixel_focus,
                 crate::browser::electron_js::ElectronJs::is_electron(pid),
@@ -730,12 +726,89 @@ impl Tool for TypeTextTool {
     }
 }
 
+/// The outcome of a delivery an actuator completed, and whether it is a
+/// single-line submit's line that landed without its Return (never a
+/// retryable partial); `None` for invalid arguments or a refusal.
+fn completed_delivery(delivery: TypeTextDelivery) -> Option<(TypeTextOutcome, bool)> {
+    match delivery {
+        TypeTextDelivery::Typed(outcome) => Some((outcome, false)),
+        TypeTextDelivery::LineWithoutReturn(outcome) => Some((outcome, true)),
+        TypeTextDelivery::InvalidArguments(_)
+        | TypeTextDelivery::Refused(_)
+        | TypeTextDelivery::SynthesisRefused { .. } => None,
+    }
+}
+
+/// The next step a browser-tab result names when its AXValue read-back is not
+/// proof that the DOM saw the text.
+const BROWSER_TAB_NEXT_STEP: &str = "In a browser tab check it with get_browser_state, then type \
+     with browser_type if it did not land; in an embedded web view use the px form (x,y) once the \
+     screenshot shows it missing.";
+
+/// The reason the `page` escalation gives for browser web content: `page` only
+/// reads, so acting on the tab goes through the typed browser tools.
+const BROWSER_TAB_ESCALATION_REASON: &str = "Browser web content — AXValue read-back cannot prove \
+     that the DOM observed the input (and AX type_text on a contenteditable is racy). Confirm via \
+     the screenshot or get_browser_state first; if the text did not land, type it with \
+     browser_type (mode insert_text first; keystrokes if a rich-text editor such as Draft.js, \
+     Lexical or Slate discards the insert).";
+
+/// The hint for a line that landed without its Return. The dispatch seam keeps
+/// a hint the tool set, so its generic "read before typing again" never applies.
+/// A Return whose post failed may still have been sent, so pressing it waits on
+/// a read of the field.
+const LINE_WITHOUT_RETURN_HINT: &str = "The line is in the field; do not type it again. To submit \
+     it, read the field first: if it still holds the line unsubmitted and has focus, press Return \
+     with press_key.";
+
+/// The result of a delivered text outcome. A shortfall is a retryable partial,
+/// except a single-line submit whose line landed without its Return: repeating
+/// the call would insert the line again (wp1c review).
+fn completed_text_result(
+    outcome: TypeTextOutcome,
+    line_without_return: bool,
+    char_count: usize,
+    used_pixel_focus: bool,
+    electron: bool,
+    suffix: &str,
+) -> ToolResult {
+    if !line_without_return && outcome.delivered_chars.is_some_and(|n| n < char_count) {
+        let delivered_chars = outcome.delivered_chars.unwrap_or_default();
+        let mut result = ToolResult::error(format!(
+            "type_text incomplete: delivered {delivered_chars} of {char_count} character(s){}; retry only the remaining suffix",
+            outcome.detail
+        ))
+        .with_structured(serde_json::json!({
+            "code": "type_text_incomplete",
+            "path": outcome.path,
+            "effect": "partial",
+            "requested_chars": char_count,
+            "delivered_chars": delivered_chars,
+            "retryable": true,
+            "retry_from_character": delivered_chars,
+        }));
+        if outcome.path == PATH_AX {
+            result = result.with_disposition(cua_driver_contract::ErrorDisposition::DELIVERED);
+        }
+        return result;
+    }
+    type_text_outcome_result(
+        outcome,
+        char_count,
+        used_pixel_focus,
+        electron,
+        suffix,
+        line_without_return,
+    )
+}
+
 fn type_text_outcome_result(
     outcome: TypeTextOutcome,
     char_count: usize,
     used_pixel_focus: bool,
     electron: bool,
     suffix: &str,
+    line_without_return: bool,
 ) -> ToolResult {
     let TypeTextOutcome {
         detail,
@@ -771,26 +844,42 @@ fn type_text_outcome_result(
     // right next rung.
     let (mark, note) = if verified {
         ("✅ Inserted", String::new())
+    } else if line_without_return {
+        // Both instructions lead, ahead of the char count and the variable
+        // detail (field title, document note, error text), so a run_steps step
+        // message capped at 300 characters keeps them; the Return advice
+        // matches LINE_WITHOUT_RETURN_HINT.
+        (
+            "📨 Inserted the line, Return not confirmed — do not repeat type_text, which would insert \
+             it again; to submit, read the field first: if it still holds the line unsubmitted and \
+             has focus, press Return with press_key. Inserted",
+            String::new(),
+        )
     } else if untrusted_web_readback {
         let web = web_area == Some(WebAreaClassification::WebContent);
         let next_step = if electron_web_content && used_pixel_focus {
             "The pixel-focus rung already ran, so do not repeat it; verify the \
                          result via the screenshot."
         } else if web {
-            "For a browser tab use the `page` tool (it drives the DOM); for an \
-                         embedded web view, re-type with the px form (x,y)."
+            BROWSER_TAB_NEXT_STEP
         } else {
-            "Read the window to check the text before sending it again."
+            "Check the text in a fresh read of the window."
         };
         let surface = if web {
-            "web-content surface (Chromium / WebKit / Electron): AXValue \
-                         read-back is not independent proof that the renderer/DOM observed \
-                         the input."
+            "Web content (Chromium / WebKit / Electron): its AXValue read-back is not \
+             independent proof that the renderer/DOM observed the input."
         } else {
-            "the window's focused element could not be read, so the AXValue \
-                         read-back cannot be tied to the target window."
+            "The window's focused element could not be read, so the AXValue read-back \
+             cannot be tied to the target window."
         };
-        ("📨 Sent (unverified)", format!(" — {surface} {next_step}"))
+        // The read-first rule and its condition lead, ahead of the char count
+        // and the variable detail (field title, document note), and the next
+        // step comes before the explanation, so run_steps' 300-character step
+        // message can never keep a write without its condition.
+        (
+            "📨 Sent (unverified): read the field, and type again only if the text is missing.",
+            format!(" {next_step} {surface}"),
+        )
     } else if path == PATH_KEY_EVENTS_FG {
         (
             "📨 Sent (unverified)",
@@ -825,12 +914,16 @@ fn type_text_outcome_result(
                 s["delivered_chars"] = serde_json::json!(delivered_chars);
             }
         }
-        if untrusted_web_readback {
-            // Web-content AXValue read-back. A real browser TAB → the
-            // `page` tool (drives the DOM via CDP) is the reliable rung;
-            // an embedded web view (Electron, no CDP) → the element px
-            // action. It's a renderer/DOM-focus problem, never a
-            // foreground one.
+        if line_without_return {
+            // The line is in the field: any escalation would send it again.
+            // The next step is a Return via press_key (see the note above).
+            s["hint"] = serde_json::json!(LINE_WITHOUT_RETURN_HINT);
+        } else if untrusted_web_readback {
+            // Web-content AXValue read-back. A real browser TAB → read it
+            // with get_browser_state, then browser_type if the text did not
+            // land (`page` only reads); an embedded web view (Electron, no
+            // CDP) → the element px action. It's a renderer/DOM-focus
+            // problem, never a foreground one.
             let escalation = match web_readback_next_rung(electron_web_content, used_pixel_focus) {
                 Some("px") => Some((
                     "px",
@@ -840,19 +933,7 @@ fn type_text_outcome_result(
                                  element px action (x,y to pixel-focus the field, then \
                                  type).",
                 )),
-                Some("page") => Some((
-                    "page",
-                    "Browser web content — AXValue read-back cannot prove \
-                                 that the DOM observed the input (and AX type_text on a \
-                                 contenteditable is racy). Drive the tab's DOM with the \
-                                 `page` tool: execute_javascript + el.value/innerText for a \
-                                 plain input; for a rich-text contenteditable \
-                                 (Draft.js/Lexical/Slate-style editors can silently discard \
-                                 a one-shot DOM write on their next render) try insert_text \
-                                 first (one CDP call, cheap), then type_keystrokes if that \
-                                 also gets discarded (real per-character keyboard events, \
-                                 slower but most durable). Or confirm via the screenshot.",
-                )),
+                Some("page") => Some(("page", BROWSER_TAB_ESCALATION_REASON)),
                 _ => None,
             };
             if let Some((recommended, reason)) = escalation {
@@ -877,6 +958,9 @@ fn type_text_outcome_result(
 /// Cmd+V went out may already be in the field: it says so as
 /// `effect:"unverifiable"`, so the caller reads the field before typing again.
 pub(crate) fn text_delivery_failure(prefix: &str, error: &anyhow::Error) -> ToolResult {
+    if let Some(refusal) = crate::security_prompt::tool_result(error) {
+        return refusal;
+    }
     let message = format!("{prefix}: {error:#}");
     if let Some(write) = error.downcast_ref::<TextWriteError>() {
         let effect = if write.chain.no_input() {
@@ -1131,8 +1215,15 @@ fn valid_chromium_native_submission(text: &str) -> bool {
     body.is_some_and(|body| !body.contains(['\n', '\r', '\t']))
 }
 
+/// Default `delay_ms`: per-character pacing. Zero selects batched key events
+/// (see `keyboard::type_text_batched`), which a native field can take only
+/// the first character of; upstream (#6884) pairs its zero default with a
+/// retype of the undelivered tail, which GOAT does not adopt (it would resend
+/// after an unconfirmed delivery), so the default stays paced.
+const DEFAULT_DELAY_MS: u64 = 30;
+
 const DELIVERY_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-const DELIVERY_DRAIN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+const DELIVERY_DRAIN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Keyboard-rung policy for one window-addressed background insert, decided
 /// once by the pure exact-target core before any input is posted.
@@ -1153,6 +1244,9 @@ enum BackgroundKeyboardPolicy {
 /// posted (`Refused`) and the caller must return the structured refusal.
 enum TypeTextDelivery {
     Typed(TypeTextOutcome),
+    /// A single-line submit whose line was proven inserted but whose Return
+    /// was not pressed (see [`SubmitStep::LineWithoutReturn`]).
+    LineWithoutReturn(TypeTextOutcome),
     InvalidArguments(String),
     Refused(BackgroundRefusal),
     SynthesisRefused {
@@ -1538,6 +1632,110 @@ fn document_after_ax_insert(
         mark()
     } else {
         crate::document_edit::DocumentEdited::NotADocument
+    }
+}
+
+/// The text before a final Return, when the text is one line plus that Return
+/// and the role is a single-line field. Such a field cannot hold a newline, so
+/// the Return can only mean submit.
+fn single_line_submit_body<'a>(role: &str, text: &'a str) -> Option<&'a str> {
+    if !matches!(role, "AXTextField" | "AXSearchField" | "AXComboBox") {
+        return None;
+    }
+    let body = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix(['\n', '\r']))?;
+    (!body.is_empty() && !body.contains(['\n', '\r', '\t'])).then_some(body)
+}
+
+/// Why the insert of a single-line submit was not proven, so its Return was
+/// not sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubmitWithhold {
+    /// The field read back unchanged.
+    FieldUnchanged,
+    /// Only part of the line read back.
+    PartialInsert,
+    /// The read-back cannot prove the line landed in this field: unreadable,
+    /// web content, or a target not bound to the requested window.
+    InsertNotProven,
+}
+
+impl SubmitWithhold {
+    fn of(progress: TypedProgress) -> Self {
+        match progress {
+            TypedProgress::Unchanged => Self::FieldUnchanged,
+            TypedProgress::Partial(_) => Self::PartialInsert,
+            TypedProgress::Complete | TypedProgress::Unverifiable => Self::InsertNotProven,
+        }
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::FieldUnchanged => "the field did not change",
+            Self::PartialInsert => "only part of the line read back",
+            Self::InsertNotProven => "the insert could not be proven for this field",
+        }
+    }
+}
+
+/// What the background AX rung reports for a single-line submit (#7352 port).
+#[derive(Debug, PartialEq, Eq)]
+enum SubmitStep {
+    /// Not a single-line submit: the rung's ordinary outcomes apply.
+    NotASubmit,
+    /// The line was proven inserted and its Return was pressed.
+    Submitted {
+        /// The field did not hold focus and a focus write was sent first.
+        focused_first: bool,
+    },
+    /// The line was proven inserted but its Return was not pressed: the field
+    /// did not hold focus, or the key post failed. Not an error a caller would
+    /// retry, since that would insert the line again.
+    LineWithoutReturn { suffix: String },
+    /// The insert itself was not proven, so no Return was sent; the ordinary
+    /// partial or unconfirmed outcome applies.
+    InsertNotProven(SubmitWithhold),
+}
+
+/// Decide and run the Return of a single-line submit. The Return is a
+/// pid-routed key that reaches whichever field holds focus, so it goes out only
+/// after the insert is proven (`Complete`, which needs a bound target) and
+/// `focus` confirms the written field holds keyboard focus. `focus` answers
+/// `(confirmed, focus_write_sent)`; neither closure runs for a text that is
+/// not a submit or whose insert was not proven.
+fn submit_step(
+    submit_body: Option<&str>,
+    progress: TypedProgress,
+    focus: impl FnOnce() -> (bool, bool),
+    press_return: impl FnOnce() -> anyhow::Result<()>,
+) -> SubmitStep {
+    if submit_body.is_none() {
+        return SubmitStep::NotASubmit;
+    }
+    if progress != TypedProgress::Complete {
+        return SubmitStep::InsertNotProven(SubmitWithhold::of(progress));
+    }
+    let (confirmed, focus_sent) = focus();
+    if !confirmed {
+        let sent = if focus_sent {
+            " (a focus write was sent)"
+        } else {
+            ""
+        };
+        return SubmitStep::LineWithoutReturn {
+            suffix: format!(
+                "; Return was not sent because the field does not hold keyboard focus{sent}"
+            ),
+        };
+    }
+    match press_return() {
+        Ok(()) => SubmitStep::Submitted {
+            focused_first: focus_sent,
+        },
+        Err(error) => SubmitStep::LineWithoutReturn {
+            suffix: format!("; pressing Return failed ({error}), so it may not have been sent"),
+        },
     }
 }
 
@@ -2618,6 +2816,8 @@ struct KeyboardRoute {
     chromium_native_candidate: bool,
     focused_key_route: bool,
     prior: cua_driver_core::mutation::PriorInput,
+    /// Whether keys may reach an OS security or consent prompt (upstream #7338).
+    prompt: PromptInput,
 }
 
 fn combine_prior(
@@ -2772,6 +2972,7 @@ fn type_text_in_key_window(
         chromium_native_candidate,
         focused_key_route,
         prior,
+        prompt,
     } = route;
     // Original field value before any rung drives read-back verification only.
     // An unreadable value is not evidence that the field is empty — and for a
@@ -2906,7 +3107,17 @@ fn type_text_in_key_window(
         // dropped. 200ms covers that re-grab without penalizing an already
         // armed interactive stream on every text chunk.
         let foreground_settle_ms = foreground_settle_ms(pid, apps::frontmost_pid());
+        // The caller's early AXEnabled read skips a foreground call into a
+        // background app; read it here, after activation, before any key.
+        let ensure_enabled = || match element_ptr_and_idx {
+            Some((ptr, _)) => crate::input::ax_actions::ensure_ax_action_enabled_after_activation(
+                ptr,
+                "type_text",
+            ),
+            None => Ok(()),
+        };
         let do_type = |element: Option<(usize, Option<usize>)>, focus_already_written: bool| {
+            ensure_enabled()?;
             cgevent_type_verified(
                 KeyReceiver {
                     pid,
@@ -2946,6 +3157,7 @@ fn type_text_in_key_window(
                     wid,
                     || {
                         late_fg_cell_check(pid, Some(wid), late_fg_targeted)?;
+                        ensure_enabled()?;
                         if let Some((ptr, _)) = element_ptr_and_idx {
                             let settable = unsafe {
                                 crate::ax::write_outcome::query_settable(
@@ -2972,7 +3184,7 @@ fn type_text_in_key_window(
                                 )
                             }
                         }
-                        crate::input::keyboard::type_text_physical_global(text, delay_ms)
+                        crate::input::keyboard::type_text_physical_global(prompt, text, delay_ms)
                     },
                 )?;
                 (
@@ -3218,6 +3430,16 @@ fn type_text_in_key_window(
         } else {
             unsafe { selected_range(element) }
         };
+        // A single-line field drops an inserted newline and never submits, and
+        // typing the line again after it doubled the text (Safari's address bar
+        // searched for "netflix.com netflix.com"). Insert the line alone, then
+        // send its Return once the insert and the field's focus are proven. The
+        // Return is a pid-routed key, so a semantic-only request never splits.
+        let keyboard_allowed = matches!(keyboard_policy, BackgroundKeyboardPolicy::Allowed);
+        let submit_body = keyboard_allowed
+            .then(|| single_line_submit_body(&role, text))
+            .flatten();
+        let ax_text = submit_body.unwrap_or(text);
         let bound = element_ptr_and_idx.is_some_and(|(ptr, _)| ptr == element as usize)
             && window_id.is_some_and(|wid| element_in_requested_window(pid, wid, element as usize));
         let settable =
@@ -3225,7 +3447,7 @@ fn type_text_in_key_window(
         let insertion = insert_ax_write(
             before_withheld,
             TextWriteContext { settable, prior },
-            || unsafe { set_string_attr(element, "AXSelectedText", text) },
+            || unsafe { set_string_attr(element, "AXSelectedText", ax_text) },
             || {
                 crate::ax::write_outcome::read_value_if_allowed(
                     &mut crate::ax::label_reader::NativeLabelReader,
@@ -3276,16 +3498,105 @@ fn type_text_in_key_window(
                 let ax_progress = if web_untrusted {
                     TypedProgress::Unverifiable
                 } else {
-                    ax_insert_progress(before.as_deref(), after.as_deref(), text, selection, bound)
+                    ax_insert_progress(
+                        before.as_deref(),
+                        after.as_deref(),
+                        ax_text,
+                        selection,
+                        bound,
+                    )
                 };
                 // An AX insert bypasses NSTextView's edit model, so a document is
                 // not marked edited and would never save the new text (DS-07).
                 let document = document_after_ax_insert(ax_progress, || unsafe {
                     crate::document_edit::ensure_marked_after_ax_write(pid, element, false)
                 });
+                // A single-line submit: the Return goes out only after the
+                // insert is proven and the written field holds keyboard focus,
+                // checked while the element is still live. `Complete` needs a
+                // bound target, so the window is known whenever focus is asked.
+                let step = submit_step(
+                    submit_body,
+                    ax_progress,
+                    || {
+                        let Some(wid) = window_id else {
+                            return (false, false);
+                        };
+                        let ptr = element as usize;
+                        if element_has_exact_app_focus(pid, wid, ptr) {
+                            return (true, false);
+                        }
+                        let _ = crate::input::ax_actions::focus_element(ptr);
+                        (element_has_exact_app_focus(pid, wid, ptr), true)
+                    },
+                    || crate::input::keyboard::press_key(pid, "return", &[]),
+                );
                 if owns {
                     unsafe {
                         CFRelease(element as _);
+                    }
+                }
+                let idx_str = || idx_opt.map(|i| format!(" [{i}]")).unwrap_or_default();
+                match step {
+                    SubmitStep::NotASubmit => {}
+                    SubmitStep::Submitted { focused_first } => {
+                        let focused = if focused_first {
+                            ", focused the field"
+                        } else {
+                            ""
+                        };
+                        return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
+                            detail: format!(
+                                " into{} {role} \"{title}\"{}{focused}, then pressed Return",
+                                idx_str(),
+                                document.note().trim_end_matches('.')
+                            ),
+                            path: PATH_AX,
+                            verified: true,
+                            delivered_chars: Some(text.chars().count()),
+                            web_area: outcome_web_area,
+                        }));
+                    }
+                    SubmitStep::LineWithoutReturn { suffix } => {
+                        return Ok(TypeTextDelivery::LineWithoutReturn(TypeTextOutcome {
+                            detail: format!(
+                                " into{} {role} \"{title}\"{}{suffix}",
+                                idx_str(),
+                                document.note().trim_end_matches('.')
+                            ),
+                            path: PATH_AX,
+                            verified: false,
+                            delivered_chars: submit_body.map(|body| body.chars().count()),
+                            web_area: outcome_web_area,
+                        }));
+                    }
+                    SubmitStep::InsertNotProven(reason) => {
+                        let reason = reason.reason();
+                        let (detail, delivered_chars) = match ax_progress {
+                            TypedProgress::Partial(delivered) => (
+                                format!(
+                                    " via partial AX write into{} {role} \"{title}\"; delivered \
+                                     {delivered} char(s), and Return was not sent because {reason}",
+                                    idx_str()
+                                ),
+                                Some(delivered),
+                            ),
+                            _ => (
+                                format!(
+                                    " via AX write into{} {role} \"{title}\"; Return was not sent \
+                                     because {reason}",
+                                    idx_str()
+                                ),
+                                None,
+                            ),
+                        };
+                        return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
+                            detail,
+                            path: PATH_AX,
+                            verified: false,
+                            delivered_chars,
+                            web_area: outcome_web_area,
+                        }));
                     }
                 }
                 if ax_progress == TypedProgress::Complete {
@@ -3748,6 +4059,7 @@ mod u32_outcome_tests {
                 false,
                 false,
                 "",
+                false,
             );
             assert_eq!(
                 result.structured_content.as_ref().unwrap()["effect"],
@@ -3897,6 +4209,7 @@ mod u32_outcome_tests {
             false,
             false,
             "",
+            false,
         );
         assert!(projected.content.iter().any(|item| matches!(item, cua_driver_core::protocol::Content::Text { text, .. } if text.contains("may keep the old content"))));
     }
@@ -4199,6 +4512,7 @@ mod tests {
                 chromium_native_candidate: false,
                 focused_key_route: false,
                 prior: cua_driver_core::mutation::PriorInput::None,
+                prompt: PromptInput::Refuse,
             },
         );
         match r {
@@ -4229,6 +4543,7 @@ mod tests {
                 chromium_native_candidate: false,
                 focused_key_route: false,
                 prior: cua_driver_core::mutation::PriorInput::None,
+                prompt: PromptInput::Refuse,
             },
         )
         .expect("the refusal is a delivery outcome");
@@ -4278,6 +4593,7 @@ mod tests {
                 chromium_native_candidate: false,
                 focused_key_route: false,
                 prior: cua_driver_core::mutation::PriorInput::None,
+                prompt: PromptInput::Refuse,
             },
         )
         .expect("preflight refusal must not attempt the invalid pid");
@@ -4335,6 +4651,211 @@ mod tests {
         assert_eq!(indeterminate["synthesized_chars"], 0);
         assert_eq!(indeterminate["retryable"], false);
         assert_eq!(indeterminate["escalation"]["recommended"], "verify_state");
+    }
+
+    #[test]
+    fn single_line_fields_split_off_one_trailing_return() {
+        for (role, text, expected) in [
+            ("AXTextField", "netflix.com\n", Some("netflix.com")),
+            ("AXSearchField", "query\r", Some("query")),
+            ("AXComboBox", "A1\r\n", Some("A1")),
+            ("AXTextField", "netflix.com", None),
+            ("AXTextField", "\n", None),
+            ("AXTextField", "a\n\n", None),
+            ("AXTextField", "a\nb\n", None),
+            ("AXTextField", "a\tb\n", None),
+            ("AXTextArea", "line\n", None),
+        ] {
+            assert_eq!(
+                single_line_submit_body(role, text),
+                expected,
+                "role={role} text={text:?}"
+            );
+        }
+    }
+
+    /// wp1c review: the rung's submit decision. Return goes out only after a
+    /// proven insert and a confirmed focus; nothing extra runs for a text that
+    /// is not a submit or whose insert was not proven; a failed or withheld
+    /// Return keeps the inserted line.
+    #[test]
+    fn a_submit_presses_return_only_after_a_proven_insert_and_confirmed_focus() {
+        use std::cell::Cell;
+        use SubmitStep::*;
+        use TypedProgress::*;
+        let body = Some("netflix.com");
+        let run = |body: Option<&str>,
+                   progress: TypedProgress,
+                   focus: (bool, bool),
+                   press: anyhow::Result<()>| {
+            let (focus_calls, press_calls) = (Cell::new(0), Cell::new(0));
+            let step = submit_step(
+                body,
+                progress,
+                || {
+                    focus_calls.set(focus_calls.get() + 1);
+                    focus
+                },
+                || {
+                    press_calls.set(press_calls.get() + 1);
+                    press
+                },
+            );
+            (step, focus_calls.get(), press_calls.get())
+        };
+
+        assert_eq!(
+            run(body, Complete, (true, false), Ok(())),
+            (
+                Submitted {
+                    focused_first: false
+                },
+                1,
+                1
+            )
+        );
+        assert_eq!(
+            run(body, Complete, (true, true), Ok(())),
+            (
+                Submitted {
+                    focused_first: true
+                },
+                1,
+                1
+            )
+        );
+        // Unfocused: the line stays, no Return.
+        let (step, _, presses) = run(body, Complete, (false, true), Ok(()));
+        assert_eq!(presses, 0);
+        assert!(
+            matches!(&step, LineWithoutReturn { suffix } if suffix.contains("does not hold keyboard focus (a focus write was sent)")),
+            "{step:?}"
+        );
+        // A failed Return post keeps the line too.
+        let (step, _, presses) = run(
+            body,
+            Complete,
+            (true, false),
+            Err(anyhow::anyhow!("refused")),
+        );
+        assert_eq!(presses, 1);
+        assert!(
+            matches!(&step, LineWithoutReturn { suffix } if suffix.contains("refused") && suffix.contains("may not have been sent")),
+            "{step:?}"
+        );
+        // An unproven insert sends nothing else and says why.
+        for (progress, reason) in [
+            (Partial(4), SubmitWithhold::PartialInsert),
+            (Unchanged, SubmitWithhold::FieldUnchanged),
+            (Unverifiable, SubmitWithhold::InsertNotProven),
+        ] {
+            assert_eq!(
+                run(body, progress, (true, false), Ok(())),
+                (InsertNotProven(reason), 0, 0),
+                "{progress:?}"
+            );
+        }
+        // Not a submit: nothing extra, whatever the read-back says.
+        for progress in [Complete, Partial(4), Unchanged, Unverifiable] {
+            assert_eq!(
+                run(None, progress, (true, false), Ok(())),
+                (NotASubmit, 0, 0)
+            );
+        }
+        // Not a single-line submit text or role.
+        for (role, text) in [
+            ("AXTextArea", "line\n"),
+            ("AXTextField", "a\nb\n"),
+            ("AXTextField", "a\tb\n"),
+            ("AXTextField", "netflix.com"),
+            ("AXTextField", ""),
+        ] {
+            assert_eq!(single_line_submit_body(role, text), None, "{role} {text:?}");
+        }
+    }
+
+    /// wp1c review: a line that landed without its Return is reported as an
+    /// unverified insert, never as the retryable `type_text_incomplete` error
+    /// whose retry would insert the line again. An ordinary shortfall keeps
+    /// the retryable partial.
+    #[test]
+    fn a_line_without_its_return_is_not_a_retryable_partial() {
+        let outcome = || TypeTextOutcome {
+            detail: " into AXTextField \"Address\"; Return was not sent because the field does \
+                     not hold keyboard focus"
+                .into(),
+            path: PATH_AX,
+            verified: false,
+            delivered_chars: Some(11),
+            web_area: WebAreaClassification::NonWebContent,
+        };
+        let line = completed_text_result(outcome(), true, 12, false, false, "");
+        assert_ne!(line.is_error, Some(true), "{line:?}");
+        let fields = line.structured_content.clone().expect("structured result");
+        assert_eq!(fields["effect"], "unverifiable");
+        assert_eq!(fields["verified"], false);
+        assert_eq!(fields["delivered_chars"], 11);
+        assert!(fields.get("retryable").is_none(), "{fields}");
+        assert!(fields.get("code").is_none(), "{fields}");
+        // The line is in the field: nothing may recommend sending it again,
+        // in foreground or any other rung (wp1c round-2 review).
+        assert!(fields.get("escalation").is_none(), "{fields}");
+        let text = format!("{:?}", line.content);
+        // The text says the same as the hint: never type the line again, and
+        // press Return only after reading the field (a failed post may have
+        // been sent). Both instructions come before the char count and the
+        // variable detail, so run_steps' 300-character step message keeps them.
+        let repeat = text.find("do not repeat type_text").expect(&text);
+        let count = text.find("char(s)").expect(&text);
+        assert!(repeat < count, "{text}");
+        let read_first = text.find("read the field first").expect(&text);
+        assert!(read_first < count, "{text}");
+        assert!(!text.contains("check that the field has focus"), "{text}");
+        // A failed Return post may have gone out, so the message never says
+        // the Return was not pressed (final review before merge).
+        assert!(!text.contains("Return not pressed"), "{text}");
+        // The dispatch seam's recovery hint must not frame a re-type either.
+        let mut annotated = completed_text_result(outcome(), true, 12, false, false, "");
+        cua_driver_core::recovery_hint::annotate(
+            "type_text",
+            &cua_driver_core::recovery_hint::Seed::from_args(&serde_json::json!({})),
+            &mut annotated,
+        );
+        let hint = annotated.structured_content.expect("structured result")["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(!hint.contains("typing again"), "{hint}");
+        assert!(hint.contains("press_key"), "{hint}");
+        // A failed Return post may still have been sent, so pressing Return
+        // waits on a read of the field (final review of 83aeb256).
+        assert!(hint.contains("read the field first"), "{hint}");
+
+        let partial = completed_text_result(outcome(), false, 12, false, false, "");
+        assert_eq!(partial.is_error, Some(true));
+        let fields = partial.structured_content.expect("structured result");
+        assert_eq!(fields["code"], "type_text_incomplete");
+        assert_eq!(fields["retryable"], true);
+        assert_eq!(fields["retry_from_character"], 11);
+    }
+
+    /// Only a line that landed without its Return is marked, so the gate in
+    /// `completed_text_result` never makes it a retryable partial (wp1c review).
+    #[test]
+    fn completed_deliveries_mark_only_the_landed_line() {
+        let outcome = || TypeTextOutcome {
+            detail: String::new(),
+            path: PATH_AX,
+            verified: false,
+            delivered_chars: Some(11),
+            web_area: WebAreaClassification::NonWebContent,
+        };
+        let typed = completed_delivery(TypeTextDelivery::Typed(outcome())).expect("typed");
+        assert!(!typed.1);
+        let line = completed_delivery(TypeTextDelivery::LineWithoutReturn(outcome()))
+            .expect("line without return");
+        assert!(line.1);
+        assert!(completed_delivery(TypeTextDelivery::InvalidArguments("x".into())).is_none());
     }
 
     #[test]
@@ -4400,6 +4921,14 @@ mod tests {
             || false,
         );
         assert_eq!(delivery, (false, Some(5)));
+    }
+
+    #[test]
+    fn the_default_delay_paces_each_character() {
+        // Batched key events (delay_ms 0) can leave a native field with only
+        // the first character of a batch; GOAT keeps per-character pacing as
+        // the default on every scope and does not retype an unconfirmed tail.
+        assert_eq!(DEFAULT_DELAY_MS, 30);
     }
 
     #[test]
@@ -4527,6 +5056,77 @@ mod tests {
     }
 
     #[test]
+    fn browser_tab_guidance_names_the_typed_browser_tools() {
+        // `page` only reads since the wp1i sync (upstream b13430e0): guidance must
+        // not send a browser-tab caller to its removed page actions.
+        for text in [
+            def().description.as_str(),
+            BROWSER_TAB_NEXT_STEP,
+            BROWSER_TAB_ESCALATION_REASON,
+        ] {
+            for removed in ["execute_javascript", "type_keystrokes", "the `page` tool"] {
+                assert!(!text.contains(removed), "{removed:?} in {text:?}");
+            }
+            assert!(text.contains("browser_type"), "{text:?}");
+        }
+        // After an unverified send the caller reads first and types again only
+        // if the text did not land.
+        for text in [BROWSER_TAB_NEXT_STEP, BROWSER_TAB_ESCALATION_REASON] {
+            let read = text.find("get_browser_state").expect("names the read");
+            let write = text.find("browser_type").expect("names the write");
+            assert!(read < write, "read before write: {text:?}");
+            assert!(text.contains("did not land"), "{text:?}");
+        }
+    }
+
+    /// run_steps keeps the first 300 characters of a step's first line
+    /// (batch_tools::bounded_message). The read-before-retyping rule leads the
+    /// line, so a long field title or document note cannot push it out; with no
+    /// such detail the whole browser-tab next step fits too.
+    #[test]
+    fn an_untrusted_web_readback_step_message_keeps_its_instruction() {
+        let step_message = |detail: String, char_count: usize| {
+            let result = type_text_outcome_result(
+                TypeTextOutcome {
+                    detail,
+                    path: PATH_AX,
+                    verified: true,
+                    delivered_chars: Some(char_count),
+                    web_area: WebAreaClassification::WebContent,
+                },
+                char_count,
+                false,
+                false,
+                "",
+                false,
+            );
+            let text = result
+                .content
+                .iter()
+                .find_map(|content| match content {
+                    cua_driver_core::protocol::Content::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .expect("text content");
+            let first_line = text.lines().next().unwrap_or("").to_owned();
+            first_line.chars().take(300).collect::<String>()
+        };
+        // Whatever the field title or note, the cut keeps the condition on
+        // typing again, never an unconditional write.
+        for len in 0..=300 {
+            for count in [1, 99_999, 1_234_567] {
+                let bounded = step_message(" ".repeat(len), count);
+                assert!(
+                    bounded.contains("type again only if the text is missing"),
+                    "detail {len}, count {count}: {bounded}"
+                );
+            }
+        }
+        let bounded = step_message(String::new(), 99_999);
+        assert!(bounded.contains(BROWSER_TAB_NEXT_STEP), "{bounded}");
+    }
+
+    #[test]
     fn electron_incomplete_and_web_readbacks_are_never_native_confirmation() {
         for classification in [
             WebAreaClassification::WebContent,
@@ -4645,7 +5245,7 @@ mod secure_read_tests {
         assert!(!outcome.verified);
         assert_eq!(outcome.delivered_chars, None);
         assert_eq!(outcome.path, PATH_AX);
-        let result = type_text_outcome_result(outcome, 3, false, false, "");
+        let result = type_text_outcome_result(outcome, 3, false, false, "", false);
         assert!(result.content.iter().any(|content| matches!(content, cua_driver_core::protocol::Content::Text { text, .. } if text.contains("may keep the old content"))));
         let structured = result.structured_content.unwrap();
         assert_eq!(structured["effect"], "unverifiable");

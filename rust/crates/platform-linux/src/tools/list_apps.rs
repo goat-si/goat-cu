@@ -55,9 +55,25 @@ impl Tool for ListAppsTool {
 
     async fn invoke(&self, _args: Value) -> ToolResult {
         let apps = tokio::task::spawn_blocking(|| -> Vec<serde_json::Value> {
+            // #299: the first start-time pass runs before anything is
+            // enumerated, over every pid on the host, so a pid reused while
+            // the answer is built cannot pair an old record with the new
+            // instance. The second pass after the answer decides the labels.
+            let instance_before = crate::process_instances::read_instances(
+                crate::proc_fs::all_pids(),
+                crate::proc_fs::process_instance_id,
+            );
             let procs = crate::proc_fs::list_processes();
             let installed = crate::installed_apps::list_installed_apps();
             let windows = crate::wayland::list_windows_dispatch(None);
+            // #299: every pid this answer may name — the live processes and
+            // the window owners the merge below reports — for the second pass.
+            let candidate_pids: std::collections::BTreeSet<u32> = procs
+                .iter()
+                .map(|p| p.pid)
+                .chain(windows.iter().filter_map(|w| w.pid))
+                .filter(|pid| *pid > 0)
+                .collect();
 
             // An app whose launcher is not its process (`libreoffice --calc`
             // runs `soffice.bin`, `google-chrome` runs `chrome`, `gnome-terminal`
@@ -185,6 +201,11 @@ impl Tool for ListAppsTool {
                     "windows":     owned,
                 }));
             }
+            let instance_after = crate::process_instances::read_instances(
+                candidate_pids.iter().copied(),
+                crate::proc_fs::process_instance_id,
+            );
+            crate::process_instances::label_records(&mut out, &instance_before, &instance_after);
             out
         })
         .await

@@ -433,13 +433,14 @@ fn omissions_and_budget_stops_report_their_exact_union() {
 }
 
 #[test]
-fn disabled_node_value_pattern_failure_marks_read_untrusted() {
+fn disabled_node_value_pattern_failure_marks_read_untrusted_and_keeps_its_actions() {
+    // A disabled control is indexed with `enabled: false` (upstream 84197407), so its
+    // actions are read like any other control's; the token writers refuse it.
     let mut budget = WalkBudget::nodes_only(10);
     let state = WalkState::new(&mut budget, 25);
     let mut value_reads = 0;
     let mut action_reads = 0;
     let (has_value, actions): (bool, Vec<()>) = collect_pattern_evidence(
-        false,
         || {
             value_reads += 1;
             record_pattern_read(Err(0x80004005u32 as i32), &state.reads) == CachedRead::Value
@@ -450,8 +451,8 @@ fn disabled_node_value_pattern_failure_marks_read_untrusted() {
         },
     );
     assert!(!has_value);
-    assert!(actions.is_empty());
-    assert_eq!((value_reads, action_reads), (1, 0));
+    assert_eq!(actions, vec![()]);
+    assert_eq!((value_reads, action_reads), (1, 1));
     assert!(!state.finish());
     let mut output = serde_json::json!({});
     budget.outcome().apply(&mut output);
@@ -466,7 +467,7 @@ fn disabled_node_value_pattern_failure_marks_read_untrusted() {
 
 #[test]
 fn enabled_node_collects_value_and_actions() {
-    let (value, actions) = collect_pattern_evidence(true, || true, || vec!["invoke"]);
+    let (value, actions) = collect_pattern_evidence(|| true, || vec!["invoke"]);
     assert!(value);
     assert_eq!(actions, vec!["invoke"]);
 }

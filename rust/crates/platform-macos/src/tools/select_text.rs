@@ -352,8 +352,9 @@ impl Tool for SelectTextTool {
                 "selection must be text, cursor_before or cursor_after",
             );
         }
+        let evidence = crate::process_identity::evidence(&args, pid).await;
         let resolved =
-            match latency::resolve(|| self.state.snapshots.resolve(pid, &args)) {
+            match latency::resolve(|| self.state.snapshots.resolve_for_instance(pid, &args, evidence)) {
                 Ok(cua_driver_core::element_token::ResolvedElement::Element {
                     window_id: resolved_window,
                     element,

@@ -36,7 +36,11 @@ pub(super) fn background_pixel_restore_pid(
 /// self-activate even when that recipe is unavailable. Do not overwrite a
 /// different app here; the wildcard suppression lease handles genuine side
 /// effects.
+///
+/// `undo` (upstream #6803): armed before the input; when the driver itself
+/// activated an app since, nothing is undone.
 pub(super) async fn restore_user_focus_after_background_pixel(
+    undo: Option<crate::focus_arbiter::UndoWatch>,
     pid: i32,
     prior_front: Option<i32>,
     prior_key_wid: Option<u32>,
@@ -47,6 +51,9 @@ pub(super) async fn restore_user_focus_after_background_pixel(
         return;
     }
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    if undo.is_some_and(|undo| undo.decide() != crate::focus_arbiter::Decision::Undo) {
+        return;
+    }
     restore_user_focus_after_background_pixel_now(
         pid,
         prior_front,

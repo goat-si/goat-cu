@@ -35,7 +35,13 @@ pub const DEFAULT_MAX_ELEMENTS: usize = 250;
 /// Snapshots remembered per (pid, window) for `since`.
 const STORE_PER_WINDOW: usize = 8;
 /// Snapshots remembered across all windows.
+#[cfg(not(test))]
 const STORE_TOTAL: usize = 32;
+/// Every test in the binary shares this process-wide store from parallel
+/// threads, so a test build keeps more: another test's reads must not evict
+/// the snapshot a test just stored. The per-window cap still applies.
+#[cfg(test)]
+const STORE_TOTAL: usize = 4096;
 /// A remembered snapshot stops being a valid `since` baseline after this long.
 const STORE_TTL: Duration = Duration::from_secs(15 * 60);
 /// Largest old-rows x new-rows product the line diff will compute.
@@ -2603,9 +2609,12 @@ mod tests {
             (content, s)
         };
         let edited = OLD.replace("\"a\"", "\"ab\"");
+        // The snapshot store is process-wide and `since:"latest"` names a
+        // window's most recent read, so these windows are used by no other
+        // test (7021 is since_returns_diff_then_falls_back's).
         for (window, format, [id1, id2, id3]) in [
             (7020, "elements", ["s000000g1", "s000000g2", "s000000g3"]),
-            (7021, "both", ["s000000h1", "s000000h2", "s000000h3"]),
+            (7030, "both", ["s000000h1", "s000000h2", "s000000h3"]),
         ] {
             let (mut c1, mut s1) = read(id1, OLD);
             apply(

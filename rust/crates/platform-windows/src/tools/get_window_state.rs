@@ -310,6 +310,14 @@ impl Tool for GetWindowStateTool {
         // probed through Win32 first; the desktop-wide UIA union (2 s deadline)
         // is consulted only on a miss (#4416).
         use crate::win32::PidWindowLookup;
+        // #299: the pid's process instance as read before the window lookup,
+        // the metadata and the walk; a second read after them decides whether
+        // it is named.
+        let instance_before =
+            tokio::task::spawn_blocking(move || crate::process_instance::instance_start_time(pid))
+                .await
+                .ok()
+                .flatten();
         let lookup =
             tokio::task::spawn_blocking(move || crate::win32::lookup_window_for_pid(pid, hwnd))
                 .await
@@ -968,6 +976,23 @@ impl Tool for GetWindowStateTool {
                         &mut content,
                         &mut structured,
                     );
+                }
+
+                // #299: name the process instance this answer describes, but
+                // only when the read before and the read after it agree and the
+                // answer published the rows it describes.
+                let instance_after = tokio::task::spawn_blocking(move || {
+                    crate::process_instance::instance_start_time(pid)
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some(label) = crate::process_instance::answer_label(
+                    instance_before,
+                    instance_after,
+                    refreshed.is_some(),
+                ) {
+                    structured["process_instance"] = json!(label);
                 }
 
                 ToolResult {

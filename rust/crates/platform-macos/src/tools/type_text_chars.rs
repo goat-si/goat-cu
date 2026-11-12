@@ -209,6 +209,12 @@ impl Tool for TypeTextCharsTool {
             Ok(v) => v,
             Err(e) => return e,
         };
+        if let Err(refusal) = crate::security_prompt::refuse_pid(
+            cua_driver_core::security_prompt::PromptInput::from_args(&args),
+            pid,
+        ) {
+            return refusal;
+        }
         let text_raw = match args.require_str("text") {
             Ok(v) => v,
             Err(e) => return e,
@@ -219,7 +225,8 @@ impl Tool for TypeTextCharsTool {
             .into_owned();
         let delay_ms = args.u64_or("delay_ms", 30);
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match self.state.snapshots.resolve(pid, &args) {
+        let evidence = crate::process_identity::evidence(&args, pid).await;
+        let resolved = match self.state.snapshots.resolve_for_instance(pid, &args, evidence) {
             Ok(r) => r,
             Err(e) => return e,
         };

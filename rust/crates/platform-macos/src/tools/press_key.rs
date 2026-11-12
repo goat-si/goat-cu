@@ -23,6 +23,7 @@ use crate::apps;
 use crate::ax::bindings::{copy_bool_attr, copy_string_attr, AXUIElementRef};
 use crate::focus_guard;
 use crate::window_change_detector::{Changes, WindowChangeDetector};
+use cua_driver_core::security_prompt::PromptInput;
 
 use super::ToolState;
 
@@ -517,7 +518,30 @@ pub(super) fn invalid_key(error: anyhow::Error) -> ToolResult {
     }))
 }
 
+/// The result of a semantic key action (AXConfirm, AXCancel …) whose perform
+/// did not return success, by the core write-outcome rule (#279, wp3c
+/// review): a coded refusal when nothing reached the app, an unverifiable
+/// answer when it may have acted, otherwise the delivery failure.
+fn semantic_perform_error(error: anyhow::Error) -> ToolResult {
+    if let Some(refusal) = super::not_delivered_refusal(&error) {
+        return refusal;
+    }
+    if let Some(uncertain) = error.downcast_ref::<crate::input::ax_actions::ActionMayHaveActed>() {
+        return ToolResult::text(format!("⚠️ {uncertain}")).with_structured(serde_json::json!({
+            "path": "ax_semantic",
+            "verified": false,
+            "effect": "unverifiable",
+            "keys_sent": false,
+            "code": "ax_action_unverified",
+        }));
+    }
+    delivery_failed(error)
+}
+
 pub(super) fn delivery_failed(error: anyhow::Error) -> ToolResult {
+    if let Some(refusal) = crate::security_prompt::tool_result(&error) {
+        return refusal;
+    }
     if let Some(conflict) = error.downcast_ref::<WindowFocusConflictError>() {
         return match *conflict {
             WindowFocusConflictError::AddressedElementOutsideWindow {
@@ -679,6 +703,7 @@ impl Tool for PressKeyTool {
             }
             let checked_pid = early_front_pid.unwrap_or_default();
             let printable_desktop = printable_request(&key, &modifiers);
+            let prompt = PromptInput::from_args(&args);
             let control = Arc::new(crate::input::key_hold::HoldControl::default());
             let result =
                 super::key_delivery_guard::run_owned((), (), control, move |control, _scope| {
@@ -686,6 +711,7 @@ impl Tool for PressKeyTool {
                         anyhow::bail!("key delivery cancelled");
                     }
                     super::not_editable::desktop_dispatch_guard(checked_pid, printable_desktop)?;
+                    crate::security_prompt::refuse_frontmost_keys(prompt)?;
                     let modifier_refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
                     crate::input::key_hold::deliver(
                         crate::input::key_hold::KeyRoute::Global(None),
@@ -703,10 +729,13 @@ impl Tool for PressKeyTool {
                         "path": "hid",
                         "effect": "unverifiable"
                     })),
-                Ok(Err(error)) => super::not_editable::account_focus_receipt(
-                    ToolResult::error(format!("desktop press_key failed: {error}")),
-                    None,
-                ),
+                Ok(Err(error)) => match crate::security_prompt::tool_result(&error) {
+                    Some(refusal) => refusal,
+                    None => super::not_editable::account_focus_receipt(
+                        ToolResult::error(format!("desktop press_key failed: {error}")),
+                        None,
+                    ),
+                },
                 Err(error) => super::not_editable::account_focus_receipt(
                     ToolResult::error(format!("desktop press_key task failed: {error}")),
                     None,
@@ -724,7 +753,12 @@ impl Tool for PressKeyTool {
             Err(e) => return e,
         };
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match latency::resolve(|| self.state.snapshots.resolve(pid, &args)) {
+        let evidence = crate::process_identity::evidence(&args, pid).await;
+        let resolved = match latency::resolve(|| {
+            self.state
+                .snapshots
+                .resolve_for_instance(pid, &args, evidence)
+        }) {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -854,7 +888,7 @@ impl Tool for PressKeyTool {
                             Ok(Ok((confirmed, None))) => {
                                 semantic_press_result(&display_key, action, pid, confirmed)
                             }
-                            Ok(Err(error)) => delivery_failed(error),
+                            Ok(Err(error)) => semantic_perform_error(error),
                             Err(error) => delivery_failed(anyhow::anyhow!(
                                 "semantic key task failed: {error}"
                             )),
@@ -1135,6 +1169,7 @@ impl Tool for PressKeyTool {
             }
             _ => None,
         };
+        let prompt = PromptInput::from_args(&args);
 
         // When the background key post returned: the sheet watch counts from it.
         let posted_at = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
@@ -1194,6 +1229,8 @@ impl Tool for PressKeyTool {
                                         || {
                                 verify_raw_key_target(pid, Some(wid), pre_focus_ptr, false)?;
                                 late_cell_refusal(pid, Some(wid), printable, pre_focus_ptr.is_some())?;
+                                // Upstream #7338: global HID keys reach the frontmost process.
+                                crate::security_prompt::refuse_frontmost_keys(prompt)?;
                                 crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control)
                             },
                                     )
@@ -1297,11 +1334,12 @@ impl Tool for PressKeyTool {
                 } else {
                     ""
                 };
-                let structured = serde_json::json!({
+                let mut structured = serde_json::json!({
                     "path": if fg { "key_events_fg" } else { "key_events" },
                     "verified": confirmed,
                     "effect": if confirmed { "confirmed" } else { "unverifiable" },
                 });
+                changes.add_window_identity(&mut structured);
                 ToolResult::text(format!(
                     "✅ Pressed {display_key} on pid {pid}{label}.{}",
                     changes.result_suffix()
@@ -1840,6 +1878,17 @@ fn chord_in_scope(pid: i32, wid: u32, combo: super::menu_equivalent::Combo) -> C
             env.validation,
             (initial_error, env.disabled_note),
         ),
+        // The app never received the press: the step reports the refusal
+        // after handing the window back, and nothing else is sent.
+        ChordDecision::NotDelivered { err } => chord_press_outcome(
+            scope,
+            found.path.join(" > "),
+            wid,
+            env.action.expect("press has action"),
+            err,
+            env.validation,
+            (None, env.disabled_note),
+        ),
     }
 }
 
@@ -1864,6 +1913,11 @@ enum ChordDecision {
         err: crate::ax::bindings::AXError,
         initial_error: Option<crate::ax::bindings::AXError>,
     },
+    /// A press the app never received (accessibility disabled): nothing was
+    /// sent, so nothing follows it — no second press, no key chord.
+    NotDelivered {
+        err: crate::ax::bindings::AXError,
+    },
 }
 
 fn decide_chord(env: &mut impl ChordEnv) -> ChordDecision {
@@ -1885,13 +1939,21 @@ fn decide_chord(env: &mut impl ChordEnv) -> ChordDecision {
             return ChordDecision::Unbound;
         }
         let err = env.press(initial == Some(false));
-        if err == crate::ax::bindings::kAXErrorSuccess
-            || !super::click::perform_error_proves_nothing_was_sent(err)
-        {
-            return ChordDecision::Pressed {
-                err,
-                initial_error: None,
-            };
+        // One meaning per perform error (#277, #279). Only a fall-through
+        // proves nothing was sent, so only it may press again or post keys;
+        // an error that may have acted stops here, and a proved non-delivery
+        // sends nothing else either.
+        match super::click::perform_outcome(err) {
+            cua_driver_core::mutation::WriteOutcome::FallThrough(_) => {}
+            cua_driver_core::mutation::WriteOutcome::StopNotDelivered(_) => {
+                return ChordDecision::NotDelivered { err }
+            }
+            _ => {
+                return ChordDecision::Pressed {
+                    err,
+                    initial_error: None,
+                }
+            }
         }
         initial_error = Some(err);
     }
@@ -2194,7 +2256,7 @@ fn chord_press_step(
             disabled,
             validation,
         }
-    } else if super::click::perform_error_proves_nothing_was_sent(err) {
+    } else if super::click::perform_sent_nothing(err) {
         chord_refusal_after_hand_back(path, err, validation, notes)
     } else {
         ChordStep::Pressed {
@@ -2551,7 +2613,12 @@ pub(super) mod tests {
             for (error, warned) in [
                 (crate::ax::bindings::kAXErrorSuccess, true),
                 (crate::ax::bindings::kAXErrorCannotComplete, true),
-                (crate::ax::bindings::kAXErrorInvalidUIElement, false),
+                // #279: an error after a sent press may have acted.
+                (crate::ax::bindings::kAXErrorInvalidUIElement, true),
+                (crate::ax::bindings::kAXErrorIllegalArgument, true),
+                // Nothing was sent, or it was proved not delivered.
+                (crate::ax::bindings::kAXErrorActionUnsupported, false),
+                (crate::ax::bindings::kAXErrorAPIDisabled, false),
             ] {
                 let step = super::chord_press_step(
                     "Edit > Item".into(),
@@ -2745,6 +2812,8 @@ pub(super) mod tests {
 
     #[test]
     fn chord_rechecks_binding_after_a_proven_no_dispatch_error() {
+        // ActionUnsupported proves nothing was sent (a fall-through), so the
+        // route may press again, after re-reading the binding.
         let mut env = FakeChord {
             save: false,
             initial: Some(true),
@@ -2753,7 +2822,7 @@ pub(super) mod tests {
             bound: true,
             flip_after_first: true,
             bound_reads: 0,
-            error: crate::ax::bindings::kAXErrorInvalidUIElement,
+            error: crate::ax::bindings::kAXErrorActionUnsupported,
             presses: 0,
             validations: 0,
             reads: 0,
@@ -2786,6 +2855,15 @@ pub(super) mod tests {
                 ),
                 String::new(),
             ),
+            ChordDecision::NotDelivered { err } => super::chord_press_step(
+                "Edit > Item".into(),
+                42,
+                "AXPress",
+                err,
+                validation,
+                (None, disabled.then(|| "disabled observation".to_owned())),
+                String::new(),
+            ),
             ChordDecision::Keys(_) => {
                 let (outcome, note) = super::run_keys_under_scope(
                     (),
@@ -2814,8 +2892,8 @@ pub(super) mod tests {
             .structured_content
             .expect("structured result");
         let (effect, code, sent) = match *decision {
-            ChordDecision::Pressed { err, .. }
-                if err == crate::ax::bindings::kAXErrorInvalidUIElement =>
+            ChordDecision::Pressed { err, .. } | ChordDecision::NotDelivered { err }
+                if super::super::click::perform_sent_nothing(err) =>
             {
                 ("refused", Some("background_unavailable"), false)
             }
@@ -2823,6 +2901,7 @@ pub(super) mod tests {
                 ("unverifiable", None, false)
             }
             ChordDecision::Pressed { .. } => ("unverifiable", Some("ax_action_unverified"), false),
+            ChordDecision::NotDelivered { .. } => unreachable!("a non-delivery sent nothing"),
             ChordDecision::Keys(_) if bound => ("suspected_noop", None, true),
             ChordDecision::Keys(_) | ChordDecision::Unbound => {
                 ("refused", Some("window_not_key"), false)
@@ -2856,8 +2935,9 @@ pub(super) mod tests {
     fn chord_decisions_cover_ax_results_enabled_save_front_and_binding() {
         use super::ChordDecision as D;
         use crate::ax::bindings::{
-            kAXErrorCannotComplete as ambiguous, kAXErrorInvalidUIElement as invalid,
-            kAXErrorSuccess as ok,
+            kAXErrorAPIDisabled as disabled_api, kAXErrorActionUnsupported as unsupported,
+            kAXErrorCannotComplete as ambiguous, kAXErrorIllegalArgument as illegal,
+            kAXErrorInvalidUIElement as invalid, kAXErrorSuccess as ok,
         };
         let cases = [
             (
@@ -2986,14 +3066,16 @@ pub(super) mod tests {
                 1,
                 0,
             ),
+            // #279: only a fall-through proves nothing was sent, so only it
+            // validates and posts keys, or presses again.
             (
                 false,
                 Some(true),
                 Some(false),
                 true,
                 true,
-                invalid,
-                D::Keys(Some(invalid)),
+                unsupported,
+                D::Keys(Some(unsupported)),
                 1,
                 1,
             ),
@@ -3003,12 +3085,55 @@ pub(super) mod tests {
                 Some(true),
                 true,
                 true,
+                unsupported,
+                D::Pressed {
+                    err: unsupported,
+                    initial_error: Some(unsupported),
+                },
+                2,
+                0,
+            ),
+            // An error after a sent press may have acted: one press, no
+            // validation, no keys, no second press, whatever enablement reads.
+            (
+                false,
+                Some(true),
+                Some(false),
+                true,
+                true,
                 invalid,
                 D::Pressed {
                     err: invalid,
-                    initial_error: Some(invalid),
+                    initial_error: None,
                 },
-                2,
+                1,
+                0,
+            ),
+            (
+                false,
+                Some(true),
+                Some(true),
+                true,
+                true,
+                illegal,
+                D::Pressed {
+                    err: illegal,
+                    initial_error: None,
+                },
+                1,
+                0,
+            ),
+            // A press the app never received stops the chord: nothing else
+            // is sent.
+            (
+                false,
+                Some(true),
+                Some(false),
+                true,
+                true,
+                disabled_api,
+                D::NotDelivered { err: disabled_api },
+                1,
                 0,
             ),
         ];
@@ -4067,5 +4192,41 @@ mod menu_lookup_tests {
         let result = super::task_failure("the menu task failed; it may have run".to_owned());
         let fields = result.structured_content.unwrap();
         assert_eq!(fields["effect"], "unverifiable");
+    }
+}
+
+#[cfg(test)]
+mod wp3c_review_tests {
+    use crate::ax::bindings::{
+        kAXErrorAPIDisabled, kAXErrorActionUnsupported, kAXErrorCannotComplete,
+        kAXErrorIllegalArgument, kAXErrorSuccess,
+    };
+    use crate::input::ax_actions::classify_perform_return;
+
+    /// wp3c review: press_key's semantic AXConfirm / AXCancel perform follows
+    /// the core rule: a refusal when nothing reached the app, an unverifiable
+    /// answer (not a delivery failure) when it may have acted.
+    #[test]
+    fn a_semantic_key_perform_error_is_classified() {
+        assert!(classify_perform_return("AXConfirm", kAXErrorSuccess).is_ok());
+        for err in [kAXErrorAPIDisabled, kAXErrorActionUnsupported] {
+            let result = super::semantic_perform_error(
+                classify_perform_return("AXConfirm", err).expect_err("not sent"),
+            );
+            assert_eq!(result.is_error, Some(true), "{err}");
+            let fields = result.structured_content.expect("structured refusal");
+            assert_eq!(fields["code"], "action_unavailable", "{err}");
+            assert_eq!(fields["effect"], "refused");
+            assert_eq!(fields["dispatched"], false);
+        }
+        for err in [kAXErrorIllegalArgument, kAXErrorCannotComplete] {
+            let result = super::semantic_perform_error(
+                classify_perform_return("AXCancel", err).expect_err("may have acted"),
+            );
+            assert_ne!(result.is_error, Some(true), "{err}");
+            let fields = result.structured_content.expect("structured result");
+            assert_eq!(fields["effect"], "unverifiable", "{err}");
+            assert_eq!(fields["code"], "ax_action_unverified");
+        }
     }
 }

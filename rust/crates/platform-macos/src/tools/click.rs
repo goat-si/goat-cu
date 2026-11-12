@@ -8,8 +8,8 @@
 //! * **AX path** (`element_token`): performs AXAction on the cached
 //!   element. Fires via AX RPC — the target app never needs to be frontmost.
 //!   Extra behaviors vs. the naive dispatch:
-//!   - AXTextField / AXTextArea inside web content (AXWebArea): 800 ms post-click delay
-//!     for DOM focus settle. Native text inputs return without it.
+//!   - AXTextField / AXTextArea inside web content (AXWebArea): wait for DOM focus
+//!     (event driven, capped at 800 ms by `CUA_DRIVER_WEBKIT_SETTLE_MS`). Native text inputs return without it.
 //!   - AXPopUpButton: appends the list of available options and redirects to set_value.
 //!   - Advertised-action warning if the element didn't list the requested action.
 //!
@@ -38,6 +38,7 @@ use crate::ax::bindings::{
 use crate::focus_guard;
 use crate::window_change_detector::{Changes, WindowChangeDetector};
 use core_foundation::base::{CFEqual, CFRelease, CFTypeRef, TCFType};
+use cua_driver_core::security_prompt::PromptInput;
 
 use super::pixel_route::PixelClickRoute;
 use super::ToolState;
@@ -1472,6 +1473,7 @@ impl ClickTool {
 
             let btn = button.clone();
             let desktop_modifiers: Vec<String> = args.str_array("modifier");
+            let prompt = PromptInput::from_args(&args);
             let result =
                 latency::spawn_action_blocking(move || -> anyhow::Result<Option<Value>> {
                     // The element under the point in the window there, read
@@ -1489,6 +1491,7 @@ impl ClickTool {
                     let modifier_refs: Vec<&str> =
                         desktop_modifiers.iter().map(String::as_str).collect();
                     crate::input::mouse::click_at_xy_desktop_with_modifiers(
+                        prompt,
                         sx,
                         sy,
                         count,
@@ -1516,7 +1519,9 @@ impl ClickTool {
                     ))
                     .with_structured(structured)
                 }
-                Ok(Err(e)) => ToolResult::error(format!("desktop-scope click failed: {e}")),
+                Ok(Err(e)) => crate::security_prompt::tool_result(&e).unwrap_or_else(|| {
+                    ToolResult::error(format!("desktop-scope click failed: {e}"))
+                }),
                 Err(e) => ToolResult::error(format!("task error: {e}")),
             }
                 },
@@ -1532,7 +1537,12 @@ impl ClickTool {
         let cursor_key = super::cursor_tools::resolve_cursor_key(&args);
 
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match latency::resolve(|| self.state.snapshots.resolve(pid, &args)) {
+        let evidence = crate::process_identity::evidence(&args, pid).await;
+        let resolved = match latency::resolve(|| {
+            self.state
+                .snapshots
+                .resolve_for_instance(pid, &args, evidence)
+        }) {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -1849,20 +1859,59 @@ impl ClickTool {
 
                 let mods_owned = modifiers.clone();
                 let foreground = delivery_mode.is_foreground();
+                let middle_guard = element_guard.clone();
+                let prompt = PromptInput::from_args(&args);
                 let result = latency::spawn_action_blocking(move || {
                     let m: Vec<&str> = mods_owned.iter().map(String::as_str).collect();
+                    // AppKit hit-tests the window-local stamp, so an unrouted
+                    // post never reaches the control (CUA-3797). Same as the
+                    // pixel path.
+                    let routed_middle_click = || {
+                        let (wx, wy) = crate::windows::window_bounds_by_id(wid)
+                            .map(|b| (cx - b.x, cy - b.y))
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("cannot resolve bounds for window_id {wid}")
+                            })?;
+                        crate::input::mouse::middle_click_at_xy_with_window_local(
+                            pid, cx, cy, wx, wy, wid, &m,
+                        )
+                    };
+                    // Re-read after any activation: the early read skips a
+                    // foreground call into a background app.
+                    let ensure_enabled = || {
+                        if foreground {
+                            crate::input::ax_actions::ensure_ax_action_enabled_after_activation(
+                                middle_guard.as_ptr(),
+                                "middle_click",
+                            )
+                        } else {
+                            crate::input::ax_actions::ensure_ax_action_enabled(middle_guard.as_ptr(), "middle_click", false)
+                        }
+                    };
                     if foreground && !m.is_empty() {
                         crate::input::skylight::with_foreground_hid_activation(
                             pid as libc::pid_t,
                             wid,
                             || {
+                                ensure_enabled()?;
                                 crate::input::mouse::click_at_xy_desktop_with_modifiers_preserving_cursor(
-                                    cx, cy, 1, "middle", &m,
+                                    prompt, cx, cy, 1, "middle", &m,
                                 )
                             },
                         )
+                    } else if foreground {
+                        crate::input::skylight::with_foreground_assist(
+                            pid as libc::pid_t,
+                            wid,
+                            || {
+                                ensure_enabled()?;
+                                routed_middle_click()
+                            },
+                        )
+                        .map(|_| ())
                     } else {
-                        crate::input::mouse::middle_click_at_xy(pid, cx, cy, &m)
+                        ensure_enabled()?;
+                        routed_middle_click()
                     }
                 })
                 .await;
@@ -1872,7 +1921,9 @@ impl ClickTool {
                          (background CGEvent; not driver-verified — confirm via screenshot)."
                     ))
                     .with_structured(serde_json::json!({ "path": "cgevent", "verified": false, "effect": "unverifiable" })),
-                    Ok(Err(e)) => ToolResult::error(format!("Middle-click failed: {e}")),
+                    Ok(Err(e)) => crate::security_prompt::tool_result(&e)
+                        .or_else(|| super::element_disabled_error(pid, wid, &e, foreground))
+                        .unwrap_or_else(|| ToolResult::error(format!("Middle-click failed: {e}"))),
                     Err(e)     => ToolResult::error(format!("Task error: {e}")),
                 };
             }
@@ -2145,6 +2196,7 @@ impl ClickTool {
                 click_semantic_intent(&resolved_action),
                 super::actionability::semantic::SemanticIntent::Click
             );
+            let prompt = PromptInput::from_args(&args);
             let perform = |action_lease| async move {
                 let prior_front = apps::frontmost_pid();
                 let snapshot = if foreground {
@@ -2181,6 +2233,7 @@ impl ClickTool {
                                             } else {
                                                 cua_driver_core::mutation::PriorInput::None
                                             },
+                                            prompt,
                                         )?);
                                         Ok(())
                                     };
@@ -2222,6 +2275,7 @@ impl ClickTool {
                                         false,
                                         read_back,
                                         cua_driver_core::mutation::PriorInput::None,
+                                        prompt,
                                     )
                                     .map(|outcome| (outcome, false))
                                 }
@@ -2320,7 +2374,8 @@ impl ClickTool {
                         disabled,
                         delivery_mode.is_foreground(),
                     ),
-                    None => element_click_failure(&e),
+                    None => crate::security_prompt::tool_result(&e)
+                        .unwrap_or_else(|| element_click_failure(&e)),
                 },
                 Err(e) => click_task_failure(format!(
                     "The accessibility click task failed ({e}); the action may have run. Read \
@@ -2463,20 +2518,19 @@ impl ClickTool {
             // win_local_x/y: window-local logical-pixel coords used when the
             // Chromium recipe falls back to public PID posting. Its SkyLight
             // route uses the translated screen coordinates instead.
-            let (screen_x, screen_y, win_local_x, win_local_y) = if let Some(wid) = window_id {
+            let (screen_x, screen_y, win_local_x, win_local_y, frame_size) = if let Some(wid) =
+                window_id
+            {
                 match super::window_points::frame_or_resolve(validated_frame.clone(), wid).await {
                     Ok(frame) => {
                         let (sx, sy, lx, ly) = frame.to_screen(cx, cy);
+                        let frame_size = (frame.bounds.width, frame.bounds.height);
                         // A window-local point outside the live frame would
                         // dispatch onto whatever occupies that screen point —
                         // the same wrong-surface misclick class as #2237.
                         // Refuse in background, where the caller cannot see
                         // what is actually under the translated point.
-                        if !delivery_mode.is_foreground()
-                            && (lx < 0.0
-                                || ly < 0.0
-                                || lx > frame.bounds.width
-                                || ly > frame.bounds.height)
+                        if !delivery_mode.is_foreground() && point_outside_frame(lx, ly, frame_size)
                         {
                             return super::invalid_arguments(format!(
                                 "click: window-local point ({lx:.1}, {ly:.1}) pt lies outside \
@@ -2486,13 +2540,13 @@ impl ClickTool {
                                 frame.bounds.width, frame.bounds.height
                             ));
                         }
-                        (sx, sy, lx, ly)
+                        (sx, sy, lx, ly, Some(frame_size))
                     }
                     Err(refusal) => return refusal,
                 }
             } else {
                 // No window_id → treat x,y as screen coordinates (legacy behaviour).
-                (cx, cy, cx, cy)
+                (cx, cy, cx, cy, None)
             };
 
             // ── Exact-target background gate (macOS background input v1) ──
@@ -2533,20 +2587,32 @@ impl ClickTool {
                     (win_local_x, win_local_y),
                     (screen_x, screen_y),
                     delivery_mode.is_foreground(),
+                    args.get("_session_id").and_then(Value::as_str),
                 )
                 .await
                 {
                     crate::fast_path_guard::Outcome::Refuse(refusal) => return *refusal,
                     crate::fast_path_guard::Outcome::Proceed { summary, relocate } => {
                         *fast_path = summary;
-                        match relocate {
-                            Some((dx, dy)) => (
-                                screen_x + dx,
-                                screen_y + dy,
-                                win_local_x + dx,
-                                win_local_y + dy,
-                            ),
-                            None => (screen_x, screen_y, win_local_x, win_local_y),
+                        // #286: the relocated point gets the same frame check
+                        // as the requested one, before anything moves.
+                        match relocated_point(
+                            (screen_x, screen_y, win_local_x, win_local_y),
+                            relocate,
+                            frame_size,
+                            delivery_mode.is_foreground(),
+                        ) {
+                            Ok(point) => point,
+                            Err((lx, ly)) => {
+                                let (width, height) = frame_size.unwrap_or_default();
+                                return super::invalid_arguments(format!(
+                                    "click: the fast-path check relocated the window-local point \
+                                     to ({lx:.1}, {ly:.1}) pt, outside window {wid}'s \
+                                     {width:.0}×{height:.0} pt frame; background delivery \
+                                     refused. Nothing was sent. Re-read coordinates from a \
+                                     fresh get_window_state screenshot."
+                                ));
+                            }
                         }
                     }
                 }
@@ -2571,8 +2637,8 @@ impl ClickTool {
             if let Some(select_wid) = window_id.filter(|_| !delivery_mode.is_foreground()) {
                 let refusal = latency::spawn_action_blocking(move || unsafe {
                     let element = element_at_screen_position(pid, screen_x, screen_y)?;
-                    let refusal = (crate::ax::exact_target::element_window_id(element)
-                        == Some(select_wid)
+                    let refusal = (crate::ax::exact_target::element_window_ids(element)
+                        .is_some_and(|window| window.is(select_wid))
                         && super::set_value::is_chromium_web_select(pid, select_wid, element))
                     .then(|| {
                         super::set_value::chromium_select_open_refusal(
@@ -2683,7 +2749,9 @@ impl ClickTool {
                     // Require proven ancestry in the requested window before
                     // acting; otherwise fall through to the routed pixel path
                     // (already gated for this exact window).
-                    if crate::ax::exact_target::element_window_id(element) != Some(hit_test_wid) {
+                    if !crate::ax::exact_target::element_window_ids(element)
+                        .is_some_and(|window| window.is(hit_test_wid))
+                    {
                         CFRelease(element as _);
                         return Ok(PxAxPress::FallThrough);
                     }
@@ -3044,6 +3112,7 @@ impl ClickTool {
             );
 
             let mods_owned = modifiers.clone();
+            let prompt = PromptInput::from_args(&args);
             // Surface 5: route to the right/middle CGEvent primitives when
             // button != left. Left-button path stays on the existing Chromium-
             // routed `click_at_xy_with_window_local` for back-compat.
@@ -3101,6 +3170,7 @@ impl ClickTool {
                                 // at the target, as on Windows and X11, so apps that
                                 // read the pointer when handling the event see it.
                                 return crate::input::mouse::click_at_xy_desktop_with_modifiers(
+                                    prompt,
                                     screen_x,
                                     screen_y,
                                     count,
@@ -3285,14 +3355,17 @@ impl ClickTool {
                         ),
                     )
                 }
-                Ok(Err(e)) if route == PixelClickRoute::ForegroundHid => {
-                    super::pixel_route::foreground_unavailable(
-                        button_label,
-                        window_id.unwrap_or_default(),
-                        &e.to_string(),
-                    )
-                }
-                Ok(Err(e)) => ToolResult::error(format!("{button_label} failed: {e}")),
+                Ok(Err(e)) => match crate::security_prompt::tool_result(&e) {
+                    Some(refusal) => refusal,
+                    None if route == PixelClickRoute::ForegroundHid => {
+                        super::pixel_route::foreground_unavailable(
+                            button_label,
+                            window_id.unwrap_or_default(),
+                            &e.to_string(),
+                        )
+                    }
+                    None => ToolResult::error(format!("{button_label} failed: {e}")),
+                },
                 Err(e) => click_task_failure(format!(
                     "The {button_label} task failed ({e}); the click may have been posted. Read \
                      fresh state before clicking again."
@@ -3360,7 +3433,37 @@ fn ax_click_structured(
 /// selection_verified, selection_via_pixel)`.
 type AxClickOutcome = (String, bool, Option<ClickEvidence>, bool);
 
-#[derive(Clone, Copy)]
+/// A window-local point outside a window's live frame (width, height in
+/// points): a background click there would land on whatever occupies that
+/// screen point (the #2237 wrong-surface class).
+fn point_outside_frame(lx: f64, ly: f64, (width, height): (f64, f64)) -> bool {
+    lx < 0.0 || ly < 0.0 || lx > width || ly > height
+}
+
+/// #286: where a fast-path relocation moves a click, as
+/// `(screen_x, screen_y, local_x, local_y)`. A background click whose
+/// relocated window-local point leaves the frame is refused with that point;
+/// a foreground click keeps it (the caller can see the screen).
+fn relocated_point(
+    point: (f64, f64, f64, f64),
+    relocate: Option<(f64, f64)>,
+    frame_size: Option<(f64, f64)>,
+    foreground: bool,
+) -> Result<(f64, f64, f64, f64), (f64, f64)> {
+    let Some((dx, dy)) = relocate else {
+        return Ok(point);
+    };
+    let (sx, sy, lx, ly) = point;
+    let (lx, ly) = (lx + dx, ly + dy);
+    if !foreground && frame_size.is_some_and(|frame| point_outside_frame(lx, ly, frame)) {
+        return Err((lx, ly));
+    }
+    Ok((sx + dx, sy + dy, lx, ly))
+}
+
+/// Which click write a gated dispatch guards: the first selection, the
+/// selection after a press, a native text focus, or a hit-tested focus.
+#[derive(Clone, Copy, Debug)]
 enum SelectionSite {
     First,
     PostPress,
@@ -3368,8 +3471,10 @@ enum SelectionSite {
     HitFocus,
 }
 
-async fn dispatch_post_press_selection<C, P, A, F, T>(
-    _site: SelectionSite,
+/// Wait for the actionability gate on `candidate`, then run `write` once.
+/// Shared by every gated click write (selection and focus), named by `site`.
+async fn dispatch_gated_write<C, P, A, F, T>(
+    site: SelectionSite,
     clock: &(impl cua_driver_core::actionability::Clock + Sync),
     budget: std::time::Duration,
     prior: cua_driver_core::mutation::PriorInput,
@@ -3402,7 +3507,10 @@ where
     .await;
     match report.verdict {
         cua_driver_core::actionability::Verdict::Pass => Ok(write(candidate).await),
-        cua_driver_core::actionability::Verdict::Terminal { .. } => Err(report),
+        cua_driver_core::actionability::Verdict::Terminal { code, .. } => {
+            tracing::debug!(?site, code, "click write refused by its actionability gate");
+            Err(report)
+        }
         cua_driver_core::actionability::Verdict::Transient { .. } => {
             unreachable!("wait returns a terminal verdict")
         }
@@ -3439,7 +3547,7 @@ where
     A: FnOnce(C) -> F,
     F: std::future::Future<Output = T>,
 {
-    dispatch_post_press_selection(site, clock, budget, prior, context, probe, write).await
+    dispatch_gated_write(site, clock, budget, prior, context, probe, write).await
 }
 
 async fn run_post_press_selection<C, D, E, P, A, F, T>(
@@ -4118,11 +4226,29 @@ fn post_press_failure(history: &ClickHistory, detail: &str) -> ToolResult {
     result
 }
 
+/// Why the AXSelected target failed its re-check right before the write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionUnavailable {
+    /// The bound item, its role or its AXSelected value is gone or changed.
+    Changed,
+    /// AXSelected is readable but the app reports it not settable (#281.2).
+    NotSettable,
+}
+
+impl SelectionUnavailable {
+    fn detail(self) -> &'static str {
+        match self {
+            Self::Changed => "selection target changed or became unavailable",
+            Self::NotSettable => "selection target exposes AXSelected but it is not settable",
+        }
+    }
+}
+
 fn recheck_selection_then_write<T>(
-    recheck: impl FnOnce() -> bool,
+    recheck: impl FnOnce() -> Result<(), SelectionUnavailable>,
     write: impl FnOnce() -> T,
-) -> Option<T> {
-    recheck().then(write)
+) -> Result<T, SelectionUnavailable> {
+    recheck().map(|()| write())
 }
 
 async fn run_live_post_press_selection(
@@ -4309,19 +4435,16 @@ fn project_live_selection_result(
                 .expect("recorded press");
             }
             match (output, fronted) {
-                (Some(None), _) => (
+                (Some(Err(unavailable)), _) => (
                     lease,
-                    Err(post_press_failure(
-                        &history,
-                        "selection target changed or became unavailable",
-                    )),
+                    Err(post_press_failure(&history, unavailable.detail())),
                 ),
-                (Some(Some(Err(error))), _) => (lease, Err(element_click_failure(&error))),
-                (Some(Some(Ok(None))), _) => (
+                (Some(Ok(Err(error))), _) => (lease, Err(element_click_failure(&error))),
+                (Some(Ok(Ok(None))), _) => (
                     lease,
                     Err(post_press_failure(&history, "selection was not attempted")),
                 ),
-                (Some(Some(Ok(Some(outcome)))), Ok(fronted)) => (lease, Ok((outcome, fronted))),
+                (Some(Ok(Ok(Some(outcome)))), Ok(fronted)) => (lease, Ok((outcome, fronted))),
                 (_, Err(error)) => (
                     lease,
                     Err(post_press_failure(
@@ -4339,7 +4462,7 @@ fn project_live_selection_result(
 }
 
 type LiveSelectionOutput = (
-    Option<Option<anyhow::Result<Option<AxClickOutcome>>>>,
+    Option<Result<anyhow::Result<Option<AxClickOutcome>>, SelectionUnavailable>>,
     Option<super::BackgroundMutationLease>,
     cua_driver_core::mutation::PriorInput,
     anyhow::Result<bool>,
@@ -4366,13 +4489,20 @@ async fn run_live_selection_write(
                     use cua_driver_core::actionability::Evidence;
                     let target_ptr = candidate.target.as_ptr() as AXUIElementRef;
                     let valid = || {
-                        matches!(super::actionability::semantic::bind_exact_with(
+                        let bound = matches!(super::actionability::semantic::bind_exact_with(
                             &mut super::actionability::semantic::NativeWindowReader,
                             candidate.target.clone(), pid, window_id,
                         ), Evidence::Known(_))
                         && matches!(NativeReader.string(target_ptr, "AXRole"), Evidence::Known(role) if role == candidate.role)
-                        && matches!(NativeReader.boolean(target_ptr, "AXSelected"), Evidence::Known(_))
-                        && matches!(NativeReader.settable(target_ptr, "AXSelected"), Evidence::Known(true))
+                        && matches!(NativeReader.boolean(target_ptr, "AXSelected"), Evidence::Known(_));
+                        if !bound {
+                            return Err(SelectionUnavailable::Changed);
+                        }
+                        match NativeReader.settable(target_ptr, "AXSelected") {
+                            Evidence::Known(true) => Ok(()),
+                            Evidence::Known(false) => Err(SelectionUnavailable::NotSettable),
+                            _ => Err(SelectionUnavailable::Changed),
+                        }
                     };
                     recheck_selection_then_write(valid, || {
                         let idle_before = super::physical_input_idle_ms();
@@ -4634,7 +4764,7 @@ where
     F: std::future::Future<Output = T>,
 {
     let context = discovery.await.map_err(SelectionStageError::Discovery)?;
-    dispatch_post_press_selection(
+    dispatch_gated_write(
         SelectionSite::NativeFocus,
         clock,
         budget,
@@ -4673,7 +4803,7 @@ where
     F: std::future::Future<Output = T>,
 {
     let context = discovery.await.map_err(SelectionStageError::Discovery)?;
-    dispatch_post_press_selection(
+    dispatch_gated_write(
         SelectionSite::HitFocus,
         clock,
         budget,
@@ -5255,7 +5385,7 @@ mod u32_stage_tests {
         let probe_target = target.clone();
         let write_target = target.clone();
         let counter = &writes;
-        let result = dispatch_post_press_selection(
+        let result = dispatch_gated_write(
             SelectionSite::NativeFocus,
             &FakeClock,
             Duration::ZERO,
@@ -5366,7 +5496,7 @@ mod u32_stage_tests {
     async fn post_press_selection_gate_refusal_blocks_write() {
         let writes = AtomicUsize::new(0);
         let write_count = &writes;
-        let result = dispatch_post_press_selection(
+        let result = dispatch_gated_write(
             SelectionSite::PostPress,
             &FakeClock,
             Duration::ZERO,
@@ -5409,7 +5539,7 @@ mod u32_stage_tests {
         let write_count = &writes;
         let probe_binding = current_target.clone();
         let write_binding = current_target.clone();
-        let result = dispatch_post_press_selection(
+        let result = dispatch_gated_write(
             SelectionSite::PostPress,
             &FakeClock,
             Duration::ZERO,
@@ -5432,15 +5562,112 @@ mod u32_stage_tests {
             },
             |candidate| async move {
                 recheck_selection_then_write(
-                    || candidate as usize == write_binding.load(Ordering::SeqCst),
+                    || {
+                        if candidate as usize == write_binding.load(Ordering::SeqCst) {
+                            Ok(())
+                        } else {
+                            Err(SelectionUnavailable::Changed)
+                        }
+                    },
                     || write_count.fetch_add(1, Ordering::SeqCst),
                 )
             },
         )
         .await
         .unwrap();
-        assert_eq!(result, None);
+        assert_eq!(result, Err(SelectionUnavailable::Changed));
         assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
+
+    /// #281.2: an item whose AXSelected reads fine but is not settable (a
+    /// Finder-style list) says so, instead of claiming the target changed or
+    /// went away; a changed target keeps its own message. Neither writes.
+    #[test]
+    fn a_selection_target_that_is_not_settable_says_so() {
+        let history = ClickHistory {
+            prior: PriorInput::None,
+            press: None,
+            press_error: None,
+            idx: 4,
+            role: "AXRow".into(),
+            title: "Documents".into(),
+            read_back: false,
+        };
+        let text_of = |unavailable| {
+            let (lease, result) = project_live_selection_result(
+                Ok(Ok((
+                    Some(Err(unavailable)),
+                    None,
+                    PriorInput::None,
+                    Ok(false),
+                ))),
+                history.clone(),
+            );
+            assert!(lease.is_none());
+            let wire = cua_driver_core::mcp_result::conforming_tool_result(
+                "click",
+                serde_json::to_value(result.expect_err("the selection was not written"))
+                    .expect("a tool result serializes"),
+            );
+            wire["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let not_settable = text_of(SelectionUnavailable::NotSettable);
+        assert!(
+            not_settable.contains("exposes AXSelected but it is not settable"),
+            "{not_settable}"
+        );
+        assert!(
+            !not_settable.contains("changed or became unavailable"),
+            "{not_settable}"
+        );
+        let changed = text_of(SelectionUnavailable::Changed);
+        assert!(
+            changed.contains("changed or became unavailable"),
+            "{changed}"
+        );
+        let mut written = 0;
+        assert_eq!(
+            recheck_selection_then_write(
+                || Err(SelectionUnavailable::NotSettable),
+                || written += 1
+            ),
+            Err(SelectionUnavailable::NotSettable)
+        );
+        assert_eq!(written, 0);
+    }
+
+    /// #286: the fast-path check may move a click to where the element is
+    /// now. A background click whose moved window-local point leaves the live
+    /// frame is refused with that point, the same rule the requested point
+    /// gets; inside the frame, and in the foreground, the moved point is used.
+    #[test]
+    fn a_relocated_background_point_outside_the_frame_is_refused() {
+        let frame = Some((400.0, 300.0));
+        assert_eq!(
+            relocated_point((110.0, 210.0, 10.0, 10.0), Some((5.0, -4.0)), frame, false),
+            Ok((115.0, 206.0, 15.0, 6.0))
+        );
+        assert_eq!(
+            relocated_point((500.0, 210.0, 398.0, 10.0), Some((6.0, 0.0)), frame, false),
+            Err((404.0, 10.0))
+        );
+        assert_eq!(
+            relocated_point((110.0, 205.0, 10.0, 2.0), Some((0.0, -3.0)), frame, false),
+            Err((10.0, -1.0))
+        );
+        assert_eq!(
+            relocated_point((500.0, 210.0, 398.0, 10.0), Some((6.0, 0.0)), frame, true),
+            Ok((506.0, 210.0, 404.0, 10.0))
+        );
+        assert_eq!(
+            relocated_point((1.0, 2.0, 3.0, 4.0), None, frame, false),
+            Ok((1.0, 2.0, 3.0, 4.0))
+        );
+        assert!(point_outside_frame(400.5, 10.0, (400.0, 300.0)));
+        assert!(!point_outside_frame(400.0, 300.0, (400.0, 300.0)));
     }
 
     #[test]
@@ -5489,7 +5716,7 @@ mod u32_stage_tests {
             (PriorInput::None, Some(DispositionIntent::NotDeliveredSafe)),
             (PriorInput::MayHaveDelivered, None),
         ] {
-            let report = dispatch_post_press_selection(
+            let report = dispatch_gated_write(
                 SelectionSite::PostPress,
                 &FakeClock,
                 Duration::ZERO,
@@ -5822,14 +6049,147 @@ impl std::fmt::Display for ClickWriteFailure {
 }
 impl std::error::Error for ClickWriteFailure {}
 
+/// The failure for an AX action whose perform return the core write-outcome
+/// rule calls not delivered (accessibility disabled): the app never received
+/// it, so the disposition is `NOT_DELIVERED` and only prior input can make it
+/// suspected instead.
+fn perform_error_failure(
+    ax_action: &str,
+    err: crate::ax::bindings::AXError,
+    chain: &cua_driver_core::mutation::ChainResult,
+) -> ClickWriteFailure {
+    ClickWriteFailure {
+        message: format!("AXUIElementPerformAction({ax_action}) returned {err}"),
+        disposition: chain
+            .error_disposition(
+                cua_driver_core::mutation::Postcondition::Indeterminate,
+                false,
+            )
+            .expect("unconfirmed write"),
+    }
+}
+
+#[cfg(test)]
+mod perform_error_failure_tests {
+    use super::{element_click_failure, perform_error_failure, perform_outcome};
+    use crate::ax::bindings::{
+        kAXErrorAPIDisabled, kAXErrorActionUnsupported, kAXErrorCannotComplete,
+        kAXErrorIllegalArgument, kAXErrorInvalidUIElement, kAXErrorNotImplemented,
+    };
+    use cua_driver_contract::ErrorDisposition;
+    use cua_driver_core::mutation::{ChainResult, PriorInput, Reason, WriteOutcome};
+
+    /// The click's APIDisabled rule (#279): an accessibility-disabled perform
+    /// proves nothing was sent, so it reaches the caller as the
+    /// `action_unavailable` refusal with `dispatched: false`, never as an
+    /// unverifiable action the caller would read the window for.
+    #[test]
+    fn accessibility_disabled_press_is_refused_as_not_delivered() {
+        let outcome = perform_outcome(kAXErrorAPIDisabled);
+        assert_eq!(
+            outcome,
+            WriteOutcome::StopNotDelivered(Reason::PermissionDenied)
+        );
+        let chain = ChainResult::from_recorded(vec![outcome], PriorInput::None).expect("one write");
+        assert!(chain.no_input());
+        let failure = perform_error_failure("AXPress", kAXErrorAPIDisabled, &chain);
+        let result = element_click_failure(&failure.into());
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.disposition, Some(ErrorDisposition::NOT_DELIVERED));
+        let structured = result.structured_content.expect("a coded refusal");
+        assert_eq!(structured["code"], "action_unavailable");
+        assert_eq!(structured["effect"], "refused");
+        assert_eq!(structured["dispatched"], false);
+    }
+
+    /// The same perform after input that may have been delivered is not a
+    /// refusal: the click cannot claim nothing was sent.
+    #[test]
+    fn accessibility_disabled_press_after_prior_input_is_not_a_refusal() {
+        let chain = ChainResult::from_recorded(
+            vec![perform_outcome(kAXErrorAPIDisabled)],
+            PriorInput::MayHaveDelivered,
+        )
+        .expect("one write");
+        assert!(!chain.no_input());
+        let result = element_click_failure(
+            &perform_error_failure("AXPress", kAXErrorAPIDisabled, &chain).into(),
+        );
+        assert_eq!(result.is_error, Some(true));
+        assert_ne!(
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("dispatched")),
+            Some(&serde_json::json!(false))
+        );
+    }
+
+    /// One meaning per perform error (#277, #279). Only a fall-through proves
+    /// nothing was sent; every other non-success that is not a proved refusal
+    /// may have acted.
+    #[test]
+    fn perform_outcome_keeps_one_meaning_per_error() {
+        assert_eq!(perform_outcome(0), WriteOutcome::Delivered);
+        assert_eq!(
+            perform_outcome(kAXErrorActionUnsupported),
+            WriteOutcome::FallThrough(Reason::Unsupported)
+        );
+        assert_eq!(
+            perform_outcome(kAXErrorNotImplemented),
+            WriteOutcome::FallThrough(Reason::NotImplemented)
+        );
+        assert_eq!(
+            perform_outcome(kAXErrorAPIDisabled),
+            WriteOutcome::StopNotDelivered(Reason::PermissionDenied)
+        );
+        assert_eq!(
+            perform_outcome(kAXErrorCannotComplete),
+            WriteOutcome::StopUncertain(Reason::CannotComplete)
+        );
+        for uncertain in [kAXErrorIllegalArgument, kAXErrorInvalidUIElement] {
+            assert!(
+                matches!(perform_outcome(uncertain), WriteOutcome::StopUncertain(_)),
+                "{uncertain} after a sent press may have acted"
+            );
+        }
+    }
+}
+
+/// The core write-outcome rule for a sent AX Perform that returned `err`.
+///
+/// Every route that sends an AX action classifies its return through this
+/// function (#277, #279): `Delivered` acted, `FallThrough` proves nothing was
+/// sent so another rung may run, `StopNotDelivered` proves the app never got
+/// it, and everything else — `IllegalArgument` and `InvalidUIElement`
+/// included, since a press can tear its element down before the reply — may
+/// have acted and must never be resent.
+pub(super) fn perform_outcome(
+    err: crate::ax::bindings::AXError,
+) -> cua_driver_core::mutation::WriteOutcome {
+    crate::ax::write_outcome::native_write_outcome(
+        crate::ax::write_outcome::NativeWriteKind::Perform,
+        true,
+        &crate::ax::write_outcome::Settable::Unknown(crate::ax::bindings::kAXErrorFailure),
+        err,
+    )
+}
+
+/// Whether a non-success perform return proves the app did not act on it:
+/// nothing was sent (`FallThrough`) or it was proved not delivered
+/// (`StopNotDelivered`). Every other return may have acted, so no route may
+/// follow it with another actuation.
+pub(super) fn perform_sent_nothing(err: crate::ax::bindings::AXError) -> bool {
+    use cua_driver_core::mutation::WriteOutcome;
+    matches!(
+        perform_outcome(err),
+        WriteOutcome::FallThrough(_) | WriteOutcome::StopNotDelivered(_)
+    )
+}
+
 fn post_press_should_select(err: crate::ax::bindings::AXError) -> bool {
     matches!(
-        crate::ax::write_outcome::native_write_outcome(
-            crate::ax::write_outcome::NativeWriteKind::Perform,
-            true,
-            &crate::ax::write_outcome::Settable::Unknown(crate::ax::bindings::kAXErrorFailure),
-            err,
-        ),
+        perform_outcome(err),
         cua_driver_core::mutation::WriteOutcome::FallThrough(_)
     )
 }
@@ -6204,25 +6564,6 @@ mod selection_write_outcome_tests {
     }
 }
 
-/// Whether a non-success `AXUIElementPerformAction` return proves the app
-/// never received the action. Only the accessibility client's own refusals
-/// do: a bad argument, a dead element reference, or accessibility turned off.
-/// Every other code comes back after the request reached the app, which may
-/// have acted on it; Apple documents that `kAXErrorCannotComplete` (the app
-/// did not answer within the messaging timeout) does not mean the action
-/// failed, and Finder opens a row and returns `kAXErrorAttributeUnsupported`.
-pub(super) fn perform_error_proves_nothing_was_sent(err: crate::ax::bindings::AXError) -> bool {
-    use crate::ax::bindings::{
-        kAXErrorAPIDisabled, kAXErrorIllegalArgument, kAXErrorInvalidUIElement,
-    };
-    [
-        kAXErrorIllegalArgument,
-        kAXErrorInvalidUIElement,
-        kAXErrorAPIDisabled,
-    ]
-    .contains(&err)
-}
-
 /// The outcome of a coordinate selection click that was delivered but whose
 /// AXSelected read-back did not settle. The click reached the app and may
 /// have selected or acted, so this is an unconfirmed click, not a failure.
@@ -6279,19 +6620,25 @@ fn element_click_failure(error: &anyhow::Error) -> ToolResult {
 }
 
 /// The outcome of an AX action whose perform call returned `err` after it
-/// was sent, when no read-back resolved what happened. An error that proves
-/// the action never reached the app stays a plain failure, never a refusal:
-/// the click's selection fallback may have written AXSelected before or
-/// after the action, so the caller reads the window first. Any other error is
-/// an unconfirmed action (`effect: "unverifiable"`, not an error result), so
-/// the caller reads the window before repeating it instead of sending a
-/// second click (cua-driver#21).
+/// was sent, when no read-back resolved what happened. It follows the core
+/// write-outcome rule for a Perform (#277, #279): an error that rule calls
+/// not delivered (accessibility disabled) stays a plain failure, never a
+/// refusal, because the click's selection fallback may have written
+/// AXSelected before or after the action, so the caller reads the window
+/// first. Every other error, IllegalArgument and InvalidUIElement included
+/// (a press can tear its element down before the reply), is an unconfirmed
+/// action (`effect: "unverifiable"`, not an error result), so the caller
+/// reads the window before repeating it instead of sending a second click
+/// (cua-driver#21).
 fn unresolved_perform_error(
     ax_action: &str,
     err: crate::ax::bindings::AXError,
     element: (usize, &str, &str),
 ) -> anyhow::Result<AxClickOutcome> {
-    if perform_error_proves_nothing_was_sent(err) {
+    if matches!(
+        perform_outcome(err),
+        cua_driver_core::mutation::WriteOutcome::StopNotDelivered(_)
+    ) {
         anyhow::bail!("AXUIElementPerformAction({ax_action}) returned {err}");
     }
     let (idx, role, title) = element;
@@ -6420,7 +6767,8 @@ fn text_focus_evidence(focused_before: Option<bool>, input_quiet: bool) -> Optio
 }
 
 /// Whether an AX press on a text input must wait for the page to move DOM
-/// focus (800 ms). Only text inputs inside web content (an `AXWebArea`
+/// focus (watched for up to [`CLICK_OBSERVATION`], returning as soon as it
+/// reads focused). Only text inputs inside web content (an `AXWebArea`
 /// ancestor) have a DOM focus to settle; waiting on a native field only
 /// delays the result. `ancestor_roles` is read only for a text input pressed
 /// with `AXPress`.
@@ -6559,6 +6907,7 @@ fn perform_ax_click(
     foreground: bool,
     read_back: bool,
     mut prior: cua_driver_core::mutation::PriorInput,
+    prompt: PromptInput,
 ) -> anyhow::Result<AxClickStep> {
     let (element_ptr, idx) = element;
     let (pid, window_id) = window;
@@ -6607,6 +6956,7 @@ fn perform_ax_click(
             let modifier_refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
             if foreground && !modifier_refs.is_empty() {
                 crate::input::mouse::click_at_xy_desktop_with_modifiers_preserving_cursor(
+                    prompt,
                     target.screen_x,
                     target.screen_y,
                     1,
@@ -6756,20 +7106,8 @@ fn perform_ax_click(
             )
             .is_some())
         };
-        let focused = focus_step();
-        let hand_back: Option<String> = None;
-        let focused = match focused {
-            Ok(focused) => focused,
-            // The original error stays downcastable (refusal codes); the
-            // disclosure is added as context.
-            Err(error) => match hand_back.filter(|text| !text.is_empty()) {
-                Some(text) => {
-                    let message = format!("{error} {text}");
-                    return Err(error.context(message));
-                }
-                None => return Err(error),
-            },
-        };
+        // The original error stays downcastable (refusal codes).
+        let focused = focus_step()?;
         if !focused {
             if in_web_area {
                 return Ok(AxClickStep::Done((
@@ -6782,7 +7120,7 @@ fn perform_ax_click(
                 )));
             }
             return Err(ClickWriteFailure {
-                message: format!("text input [{idx}] did not become the application's focused element; AXPress was not sent.{}", hand_back.map(|text| format!(" {text}")).unwrap_or_default()),
+                message: format!("text input [{idx}] did not become the application's focused element; AXPress was not sent."),
                 disposition: cua_driver_contract::ErrorDisposition::DELIVERED,
             }.into());
         }
@@ -6802,15 +7140,7 @@ fn perform_ax_click(
                  before the click or input arrived meanwhile, so nothing confirms the click."
             )
         };
-        return Ok(AxClickStep::Done((
-            format!(
-                "{summary}{}",
-                hand_back.map(|text| format!(" {text}")).unwrap_or_default()
-            ),
-            false,
-            evidence,
-            in_web_area,
-        )));
+        return Ok(AxClickStep::Done((summary, false, evidence, in_web_area)));
     }
     // What the action may change (a selection, a toggle, the window title of
     // a navigation such as Finder's sidebar, a sheet or window it opens),
@@ -6872,16 +7202,7 @@ fn perform_ax_click(
             outcome,
             cua_driver_core::mutation::WriteOutcome::StopNotDelivered(_)
         ) {
-            return Err(ClickWriteFailure {
-                message: format!("AXUIElementPerformAction({ax_action}) returned {err}"),
-                disposition: chain
-                    .error_disposition(
-                        cua_driver_core::mutation::Postcondition::Indeterminate,
-                        false,
-                    )
-                    .expect("unconfirmed write"),
-            }
-            .into());
+            return Err(perform_error_failure(ax_action, err, &chain).into());
         }
         // Only the classified fall-through may hand control to the caller.
         if fallback_selection && post_press_should_select(err) {
@@ -6903,9 +7224,6 @@ fn perform_ax_click(
                 message: format!("AXUIElementPerformAction({ax_action}) returned {err}; no fallback was available"),
                 disposition: chain.error_disposition(cua_driver_core::mutation::Postcondition::Indeterminate, false).expect("unconfirmed write"),
             }.into());
-        }
-        if perform_error_proves_nothing_was_sent(err) {
-            return Ok(AxClickStep::Done((format!("⚠️ Sent {ax_action} to [{idx}] {role} \"{title}\", but the app returned AX error {err}; it may have acted. Read the window before repeating it."), false, None, false)));
         }
         return unresolved_perform_error(ax_action, err, (idx, &role, &title))
             .map(AxClickStep::Done);
@@ -6979,17 +7297,11 @@ fn perform_ax_click(
         );
     }
 
-    // Offer the focus-rect highlight around the element (matches Swift
-    // showFocusRect); the overlay paints it only with `cursor.marks` on. Also
-    // move the cursor to the element center so the glide animation plays.
+    // Move the cursor to the element center so the glide animation plays.
     if let Some(rect) = unsafe { element_screen_rect(element) } {
         // Drive THIS session's cursor (threaded in via `cursor_key`), matching
         // the keyed glide already played in the invoke body above. The keyed
         // glide already played on the session's cursor in the invoke body.
-        crate::cursor::overlay::send_command(
-            cursor_key.to_owned(),
-            cursor_overlay::OverlayCommand::ShowFocusRect(Some(rect)),
-        );
         // Animate cursor to element center.
         let cx = rect[0] + rect[2] / 2.0;
         let cy = rect[1] + rect[3] / 2.0;
@@ -7683,7 +7995,10 @@ mod tests {
     /// may still have acted (Finder opens a row and returns -25205; Apple
     /// documents that kAXErrorCannotComplete does not mean failure). It must
     /// report `effect: "unverifiable"` so the caller reads before clicking
-    /// again. Only errors that prove nothing reached the app stay failures.
+    /// again. IllegalArgument and InvalidUIElement after the action was sent
+    /// stay uncertain too (#277: a press can tear its element down before the
+    /// reply); only an error the core write-outcome rule calls not delivered
+    /// (accessibility disabled) stays a failure (#279).
     #[test]
     fn perform_error_after_dispatch_is_unverifiable_unless_nothing_was_sent() {
         for modified in [false, true] {
@@ -7706,6 +8021,8 @@ mod tests {
             kAXErrorFailure,
             kAXErrorActionUnsupported,
             kAXErrorNotImplemented,
+            kAXErrorIllegalArgument,
+            kAXErrorInvalidUIElement,
             -25299, // a code this driver does not know
         ] {
             let (summary, suspected_noop, verified, via_pixel) =
@@ -7723,15 +8040,10 @@ mod tests {
             assert_eq!(structured["path"], "ax");
             assert!(structured.get("escalation").is_none());
         }
-        for nothing_sent in [
-            kAXErrorIllegalArgument,
-            kAXErrorInvalidUIElement,
-            kAXErrorAPIDisabled,
-        ] {
-            let error = unresolved_perform_error("AXOpen", nothing_sent, (3, "AXRow", "Desktop"))
-                .expect_err("an error that proves nothing reached the app stays a failure");
-            assert!(error.to_string().contains(&nothing_sent.to_string()));
-        }
+        let error =
+            unresolved_perform_error("AXOpen", kAXErrorAPIDisabled, (3, "AXRow", "Desktop"))
+                .expect_err("accessibility disabled: nothing reached the app");
+        assert!(error.to_string().contains(&kAXErrorAPIDisabled.to_string()));
     }
 
     /// The unverifiable outcome survives the dispatch seam: it stays a
@@ -8064,29 +8376,26 @@ mod tests {
         assert!(text.contains("delivery_mode:\"foreground\""), "{text}");
     }
 
-    /// An AX error that proves the action itself never reached the app stays
-    /// a plain failure, never a refusal: the click can have written
+    /// An AX error the core write-outcome rule calls not delivered
+    /// (accessibility disabled) stays a plain failure, never a refusal: the
+    /// click can have written
     /// AXSelected on an ancestor before or after the action (the selection
     /// fallback), so it does not prove that nothing changed. The same holds
     /// for a disabled target in the foreground (the window may already have
     /// been activated and raised) and for an uncoded error from the click's
     /// other steps. This guards against widening the refusal above.
+    /// IllegalArgument and InvalidUIElement after a sent press are
+    /// unverifiable, not failures (#277, #279; see
+    /// `perform_error_after_dispatch_is_unverifiable_unless_nothing_was_sent`).
     #[test]
     fn an_ax_error_that_proves_nothing_was_sent_stays_a_plain_failure() {
-        use crate::ax::bindings::{
-            kAXErrorAPIDisabled, kAXErrorIllegalArgument, kAXErrorInvalidUIElement,
-        };
-        let mut errors: Vec<anyhow::Error> = [
-            kAXErrorIllegalArgument,
-            kAXErrorInvalidUIElement,
+        use crate::ax::bindings::kAXErrorAPIDisabled;
+        let mut errors: Vec<anyhow::Error> = vec![unresolved_perform_error(
+            "AXPress",
             kAXErrorAPIDisabled,
-        ]
-        .into_iter()
-        .map(|code| {
-            unresolved_perform_error("AXPress", code, (3, "AXRadioButton", "Day"))
-                .expect_err("an error that proves nothing reached the app stays a failure")
-        })
-        .collect();
+            (3, "AXRadioButton", "Day"),
+        )
+        .expect_err("accessibility disabled: nothing reached the app")];
         errors.push(anyhow::anyhow!(
             "selection target stopped exposing AXSelected before delivery"
         ));
@@ -9078,6 +9387,9 @@ mod checked_pointer_press_tests {
         }
     }
     impl ScopeReader<u8> for Window {
+        fn window_visible(&mut self, _: u8, _: u8, _: Scope) -> Evidence<bool> {
+            self.visible.clone()
+        }
         fn visible(&mut self, _: u8, _: u8, _: Scope) -> Evidence<bool> {
             self.visible.clone()
         }

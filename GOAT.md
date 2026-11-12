@@ -18,6 +18,39 @@ upstream release binaries. The repository was named goat-si/cua-driver until 202
 - GOAT fixes, each linked to an issue here or in goat-si/goat. Every fix that is not GOAT-specific is also
   sent upstream as a separate pull request against trycua/cua `main`, and driver bugs are reported upstream.
 
+## macOS click and focus refusals
+
+Some macOS click paths refuse instead of guessing, by design. These show up as refusals in live runs:
+
+- A click whose target's accessibility action list cannot be read is refused before any selection
+  write, AX action or pixel click (goat-si/goat-cu#278, #281). Before, it went through the selection route.
+- A native text field whose AXFocused is not settable, or whose AXPress target reads AXEnabled=false,
+  is refused instead of attempted (#280, #283). Read the window again and use another route.
+- A list item whose AXSelected reads fine but is not settable is reported as "exposes AXSelected but
+  it is not settable", not as a target that changed (#281).
+- After an AX press was sent, IllegalArgument and InvalidUIElement are unverifiable ("may have
+  acted"), not failures: a press can tear its element down before the reply (#277, #279).
+  The same rule covers press_key menu chords (AXPress/AXPick) and semantic keys (AXConfirm,
+  AXCancel), right_click AXShowMenu, double_click AXOpen and scroll's native scroll-bar presses:
+  such an error is reported as unverifiable and is never followed by a second press, a key chord, a
+  pixel click or a wheel scroll. Only ActionUnsupported and NotImplemented (nothing was sent) move
+  on to the next route (a background double_click then refuses instead of falling back to pixels).
+  APIDisabled is refused as not delivered. For right_click AXShowMenu, a background double_click
+  AXOpen, press_key's semantic keys and scroll's native scroll-bar presses the refusal is
+  `action_unavailable`, `dispatched: false`, typed not delivered so a run_steps step counts as
+  sending nothing. press_key's menu-chord refusals (`background_unavailable`, or `window_not_key`
+  when the window stopped being key) stay untyped, because menu validation may already have posted
+  Cmd+F20 key events. When the same call had already brought the window to the front (a foreground
+  double_click, or a scroll that fronted its window), the answer is a plain error instead: fronting
+  the window was input of its own.
+- A right_click or double_click pixel route, including a fallback after AXShowMenu or AXOpen, posts
+  only at the element's checked center: pointer admission for the exact window, a readable frame and
+  window bounds, the center inside the window and on the element. A clipped, scrolled-out or
+  occluded element is refused with nothing sent (#272 review); a background double_click without
+  AXOpen now needs the same proof.
+- A background pixel click that the fast-path check moves outside the window frame is refused with
+  the moved point; nothing is sent (#286).
+
 ## Signing
 
 Release artifacts here are unsigned. GOAT signs the driver when it builds its helper app, so the helper

@@ -24,11 +24,8 @@ short gap between pairs. Delivery remains unverifiable unless read-back
 confirms an effect. Focus restoration runs separately and waits for tracked
 actions to finish and a 50 ms quiet interval. Browser tools and
 `get_browser_state` are tracked because they can reconnect or launch a
-browser; `page` setup (`enable_javascript_apple_events`) is tracked while it
-quits the browser and patches preferences, but the subsequent relaunch can
-outlive that call. `insert_text`, `type_keystrokes`, and targeted
-`execute_javascript` are tracked because they can open a connection. Other
-admitted `page` actions do not hold the wait open.
+browser. `page` only reads (`get_text`, `query_dom`), so it does not hold
+the wait open.
 Restoration retains the original app
 across later actions, and is abandoned on physical user input, a frontmost
 app other than the original or target, or a two-second timeout. A target
@@ -1052,8 +1049,8 @@ the only browser cursor displayed in that Chrome window.
 Browser chrome, permission prompts, downloads, file pickers, Safari, Firefox,
 and unbound embedded webviews remain native surfaces. Inspect them with
 `get_window_state` and use the AX/PX ladder in this file. The legacy `page`
-tool and Apple Events JavaScript bridge remain compatibility surfaces, not the
-starting point for new browser workflows.
+tool is read-only now (`get_text` and `query_dom`) and is not the starting point
+for new browser workflows.
 
 ## macOS common error patterns
 
@@ -1100,7 +1097,7 @@ focus hand-back; its cancellation receipt reports `key_release: pending`.
 
 A pending key-focus hand-back delays a new key scope for the same process; hand-backs for other processes do not delay that scope. Global focus operations still wait for all hand-backs.
 
-With `window_id`, `type_text`, `press_key` and `hotkey` target that exact window: the driver makes it the app's key window through in-app key-window records (no raise, no activation, real pointer untouched), confirms focus, and hands key back. This also covers another window or dialog of the app holding focus, and a LibreOffice that was never activated. An already-key window needs no focus move; when another window of the app is key, the records move key to the exact window and hand it back afterwards. When the switch cannot be confirmed the call is refused with `window_not_key`. For a window-only native Command chord with a matching menu item, `press_key` and `hotkey` use their menu routes even when the app is frontmost; a `press_key` disabled-item key fallback reports `suspected_noop`. Recipe: pass `window_id` on every call; go to the cell with Name Box navigation (`type_text` `A1\n`), type with `\n` and `\t`, read the cell back; run commands (Paste Special, Format, Save) with `invoke_menu({pid, window_id, path})` rather than clicking the menu bar. A `background_unavailable` refusal here means use `get_window_state` and act by element, not stop.
+With `window_id`, `type_text`, `press_key` and `hotkey` target that exact window: the driver makes it the app's key window through in-app key-window records (no raise, no activation, real pointer untouched), confirms focus, and hands key back. This also covers another window or dialog of the app holding focus, and a LibreOffice that was never activated. An already-key window needs no focus move; when another window of the app is key, the records move key to the exact window and hand it back afterwards. When the switch cannot be confirmed the call is refused with `window_not_key`. For a window-only native Command chord with a matching menu item, `press_key` and `hotkey` use their menu routes even when the app is frontmost; a `press_key` disabled-item key fallback reports `suspected_noop`. Recipe: pass `window_id` on every call; go to the cell with Name Box navigation (`type_text` `A1\n`), type with `\n` and `\t`, read the cell back; run commands (Paste Special, Format, Save) with `invoke_menu({pid, window_id, path})` rather than clicking the menu bar. A `background_unavailable` refusal here means use `get_window_state` and act by element, not stop. Calc lists only the visible cells, so an address outside the view is a `not_found`: click the Name Box (the combo box named after the current cell), type the address and `\n`, then type the value. A sheet tab is an `AXRadioButton` without actions: switch with `press_key` `ctrl+pagedown` or `invoke_menu`. A `window_not_key` refusal now names the window that holds focus (Tip of the Day, Confirmation, Delete Contents): answer that dialog with its own `window_id`, then retry.
 
 ### Preview: export before resizing
 

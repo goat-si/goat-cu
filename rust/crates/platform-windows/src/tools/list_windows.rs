@@ -56,12 +56,25 @@ impl Tool for ListWindowsTool {
         use cua_driver_core::tool_args::ArgsExt;
         let filter_pid = args.opt_u64("pid").map(|v| v as u32);
         let on_screen_only = args.bool_or("on_screen_only", false);
-        let (mut windows, pid_to_name) = tokio::task::spawn_blocking(move || {
+        let (mut windows, pid_to_name, instance_before) = tokio::task::spawn_blocking(move || {
+            // #299: the first start-time pass runs before the windows are
+            // enumerated (every process, or the filtered pid), so a pid reused
+            // while the listing is built is never labelled with the new one.
+            let before = crate::process_instance::read_instances(
+                match filter_pid {
+                    Some(pid) => vec![pid],
+                    None => crate::win32::list_processes()
+                        .into_iter()
+                        .map(|p| p.pid)
+                        .collect(),
+                },
+                crate::process_instance::instance_start_time,
+            );
             let wins = crate::win32::list_windows(filter_pid);
             let procs = crate::win32::list_processes();
             let map: std::collections::HashMap<u32, String> =
                 procs.into_iter().map(|p| (p.pid, p.name)).collect();
-            (wins, map)
+            (wins, map, before)
         })
         .await
         .unwrap_or_default();
@@ -108,8 +121,16 @@ impl Tool for ListWindowsTool {
         // front. Swift convention: higher z_index = closer to front.
         // Invert via `(len - 1 - i)` so the front-most window gets the
         // largest z.
+        // #299: the second start-time pass, for the pids this listing reports;
+        // a label is kept only where it agrees with the first pass, so a pid
+        // reused mid-read is omitted rather than guessed.
+        let pids: std::collections::BTreeSet<u32> = windows
+            .iter()
+            .map(|w| w.pid)
+            .filter(|pid| *pid > 0)
+            .collect();
         let n = windows.len();
-        let records: Vec<serde_json::Value> = windows
+        let mut records: Vec<serde_json::Value> = windows
             .iter()
             .enumerate()
             .map(|(i, w)| {
@@ -128,6 +149,16 @@ impl Tool for ListWindowsTool {
                 })
             })
             .collect();
+        let after_pids: Vec<u32> = pids.iter().copied().collect();
+        let instance_after = tokio::task::spawn_blocking(move || {
+            crate::process_instance::read_instances(
+                after_pids,
+                crate::process_instance::instance_start_time,
+            )
+        })
+        .await
+        .unwrap_or_default();
+        crate::process_instance::label_records(&mut records, &instance_before, &instance_after);
 
         let total = records.len();
         let pid_count = windows

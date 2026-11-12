@@ -166,13 +166,17 @@ async fn observe_dom_click(
     }
 }
 
-fn dom_click_action_record(observation: &DomClickObservation) -> ActionExecutionRecord {
+fn click_readback_action_record(
+    observation: &DomClickObservation,
+    transport: ActionTransport,
+    delivery: ActualDelivery,
+) -> ActionExecutionRecord {
     let mut builder = ActionExecutionRecord::builder(
         observation.effect,
-        ActionTransport::BrowserCdpRuntimeFunction,
+        transport,
         RequestedDelivery::NotApplicable,
     )
-    .actual_delivery(ActualDelivery::Background);
+    .actual_delivery(delivery);
     if observation.readback_available {
         builder = builder.evidence(ActionEvidence {
             kind: EvidenceKind::BrowserReadback,
@@ -267,7 +271,7 @@ fn schema_ref() -> Value {
     })
 }
 
-pub(crate) fn browser_resource_ownership(
+pub(crate) async fn browser_resource_ownership(
     engine: &BrowserEngine,
     args: &Value,
 ) -> ProtectedResourceOwnership {
@@ -287,10 +291,14 @@ pub(crate) fn browser_resource_ownership(
             .and_then(|target_id| engine.store.get_target(&runtime_session, target_id).ok())
             .map(|target| target.pid)
     });
-    if pid.is_some_and(|pid| {
-        engine.is_driver_owned_pid_for_session(&runtime_session, pid)
-            || engine.is_driver_owned_pid_for_session(session, pid)
-    }) {
+    let Some(pid) = pid else {
+        return ProtectedResourceOwnership::UserOwned;
+    };
+    if engine
+        .is_driver_owned_pid_for_session(&runtime_session, pid)
+        .await
+        || engine.is_driver_owned_pid_for_session(session, pid).await
+    {
         ProtectedResourceOwnership::DriverOwned
     } else {
         ProtectedResourceOwnership::UserOwned
@@ -748,7 +756,7 @@ impl Tool for GetBrowserStateTool {
         args: &Value,
     ) -> ProtectedResourceOwnership {
         if adapter_id == "private_observation" {
-            browser_resource_ownership(&self.engine, args)
+            browser_resource_ownership(&self.engine, args).await
         } else {
             ProtectedResourceOwnership::UserOwned
         }
@@ -1230,7 +1238,7 @@ impl Tool for BrowserNavigateTool {
         args: &Value,
     ) -> ProtectedResourceOwnership {
         if adapter_id == "browser_bound_input" {
-            browser_resource_ownership(&self.engine, args)
+            browser_resource_ownership(&self.engine, args).await
         } else {
             ProtectedResourceOwnership::UserOwned
         }
@@ -1413,7 +1421,7 @@ impl Tool for BrowserClickTool {
         args: &Value,
     ) -> ProtectedResourceOwnership {
         if adapter_id == "browser_bound_input" {
-            browser_resource_ownership(&self.engine, args)
+            browser_resource_ownership(&self.engine, args).await
         } else {
             ProtectedResourceOwnership::UserOwned
         }
@@ -1679,7 +1687,11 @@ impl Tool for BrowserClickTool {
                             ext_ref.as_deref().unwrap_or("?")
                         ),
                     };
-                    let action_record = dom_click_action_record(&observation);
+                    let action_record = click_readback_action_record(
+                        &observation,
+                        ActionTransport::BrowserCdpRuntimeFunction,
+                        ActualDelivery::Background,
+                    );
                     ToolResult::text(text).with_action_record(action_record)
                 }
                 (Ok(_), Some(open)) => {
@@ -1691,6 +1703,7 @@ impl Tool for BrowserClickTool {
                         open.kind,
                         dialog_capability_id(open.generation)
                     );
+                    // The dialog blocks the renderer, so no readback can run.
                     ToolResult::text(text).with_structured(json!({
                         "status": "ok",
                         "effect": "unverifiable",
@@ -1763,6 +1776,34 @@ impl Tool for BrowserClickTool {
                 BrowserVisualActionKind::Click,
             )
             .await;
+
+        // A ref-targeted trusted click gets the same bounded target readback
+        // as the dom_event route, so a press that misses its target is not
+        // reported like one that toggled it. Coordinate clicks have no node.
+        let readback_object = match backend_node_id {
+            Some(backend) => conn
+                .call(
+                    Some(cdp),
+                    "DOM.resolveNode",
+                    json!({ "backendNodeId": backend }),
+                )
+                .await
+                .ok()
+                .and_then(|resolved| {
+                    resolved
+                        .pointer("/object/objectId")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                }),
+            None => None,
+        };
+        let before = match readback_object.as_deref() {
+            Some(object_id) => {
+                read_dom_click_state(conn, cdp, object_id, DOM_CLICK_BASELINE_DEADLINE).await
+            }
+            None => None,
+        };
+        let ref_targeted = backend_node_id.is_some();
 
         if let Err(error) = conn
             .call(
@@ -1860,8 +1901,44 @@ impl Tool for BrowserClickTool {
             "y": y,
         });
         let Some(open) = opened else {
-            return ToolResult::text(format!("clicked ({x:.0}, {y:.0}) in {tab_id}"))
-                .with_structured(structured);
+            let text = format!("clicked ({x:.0}, {y:.0}) in {tab_id}");
+            if !ref_targeted {
+                return ToolResult::text(text).with_structured(structured);
+            }
+            let observation = match readback_object.as_deref() {
+                Some(object_id) => observe_dom_click(conn, cdp, object_id, before).await,
+                None => DomClickObservation {
+                    effect: effect_from_value_readback(false, false, false),
+                    readback_available: false,
+                },
+            };
+            let text = match observation.effect {
+                ActionEffect::Confirmed => {
+                    format!("{text}; bounded semantic readback confirmed a target-state change")
+                }
+                _ if observation.readback_available => format!(
+                    "{text}; bounded semantic target state remained unchanged; application \
+                     effect is unverifiable. Refresh page state and verify the expected \
+                     postcondition"
+                ),
+                _ => format!(
+                    "{text}; application effect not verified because semantic target readback \
+                     was unavailable. Refresh page state and verify the expected postcondition"
+                ),
+            };
+            let delivery = if foreground {
+                ActualDelivery::Foreground
+            } else {
+                ActualDelivery::Background
+            };
+            let action_record = click_readback_action_record(
+                &observation,
+                ActionTransport::BrowserCdpInputMouse,
+                delivery,
+            );
+            return ToolResult::text(text)
+                .with_structured(structured)
+                .with_action_record(action_record);
         };
         structured["dialog"] = dialog_block(&open);
         structured["escalation"] = json!({
@@ -2199,7 +2276,7 @@ impl Tool for BrowserTypeTool {
         args: &Value,
     ) -> ProtectedResourceOwnership {
         if adapter_id == "browser_bound_input" {
-            browser_resource_ownership(&self.engine, args)
+            browser_resource_ownership(&self.engine, args).await
         } else {
             ProtectedResourceOwnership::UserOwned
         }
@@ -2798,7 +2875,7 @@ impl Tool for BrowserSelectTool {
         args: &Value,
     ) -> ProtectedResourceOwnership {
         if adapter_id == "browser_bound_input" {
-            browser_resource_ownership(&self.engine, args)
+            browser_resource_ownership(&self.engine, args).await
         } else {
             ProtectedResourceOwnership::UserOwned
         }
@@ -3002,7 +3079,7 @@ impl Tool for BrowserDialogTool {
             adapter_id,
             "private_observation" | "browser_consequential_action"
         ) {
-            browser_resource_ownership(&self.engine, args)
+            browser_resource_ownership(&self.engine, args).await
         } else {
             ProtectedResourceOwnership::UserOwned
         }
@@ -3418,6 +3495,21 @@ mod tests {
     struct MockPlatform {
         devtools: Option<std::net::TcpListener>,
         launch_delay: std::time::Duration,
+        /// Start time reported for every pid; a change stands for pid reuse.
+        start_time: std::sync::atomic::AtomicU64,
+        /// What the isolated-launch tests observe and control.
+        launches: Arc<LaunchSignals>,
+    }
+
+    /// Isolated launches the mock performed, and a stand-in for an OS
+    /// security prompt (a macOS keychain prompt) on screen.
+    #[derive(Default)]
+    struct LaunchSignals {
+        spawned: std::sync::atomic::AtomicUsize,
+        prompt_open: std::sync::atomic::AtomicBool,
+        /// Each launched browser raises a prompt, as a Chromium that reads
+        /// its keychain secret does.
+        prompt_on_launch: std::sync::atomic::AtomicBool,
     }
 
     impl MockPlatform {
@@ -3531,7 +3623,7 @@ mod tests {
         ) -> Result<ProcessFingerprint, BrowserRefusal> {
             Ok(ProcessFingerprint {
                 pid,
-                start_time: Some(1),
+                start_time: Some(1 + self.start_time.load(std::sync::atomic::Ordering::SeqCst)),
                 executable: None,
             })
         }
@@ -3567,12 +3659,23 @@ mod tests {
             }
         }
 
+        fn security_prompt_open(&self) -> bool {
+            self.launches
+                .prompt_open
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
         fn spawn_isolated_browser(
             &self,
             _command: std::process::Command,
             profile: &std::path::Path,
         ) -> Result<Box<dyn crate::browser::platform::IsolatedBrowserProcess>, BrowserRefusal>
         {
+            use std::sync::atomic::Ordering;
+            self.launches.spawned.fetch_add(1, Ordering::SeqCst);
+            if self.launches.prompt_on_launch.load(Ordering::SeqCst) {
+                self.launches.prompt_open.store(true, Ordering::SeqCst);
+            }
             std::thread::sleep(self.launch_delay);
             let port = self.devtools.as_ref().unwrap().local_addr().unwrap().port();
             std::fs::write(
@@ -3592,11 +3695,21 @@ mod tests {
         BrowserEngine::new(Arc::new(MockPlatform::default()))
     }
 
+    #[cfg(unix)]
     fn launching_engine() -> Arc<BrowserEngine> {
         slow_launching_engine(std::time::Duration::ZERO)
     }
 
+    #[cfg(unix)]
     fn slow_launching_engine(launch_delay: std::time::Duration) -> Arc<BrowserEngine> {
+        observed_launching_engine(launch_delay, Arc::default())
+    }
+
+    #[cfg(unix)]
+    fn observed_launching_engine(
+        launch_delay: std::time::Duration,
+        launches: Arc<LaunchSignals>,
+    ) -> Arc<BrowserEngine> {
         static PROFILE_ROOT: std::sync::Once = std::sync::Once::new();
         PROFILE_ROOT.call_once(|| {
             std::env::set_var(
@@ -3607,9 +3720,12 @@ mod tests {
         BrowserEngine::new(Arc::new(MockPlatform {
             devtools: Some(std::net::TcpListener::bind("127.0.0.1:0").unwrap()),
             launch_delay,
+            launches,
+            ..MockPlatform::default()
         }))
     }
 
+    #[cfg(unix)]
     fn start_lifecycle_session(idle_ttl: Option<std::time::Duration>) -> (String, String) {
         use crate::session::{SessionClientKind, SessionTransport};
         let session = format!("browser-lifecycle-{}", uuid::Uuid::new_v4());
@@ -3637,6 +3753,7 @@ mod tests {
         (session, owner)
     }
 
+    #[cfg(unix)]
     async fn prepare_isolated(
         engine: &Arc<BrowserEngine>,
         session: &str,
@@ -3975,6 +4092,107 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_profile_requests_never_launch_a_browser() {
+        let launches = Arc::new(LaunchSignals::default());
+        let tool = BrowserPrepareTool::new(observed_launching_engine(
+            std::time::Duration::ZERO,
+            launches.clone(),
+        ));
+        for request in [
+            json!({
+                "pid": 1,
+                "window_id": 7,
+                "strategy": { "kind": "existing_profile" },
+                "session": "existing-never-launches"
+            }),
+            json!({
+                "pid": 1,
+                "window_id": 7,
+                "allow_launch": true,
+                "strategy": { "kind": "existing_profile" },
+                "session": "existing-never-launches"
+            }),
+            json!({
+                "pid": 1,
+                "window_id": 7,
+                "allow_launch": true,
+                "profile": { "mode": "isolated_new" },
+                "strategy": { "kind": "existing_profile" },
+                "session": "existing-never-launches"
+            }),
+        ] {
+            let result = tool.invoke(request).await;
+            assert_eq!(structured(&result)["status"], "refused", "{result:?}");
+        }
+        assert_eq!(
+            launches.spawned.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the user's own profile must never be launched or relaunched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_open_security_prompt_blocks_isolated_launches() {
+        use std::sync::atomic::Ordering;
+        let launches = Arc::new(LaunchSignals::default());
+        launches.prompt_open.store(true, Ordering::SeqCst);
+        let tool = BrowserPrepareTool::new(observed_launching_engine(
+            std::time::Duration::ZERO,
+            launches.clone(),
+        ));
+        for _ in 0..5 {
+            let result = tool
+                .invoke(json!({
+                    "allow_launch": true,
+                    "profile": { "mode": "isolated_new" },
+                    "session": "prompt-already-open"
+                }))
+                .await;
+            let refusal = &structured(&result)["refusal"];
+            assert_eq!(refusal["code"], "browser_route_unavailable", "{refusal}");
+            assert_eq!(refusal["detail"]["reason"], "security_prompt_open");
+        }
+        assert_eq!(launches.spawned.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_prompt_raised_by_a_launch_stops_it_and_further_launches() {
+        use std::sync::atomic::Ordering;
+        let launches = Arc::new(LaunchSignals::default());
+        launches.prompt_on_launch.store(true, Ordering::SeqCst);
+        let tool = BrowserPrepareTool::new(observed_launching_engine(
+            std::time::Duration::ZERO,
+            launches.clone(),
+        ));
+        let request = json!({
+            "allow_launch": true,
+            "profile": { "mode": "isolated_new" },
+            "session": "prompt-on-launch"
+        });
+        let first = tool.invoke(request.clone()).await;
+        let refusal = &structured(&first)["refusal"];
+        assert_eq!(
+            refusal["detail"]["reason"], "security_prompt_appeared",
+            "{refusal}"
+        );
+        assert_eq!(launches.spawned.load(Ordering::SeqCst), 1);
+
+        // Even after the person dismisses the prompt, an immediate retry is
+        // held back instead of raising the next prompt.
+        launches.prompt_open.store(false, Ordering::SeqCst);
+        let retry = tool.invoke(request).await;
+        let refusal = &structured(&retry)["refusal"];
+        assert_eq!(
+            refusal["detail"]["reason"], "isolated_launch_backoff",
+            "{refusal}"
+        );
+        assert_eq!(launches.spawned.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn existing_profile_requires_runtime_authorization() {
         let tool = BrowserPrepareTool::new(engine());
@@ -4127,6 +4345,85 @@ mod tests {
         let owned =
             prepare_isolated(&engine, &session, &owner, json!({ "mode": "isolated_new" })).await;
         assert_eq!(owned["lifecycle"]["owner"], "session");
+        crate::session::end_session(&session);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_idle_end_reaps_the_browser_and_forgets_its_pid() {
+        // The killed browser's pid can be reused by a user's browser, so no
+        // launch record for it may outlive the idle sweep.
+        let engine = launching_engine();
+        let (session, owner) = start_lifecycle_session(None);
+        let prepared =
+            prepare_isolated(&engine, &session, &owner, json!({ "mode": "isolated_new" })).await;
+        let pid = prepared["prepared_pid"].as_i64().expect("prepared pid");
+        let launched_app = pid + 1;
+        let ownership = engine.protected_resource_ownership.clone();
+        ownership.mark_driver_owned_pid(&session, launched_app);
+        let args = json!({ "session": session, "pid": pid });
+        assert_eq!(
+            browser_resource_ownership(&engine, &args).await,
+            ProtectedResourceOwnership::DriverOwned
+        );
+
+        assert_eq!(
+            crate::session::evict_idle_with_prefix(Duration::ZERO, &session),
+            vec![session.clone()]
+        );
+
+        assert!(!ownership.is_driver_owned_pid(&session, pid));
+        assert!(!ownership.is_driver_owned_pid(&owner, pid));
+        assert_eq!(
+            browser_resource_ownership(&engine, &args).await,
+            ProtectedResourceOwnership::UserOwned
+        );
+        // Records the browser engine did not create stay for the registry.
+        assert!(ownership.is_driver_owned_pid(&session, launched_app));
+        crate::session::end_session(&session);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reused_browser_pid_is_not_driver_owned() {
+        let platform = Arc::new(MockPlatform {
+            devtools: Some(std::net::TcpListener::bind("127.0.0.1:0").unwrap()),
+            ..MockPlatform::default()
+        });
+        launching_engine();
+        let engine = BrowserEngine::new(platform.clone());
+        let (session, owner) = start_lifecycle_session(None);
+        let prepared =
+            prepare_isolated(&engine, &session, &owner, json!({ "mode": "isolated_new" })).await;
+        let pid = prepared["prepared_pid"].as_i64().expect("prepared pid");
+        let args = json!({ "session": session, "pid": pid });
+        assert_eq!(
+            browser_resource_ownership(&engine, &args).await,
+            ProtectedResourceOwnership::DriverOwned
+        );
+
+        // The browser exits and the session's next launch_app gets its pid.
+        platform
+            .start_time
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let reused = ProcessFingerprint {
+            pid,
+            start_time: Some(2),
+            executable: None,
+        };
+        let ownership = engine.protected_resource_ownership.clone();
+        ownership.mark_driver_owned_process(&session, reused.clone());
+        assert_eq!(
+            browser_resource_ownership(&engine, &args).await,
+            ProtectedResourceOwnership::UserOwned
+        );
+
+        // Reaping the browser forgets only its own launch, not the app's.
+        assert_eq!(
+            crate::session::evict_idle_with_prefix(Duration::ZERO, &session),
+            vec![session.clone()]
+        );
+        assert!(ownership.reprove_driver_owned_process(&session, &reused));
         crate::session::end_session(&session);
     }
 

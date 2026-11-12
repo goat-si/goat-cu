@@ -51,7 +51,22 @@ async fn inventory_result<F>(inventory: F) -> ToolResult
 where
     F: FnOnce() -> Vec<crate::apps::AppInfo> + Send + 'static,
 {
-    let apps = match tokio::task::spawn_blocking(inventory).await {
+    let apps = match tokio::task::spawn_blocking(move || {
+        // #299: a pid is labelled only when it names the same process start
+        // before and after the inventory.
+        let before = crate::process_identity::labels_before(&crate::apps::all_pids());
+        let mut apps = inventory();
+        label_running_apps(&mut apps, |pid| {
+            crate::process_identity::bracketed_label(
+                &before,
+                pid,
+                crate::process_identity::instance_label,
+            )
+        });
+        apps
+    })
+    .await
+    {
         Ok(apps) => apps,
         Err(error) => return ToolResult::error(format!("app inventory task failed: {error}")),
     };
@@ -76,11 +91,23 @@ fn app_record_json(a: &crate::apps::AppInfo) -> Value {
         "launch_path": a.launch_path,
         "kind": a.kind,
         "last_used": a.last_used,
+        "process_instance": a.process_instance,
     });
     if let Some(entry) = entry.as_object_mut() {
         entry.retain(|_, value| !value.is_null());
     }
     entry
+}
+
+/// #299: name each running app's process instance, read once right after the
+/// inventory. Installed-only entries (pid 0, not running) get none.
+fn label_running_apps(
+    apps: &mut [crate::apps::AppInfo],
+    mut label_of: impl FnMut(i32) -> Option<String>,
+) {
+    for app in apps.iter_mut().filter(|app| app.running && app.pid > 0) {
+        app.process_instance = label_of(app.pid);
+    }
 }
 
 #[cfg(test)]
@@ -98,6 +125,7 @@ mod tests {
             launch_path: launch_path.map(Into::into),
             kind: Some("desktop".into()),
             last_used: None,
+            process_instance: None,
         }
     }
 
@@ -130,6 +158,23 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "apps": [record] })).unwrap();
         assert_eq!(typed.apps[0].bundle_id.as_deref(), Some("org.example.App"));
         assert_eq!(typed.apps[0].last_used, None);
+    }
+
+    /// #299: a running app's record names its process instance (an opaque
+    /// start-time label) so a later answer can tell a reused pid apart; an
+    /// installed-only entry has no process and no label.
+    #[test]
+    fn running_apps_name_their_process_instance() {
+        let mut running = app(Some("org.example.App"), None);
+        running.pid = 17;
+        running.running = true;
+        let mut apps = vec![running, app(None, Some("/Applications/Example.app"))];
+        label_running_apps(&mut apps, |pid| Some(format!("start-{pid}")));
+        let record = app_record_json(&apps[0]);
+        assert_eq!(record["process_instance"], "start-17");
+        assert!(app_record_json(&apps[1]).get("process_instance").is_none());
+        let listing = serde_json::json!({ "apps": [record] });
+        assert!(cua_driver_contract::validate_success_output("list_apps", listing).unwrap());
     }
 }
 #[cfg(test)]

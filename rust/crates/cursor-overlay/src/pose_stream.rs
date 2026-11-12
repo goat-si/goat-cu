@@ -62,6 +62,10 @@ pub struct PoseTrack {
     /// Seconds into the track at which the hotspot arrives, where the float
     /// is exactly 0. `None` for a snap.
     pub arrival: Option<f64>,
+    /// Seconds into the track at which the action waiting on the move is
+    /// released: the arrival, or earlier when a floor timing stretched the
+    /// move (see `RenderStateCore::release_t`). `None` for a snap.
+    pub release: Option<f64>,
     /// The float clock at the last sample.
     pub rest: RestFloat,
 }
@@ -90,6 +94,9 @@ pub struct FloatLook {
     pub hold_secs: f64,
     pub ease_in_secs: f64,
     pub ease_out_secs: f64,
+    /// How long the float plays at full amplitude at rest before it parks
+    /// (#287).
+    pub rest_secs: f64,
 }
 
 impl FloatLook {
@@ -102,6 +109,7 @@ impl FloatLook {
         hold_secs: crate::cursor_pose::FLOAT_HOLD_SECS,
         ease_in_secs: crate::cursor_pose::FLOAT_EASE_IN_SECS,
         ease_out_secs: crate::cursor_pose::FLOAT_EASE_OUT_SECS,
+        rest_secs: crate::cursor_pose::FLOAT_REST_SECS,
     };
 }
 
@@ -150,18 +158,20 @@ impl PoseTrack {
         .to_string()
     }
 
-    /// Seconds the hotspot takes to reach its target.
-    pub fn arrival_secs(&self) -> f64 {
-        self.arrival
+    /// Seconds until the action waiting on the move is released.
+    pub fn release_secs(&self) -> f64 {
+        self.release
+            .or(self.arrival)
             .unwrap_or_else(|| self.samples.last().map_or(0.0, |s| s.t))
     }
 }
 
 impl PoseLook {
     /// JSON for the helper: `{"float": {"secs", "sway", "bob", "lift",
-    /// "tilt", "hold", "ease_in", "ease_out"} | null, "halo": {"rgb":
-    /// "#rrggbb", "radius": pt, "peak": a, "stops": [[o, k], ...], "body":
-    /// [x, y]} | null}`.
+    /// "tilt", "hold", "ease_in", "ease_out", "park"} | null, "halo":
+    /// {"rgb": "#rrggbb", "radius": pt, "peak": a, "stops": [[o, k], ...],
+    /// "body": [x, y]} | null}`. `park` is the rest time at which the float
+    /// eases out and parks; a helper that gets no `park` floats on.
     pub fn to_json(&self) -> String {
         let float = self.float.map(|f| {
             json!({
@@ -173,6 +183,9 @@ impl PoseLook {
                 "hold": f.hold_secs,
                 "ease_in": f.ease_in_secs,
                 "ease_out": f.ease_out_secs,
+                // #287: rest time at which the float eases back out and
+                // parks upright (`cursor_pose::rest_amplitude`).
+                "park": f.hold_secs + f.ease_in_secs + f.rest_secs,
             })
         });
         let halo = self.halo.map(|halo| {
@@ -258,6 +271,7 @@ impl RenderStateCore {
         Some(PoseTrack {
             samples,
             arrival: Some((arrival - start).max(0.0)),
+            release: Some((self.release_t - start).max(0.0)),
             rest: rest_at(last),
         })
     }
@@ -372,6 +386,7 @@ impl PoseModel {
                         rotation: float.tilt,
                     }],
                     arrival: None,
+                    release: None,
                     rest: core.rest_float(),
                 })
             }
@@ -435,7 +450,6 @@ mod tests {
             float: true,
             halo: true,
             rotate,
-            ..CursorOptions::default()
         }
     }
 
@@ -699,7 +713,7 @@ mod tests {
             round(track.arrival.unwrap(), 4)
         );
         assert_eq!(parsed["rest"].as_array().unwrap().len(), 3);
-        assert!(track.arrival_secs() > 0.0);
+        assert!(track.release_secs() > 0.0);
 
         let look: serde_json::Value =
             serde_json::from_str(&model.look("s").unwrap().to_json()).unwrap();
@@ -707,6 +721,16 @@ mod tests {
         assert_eq!(look["halo"]["stops"].as_array().unwrap().len(), 3);
         assert_eq!(look["float"]["secs"].as_f64().unwrap(), 4.0);
         assert!((look["float"]["sway"].as_f64().unwrap() - FLOAT_SWAY_PT).abs() < 1e-3);
+        // #287: a helper that runs the float itself parks it where the
+        // overlay does: `park` is the rest time at which it eases out.
+        let park = look["float"]["park"]
+            .as_f64()
+            .expect("the look carries park");
+        assert_eq!(crate::cursor_pose::rest_amplitude(park, 0.0), 1.0);
+        assert!(crate::cursor_pose::rest_amplitude(park + 0.4, 0.0) < 1.0);
+        assert!(crate::cursor_pose::rest_parked(
+            park + crate::cursor_pose::FLOAT_EASE_IN_SECS
+        ));
     }
 
     #[test]

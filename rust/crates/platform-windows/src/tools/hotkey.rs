@@ -133,7 +133,10 @@ impl Tool for HotkeyTool {
                     "scope": "desktop", "path": "SendInput", "keys": full_keys,
                     "effect": "unverifiable"
                 })),
-                Ok(Err(error)) => ToolResult::error(error.to_string()),
+                Ok(Err(error)) if crate::input::keyboard::is_foreground_envelope(&error) => {
+                    crate::input::keyboard::foreground_input_error(error)
+                }
+                Ok(Err(error)) => keyboard_dispatch_error(error),
                 Err(error) => ToolResult::error(format!("desktop hotkey task failed: {error}")),
             };
         }
@@ -412,6 +415,9 @@ impl Tool for HotkeyTool {
             )),
             Ok(Err(e)) if e.downcast_ref::<FocusUncertain>().is_some() => {
                 crate::uia_mutation::foreground_focus_uncertain_result(e.to_string())
+            }
+            Ok(Err(e)) if crate::input::keyboard::is_foreground_envelope(&e) => {
+                crate::input::keyboard::foreground_input_error(e)
             }
             Ok(Err(e)) => keyboard_dispatch_error(e),
             Err(e) => keyboard_join_error(e),

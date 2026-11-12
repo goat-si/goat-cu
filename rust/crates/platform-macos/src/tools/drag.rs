@@ -40,6 +40,7 @@ use crate::ax::bindings::{
 use crate::focus_guard;
 use crate::input::mouse::DragButton;
 use crate::window_change_detector::WindowChangeDetector;
+use cua_driver_core::security_prompt::PromptInput;
 
 fn drag_failure_text(failure: &crate::input::gesture::GestureFailure) -> String {
     use crate::input::gesture::ReleaseReceipt;
@@ -241,10 +242,12 @@ impl DragTool {
                         cursor_key.clone(),
                         cursor_overlay::OverlayCommand::SetPressed(true),
                     );
+                    let prompt = PromptInput::from_args(&args);
                     let result = latency::spawn_action_blocking(move || {
                         let modifier_refs: Vec<&str> =
                             modifiers.iter().map(String::as_str).collect();
                         crate::input::mouse::drag_at_xy_foreground_observed(
+                            prompt,
                             from_x,
                             from_y,
                             to_x,
@@ -280,9 +283,10 @@ impl DragTool {
                             "path": "hid",
                             "effect": "unverifiable"
                         })),
-                        Ok(Err(error)) => {
-                            ToolResult::error(format_drag_failure("desktop drag failed", &error))
-                        }
+                        Ok(Err(error)) => crate::security_prompt::tool_result(&error)
+                            .unwrap_or_else(|| {
+                                ToolResult::error(format_drag_failure("desktop drag failed", &error))
+                            }),
                         Err(error) => {
                             ToolResult::error(format!("desktop drag task failed: {error}"))
                         }
@@ -295,6 +299,10 @@ impl DragTool {
             Ok(v) => v,
             Err(e) => return e,
         };
+        let prompt = PromptInput::from_args(&args);
+        if let Err(refusal) = crate::security_prompt::refuse_pid(prompt, pid) {
+            return refusal;
+        }
         // Background (default): post the gesture to the exact window without
         // moving the pointer or raising it, after the focus-without-raise
         // prologue background clicks use. Foreground: briefly front the
@@ -468,6 +476,7 @@ impl DragTool {
         // background the target itself may become AppKit-active without
         // raising; anything else that takes focus is reported and undone.
         let prior_front = apps::frontmost_pid();
+        let undo = crate::focus_arbiter::UndoWatch::arm();
         let snapshot = if fg {
             WindowChangeDetector::snapshot(prior_front)
         } else {
@@ -573,6 +582,7 @@ impl DragTool {
                                 let before = focused_selection(pid, wid);
                                 super::window_points::check_guard(&dispatch_guard)?;
                                 crate::input::mouse::drag_at_xy_observed(
+                                    prompt,
                                     pid,
                                     from_sx,
                                     from_sy,
@@ -689,6 +699,7 @@ impl DragTool {
 
         if !fg {
             super::pixel_focus::restore_user_focus_after_background_pixel(
+                Some(undo),
                 pid,
                 prior_front,
                 prior_key_wid,
@@ -776,7 +787,8 @@ impl DragTool {
                     selection,
                 )
             }
-            Ok(Err(e)) => ToolResult::error(format_drag_failure("drag failed", &e)),
+            Ok(Err(e)) => crate::security_prompt::tool_result(&e)
+                .unwrap_or_else(|| ToolResult::error(format_drag_failure("drag failed", &e))),
             Err(e) => ToolResult::error(format!("Task error: {e}")),
         }
     }

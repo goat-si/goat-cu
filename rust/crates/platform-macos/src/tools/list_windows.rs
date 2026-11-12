@@ -58,24 +58,70 @@ impl Tool for ListWindowsTool {
             Err(message) => return ToolResult::error(message),
         };
         let on_screen_only = args.bool_or("on_screen_only", false);
+        let app_filter = args.opt_str("app");
 
-        let enumeration = match pid_filter {
-            Some(pid) => crate::windows::pid_windows_with_space_snapshot(pid, on_screen_only),
-            None if on_screen_only => crate::windows::visible_windows_with_space_snapshot(),
-            None => crate::windows::all_windows_with_space_snapshot(),
+        // The listing reads WindowServer, AX and process state: off the
+        // async runtime (#299 review).
+        let listing = tokio::task::spawn_blocking(move || {
+            // #299: a pid is labelled only when it names the same process
+            // start before and after the listing.
+            let before = crate::process_identity::labels_before(&match pid_filter {
+                Some(pid) => vec![pid],
+                None => crate::apps::all_pids(),
+            });
+            let enumeration = match pid_filter {
+                Some(pid) => crate::windows::pid_windows_with_space_snapshot(pid, on_screen_only),
+                None if on_screen_only => crate::windows::visible_windows_with_space_snapshot(),
+                None => crate::windows::all_windows_with_space_snapshot(),
+            };
+            // The pid's full window-id set, read independently of on_screen_only
+            // and of every filter the listing applies.
+            let identity = pid_filter.map(crate::windows::pid_window_id_snapshot);
+            let (windows, mut structured) = compose_listing(
+                enumeration,
+                identity,
+                app_filter.as_deref(),
+                std::process::id() as i32,
+                crate::apps::bundle_id_for_pid,
+                crate::ax::bindings::ax_window_ids_of_pid,
+            );
+            label_window_records(&mut structured, |pid| {
+                crate::process_identity::bracketed_label(
+                    &before,
+                    pid,
+                    crate::process_identity::instance_label,
+                )
+            });
+            (windows, structured)
+        })
+        .await;
+        let (windows, structured) = match listing {
+            Ok(listing) => listing,
+            Err(error) => return ToolResult::error(format!("window listing task failed: {error}")),
         };
-        // The pid's full window-id set, read independently of on_screen_only
-        // and of every filter the listing applies.
-        let identity = pid_filter.map(crate::windows::pid_window_id_snapshot);
-        let (windows, structured) = compose_listing(
-            enumeration,
-            identity,
-            args.opt_str("app").as_deref(),
-            std::process::id() as i32,
-            crate::apps::bundle_id_for_pid,
-            crate::ax::bindings::ax_window_ids_of_pid,
-        );
         ToolResult::text(format_window_list(&windows)).with_structured(structured)
+    }
+}
+
+/// #299: each record names its pid's process instance, read once per pid
+/// after the listing (`label_of` checks it against the read before);
+/// omitted when it could not be read or changed.
+fn label_window_records(structured: &mut Value, mut label_of: impl FnMut(i32) -> Option<String>) {
+    let mut labels: std::collections::HashMap<i32, Option<String>> =
+        std::collections::HashMap::new();
+    let Some(windows) = structured["windows"].as_array_mut() else {
+        return;
+    };
+    for window in windows {
+        let Some(pid) = window["pid"]
+            .as_i64()
+            .and_then(|pid| i32::try_from(pid).ok())
+        else {
+            continue;
+        };
+        if let Some(label) = labels.entry(pid).or_insert_with(|| label_of(pid)) {
+            window["process_instance"] = serde_json::json!(label);
+        }
     }
 }
 
@@ -258,6 +304,31 @@ mod tests {
         assert_eq!(
             window_record_json(&window)["on_current_space"],
             serde_json::json!(true)
+        );
+    }
+
+    /// #299: every record names its pid's process instance, read once per pid.
+    #[test]
+    fn window_records_name_their_process_instance() {
+        let mut structured = serde_json::json!({
+            "windows": [
+                {"window_id": 1, "pid": 17},
+                {"window_id": 2, "pid": 17},
+                {"window_id": 3, "pid": 18},
+            ],
+        });
+        let mut reads = Vec::new();
+        label_window_records(&mut structured, |pid| {
+            reads.push(pid);
+            (pid == 17).then(|| "start-17".to_owned())
+        });
+        assert_eq!(reads, [17, 18], "one read per pid");
+        let windows = structured["windows"].as_array().unwrap();
+        assert_eq!(windows[0]["process_instance"], "start-17");
+        assert_eq!(windows[1]["process_instance"], "start-17");
+        assert!(
+            windows[2].get("process_instance").is_none(),
+            "an unreadable instance is omitted"
         );
     }
 

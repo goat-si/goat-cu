@@ -495,8 +495,55 @@ mod tests {
         );
     }
 
+    /// The marker a test process passes to the lone child it spawns: its pid under a prefix, so
+    /// neither a bare pid nor the old literal value left in the environment can match.
+    fn lone_child_marker(parent: u32) -> String {
+        format!("spawned-by-{parent}")
+    }
+
+    /// Whether this process is the lone child its parent spawned.
+    fn is_lone_child(marker: Option<&str>, parent: u32) -> bool {
+        marker == Some(lone_child_marker(parent).as_str())
+    }
+
+    #[test]
+    fn a_leaked_marker_never_makes_the_suite_the_lone_child() {
+        assert!(is_lone_child(Some(&lone_child_marker(42)), 42));
+        // The old literal value, under a parent that happens to be pid 1 (a container entrypoint).
+        assert!(!is_lone_child(Some("1"), 1));
+        assert!(!is_lone_child(Some("42"), 42));
+        assert!(!is_lone_child(Some(&lone_child_marker(41)), 42));
+        assert!(!is_lone_child(None, 42));
+    }
+
     #[test]
     fn a_socket_that_never_accepts_fails_at_once_and_leaves_nothing_open() {
+        // The descriptor count covers the whole process, and the other tests in this binary open
+        // and close their own descriptors on other threads; count in a process running this alone.
+        // The marker names the spawning process, so a value left in the environment cannot make
+        // the whole suite's process count as the lone child.
+        const ALONE: &str = "CUA_MUTTER_STALLED_SOCKET_ALONE";
+        let alone = is_lone_child(
+            std::env::var(ALONE).ok().as_deref(),
+            std::os::unix::process::parent_id(),
+        );
+        if !alone {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "wayland::mutter_display::tests::a_socket_that_never_accepts_fails_at_once_and_leaves_nothing_open",
+                ])
+                .env(ALONE, lone_child_marker(std::process::id()))
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains(" 1 passed;"),
+                "{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         use std::os::unix::net::UnixListener;
         let dir = std::env::temp_dir().join(format!("cua-mutter-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);

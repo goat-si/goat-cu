@@ -48,7 +48,7 @@ The sections below are Cua Driver's own documentation, kept from upstream. Links
 
 See [MCP protocol and skills](docs/mcp-protocol-and-skills.md) for the stdio profile, legacy compatibility, bundled skill resources and HTTP limits.
 
-### Optional visual perception
+### Optional visual perception (frozen: no new work)
 
 The default MIT-licensed Driver works without model artifacts. An explicitly
 installed `cua-perception` extension can parse one retained native window or
@@ -99,6 +99,8 @@ suffix. MCP remains implemented by the `cua-driver` executable as the
 runtime-neutral agent boundary.
 
 ### Computer History macOS preview
+
+> **Deprecated.** Computer History is deprecated. It is off by default, agents are no longer told to call `history_status` or `history_query`, and both tools will be removed in the release after 26 Nov 2026. To remove stored data, run `cua-driver history delete --yes`.
 
 Nightly macOS builds can provide an opt-in, encrypted history of actions
 performed through Cua Driver. The preview stores a strict metadata allowlist,

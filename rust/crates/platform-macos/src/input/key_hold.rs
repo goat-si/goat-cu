@@ -132,7 +132,6 @@ pub(crate) fn deliver(
                 code,
                 down,
                 flags,
-                CGEventTapLocation::HID,
             ),
             KeyRoute::BareGlobal(_) => {
                 let event = keyboard::create_bare_keyboard_event(code, down)?;

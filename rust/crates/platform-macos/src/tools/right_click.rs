@@ -313,7 +313,12 @@ impl RightClickTool {
         let session = lifecycle_session(&args);
 
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match latency::resolve(|| self.state.snapshots.resolve(pid, &args)) {
+        let evidence = crate::process_identity::evidence(&args, pid).await;
+        let resolved = match latency::resolve(|| {
+            self.state
+                .snapshots
+                .resolve_for_instance(pid, &args, evidence)
+        }) {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -486,7 +491,9 @@ impl RightClickTool {
                     false,
                     Some(ownership.clone()),
                 ),
-                Ok(Err(e)) => ToolResult::error(format!("Right-click failed: {e}")),
+                // A right-click that provably sent nothing is a coded refusal.
+                Ok(Err(e)) => super::not_delivered_refusal(&e)
+                    .unwrap_or_else(|| ToolResult::error(format!("Right-click failed: {e}"))),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
         }
@@ -606,6 +613,7 @@ impl RightClickTool {
             target_element: None,
             click: Some((screen_x, screen_y)),
         };
+        let prompt = cua_driver_core::security_prompt::PromptInput::from_args(&args);
         let result = latency::spawn_blocking(move || -> anyhow::Result<_> {
             let _action = latency::span(latency::Stage::ActionBlocking);
             let do_it =
@@ -621,7 +629,7 @@ impl RightClickTool {
                         // Warp the hardware pointer and post at the HID tap; see
                         // `pixel_route` for the cross-platform foreground contract.
                         crate::input::mouse::click_at_xy_desktop_with_modifiers(
-                            screen_x, screen_y, 1, "right", &m,
+                            prompt, screen_x, screen_y, 1, "right", &m,
                         )
                     } else if let Some(wid) = window_id {
                         crate::input::mouse::right_click_at_xy_with_window_local(
@@ -696,14 +704,17 @@ impl RightClickTool {
                 fg,
                 Some(ownership),
             ),
-            Ok(Err(e)) if route == super::pixel_route::PixelClickRoute::ForegroundHid => {
-                super::pixel_route::foreground_unavailable(
-                    "Right-click",
-                    window_id.unwrap_or_default(),
-                    &e.to_string(),
-                )
-            }
-            Ok(Err(e)) => ToolResult::error(format!("Right-click failed: {e}")),
+            Ok(Err(e)) => match crate::security_prompt::tool_result(&e) {
+                Some(refusal) => refusal,
+                None if route == super::pixel_route::PixelClickRoute::ForegroundHid => {
+                    super::pixel_route::foreground_unavailable(
+                        "Right-click",
+                        window_id.unwrap_or_default(),
+                        &e.to_string(),
+                    )
+                }
+                None => ToolResult::error(format!("Right-click failed: {e}")),
+            },
             Err(e) => ToolResult::error(format!("Task error: {e}")),
         }
     }
@@ -1590,11 +1601,15 @@ fn right_click_result_with_ownership(
 
 /// AXShowMenu when the element advertises it, else a pixel right-click.
 ///
-/// An AXShowMenu error that does not prove nothing was sent may have opened
-/// the menu: report that, and never right-click on top of it. Only an error
-/// that proves nothing was sent falls back to the pixel right-click.
+/// The AXShowMenu return is classified by the core write-outcome rule
+/// (`click::perform_outcome`, #279): an error that may have acted may have
+/// opened the menu, so it is reported and never followed by a right-click on
+/// top of it; a proved non-delivery stops with nothing else sent; only a
+/// fall-through (nothing was sent) moves on to the pixel right-click.
 pub(super) enum RightClickAxStage {
     Completed(ElementRightClick),
+    /// The app never received AXShowMenu; nothing else is sent.
+    NotDelivered(String),
     PixelFallback,
 }
 
@@ -1616,12 +1631,21 @@ pub(super) fn right_click_ax_stage<T: Copy>(
                 "Shown menu for {label} (AXShowMenu)."
             )));
         }
-        if !super::click::perform_error_proves_nothing_was_sent(err) {
-            ax_delivered();
-            return RightClickAxStage::Completed(ElementRightClick::Ax(format!(
-                "⚠️ Sent AXShowMenu to {label}, but the app returned AX error {err}, which does \
-                 not mean it failed: the menu may be open. Read the window before repeating it."
-            )));
+        match super::click::perform_outcome(err) {
+            cua_driver_core::mutation::WriteOutcome::FallThrough(_) => {}
+            cua_driver_core::mutation::WriteOutcome::StopNotDelivered(_) => {
+                return RightClickAxStage::NotDelivered(format!(
+                    "AXShowMenu was not delivered to {label} (AX error {err}); nothing was sent."
+                ));
+            }
+            _ => {
+                ax_delivered();
+                return RightClickAxStage::Completed(ElementRightClick::Ax(format!(
+                    "⚠️ Sent AXShowMenu to {label}, but the app returned AX error {err}, which \
+                     does not mean it failed: the menu may be open. Read the window before \
+                     repeating it."
+                )));
+            }
         }
         tracing::debug!("AXShowMenu returned {err} for {label}; falling back to pixel right-click");
     }
@@ -1638,6 +1662,13 @@ pub(super) fn right_click_element<T: Copy>(
 ) -> anyhow::Result<ElementRightClick> {
     match right_click_ax_stage(target, label, advertises_show_menu, show_menu, ax_delivered) {
         RightClickAxStage::Completed(delivery) => Ok(delivery),
+        RightClickAxStage::NotDelivered(message) => {
+            Err(crate::input::ax_actions::ActionNotDelivered {
+                code: "action_unavailable",
+                message,
+            }
+            .into())
+        }
         RightClickAxStage::PixelFallback => pixel(target).map(ElementRightClick::Pixel),
     }
 }
@@ -1691,21 +1722,48 @@ fn pixel_right_click(
     pid: i32,
     wid: u32,
 ) -> anyhow::Result<String> {
-    // Pixel right-click at the element's screen-space center.
-    let (cx, cy) =
-        unsafe { crate::ax::bindings::element_screen_center(element) }.ok_or_else(|| {
-            anyhow::anyhow!(
-                "[{idx}] {role} \"{title}\" advertises no AXShowMenu and has no resolvable \
-             on-screen center for a pixel right-click. Pass x, y directly."
+    // SAFETY: the caller holds a live reference to `element` for this call.
+    let retained = unsafe { crate::ax::snapshot::RetainedElement::retain(element as usize) };
+    let target = super::element_pointer::target_for(pid, wid, idx, retained);
+    pixel_right_click_at(
+        target.as_ref(),
+        &format!("[{idx}] {role} \"{title}\""),
+        |point| {
+            crate::input::mouse::right_click_at_xy_with_window_local(
+                pid,
+                point.screen.0,
+                point.screen.1,
+                point.window_local.0,
+                point.window_local.1,
+                wid,
+                &[],
             )
-        })?;
-    let (wx, wy) = crate::windows::window_bounds_by_id(wid)
-        .map(|b| (cx - b.x, cy - b.y))
-        .unwrap_or((cx, cy));
-    crate::input::mouse::right_click_at_xy_with_window_local(pid, cx, cy, wx, wy, wid, &[])?;
+        },
+    )
+}
+
+/// The pixel right-click at an element, only at its checked center
+/// (`element_pointer::checked_point`: pointer admission for the exact window,
+/// a readable element frame and window bounds, the center inside the window
+/// and on the element). It runs after a semantic gate that ignores ancestor
+/// clipping (#272), so the pointer gate is checked here; anything else
+/// refuses before an event is posted.
+pub(super) fn pixel_right_click_at(
+    target: &dyn super::element_pointer::ElementTarget,
+    label: &str,
+    post: impl FnOnce(&super::element_pointer::ElementPoint) -> anyhow::Result<()>,
+) -> anyhow::Result<String> {
+    let point = super::element_pointer::checked_point(target, false).map_err(|refusal| {
+        crate::input::ax_actions::ActionNotDelivered {
+            code: refusal.code,
+            message: format!("{label}: {}", refusal.message),
+        }
+    })?;
+    post(&point)?;
     Ok(format!(
-        "Right-clicked [{idx}] {role} \"{title}\" at element center ({cx:.0}, {cy:.0}) \
-         (pixel right-click; element advertises no AXShowMenu)."
+        "Right-clicked {label} at element center ({:.0}, {:.0}) (pixel right-click; \
+         AXShowMenu not advertised or not sent).",
+        point.screen.0, point.screen.1
     ))
 }
 
@@ -1716,22 +1774,46 @@ mod tests {
     #[test]
     fn an_axshowmenu_error_that_may_have_opened_the_menu_sends_no_pixel_right_click() {
         use crate::ax::bindings::{
-            kAXErrorActionUnsupported, kAXErrorCannotComplete, kAXErrorIllegalArgument,
+            kAXErrorAPIDisabled, kAXErrorActionUnsupported, kAXErrorCannotComplete,
+            kAXErrorIllegalArgument, kAXErrorInvalidUIElement, kAXErrorNotImplemented,
         };
-        let attempts = std::cell::Cell::new(0);
+        // #279: only a fall-through proves nothing was sent.
+        for err in [kAXErrorActionUnsupported, kAXErrorNotImplemented] {
+            let attempts = std::cell::Cell::new(0);
+            let stage = right_click_ax_stage(
+                73_u32,
+                "[4]",
+                true,
+                |target| {
+                    assert_eq!(target, 73);
+                    attempts.set(attempts.get() + 1);
+                    err
+                },
+                || panic!("proven-unsent AX action cannot report delivery"),
+            );
+            assert!(matches!(stage, RightClickAxStage::PixelFallback), "{err}");
+            assert_eq!(attempts.get(), 1);
+        }
+        // A proved non-delivery stops: no delivery report, no pixel stage.
         let stage = right_click_ax_stage(
             73_u32,
             "[4]",
             true,
-            |target| {
-                assert_eq!(target, 73);
-                attempts.set(attempts.get() + 1);
-                kAXErrorIllegalArgument
-            },
-            || panic!("proven-unsent AX action cannot report delivery"),
+            |_| kAXErrorAPIDisabled,
+            || panic!("an undelivered AX action cannot report delivery"),
         );
-        assert!(matches!(stage, RightClickAxStage::PixelFallback));
-        assert_eq!(attempts.get(), 1);
+        assert!(
+            matches!(&stage, RightClickAxStage::NotDelivered(message) if message.contains("nothing was sent"))
+        );
+        assert!(right_click_element(
+            73_u32,
+            "[4]",
+            true,
+            |_| kAXErrorAPIDisabled,
+            || panic!("an undelivered AX action cannot report delivery"),
+            |_| panic!("no pixel right-click after a proved non-delivery"),
+        )
+        .is_err());
         let delivered = std::cell::Cell::new(0);
         let stage = right_click_ax_stage(
             73_u32,
@@ -1748,7 +1830,13 @@ mod tests {
             RightClickAxStage::Completed(ElementRightClick::Ax(_))
         ));
         assert_eq!(delivered.get(), 1);
-        for err in [kAXErrorCannotComplete, kAXErrorActionUnsupported] {
+        // Every error that may have acted: IllegalArgument and
+        // InvalidUIElement included (a press can tear its element down).
+        for err in [
+            kAXErrorCannotComplete,
+            kAXErrorIllegalArgument,
+            kAXErrorInvalidUIElement,
+        ] {
             let delivered = std::cell::Cell::new(0);
             let outcome = right_click_element(
                 73_u32,
@@ -1769,7 +1857,7 @@ mod tests {
             );
         }
         // Proven unsent, or not advertised: one pixel right-click.
-        for (advertised, err) in [(true, kAXErrorIllegalArgument), (false, kAXErrorSuccess)] {
+        for (advertised, err) in [(true, kAXErrorActionUnsupported), (false, kAXErrorSuccess)] {
             let pixels = std::cell::Cell::new(0);
             let ax_delivered = std::cell::Cell::new(0);
             let outcome = right_click_element(
@@ -2220,7 +2308,7 @@ mod tests {
 
     #[test]
     fn wave400c_proven_unsent_fallback_rearms_and_observes_the_pixel_dispatch() {
-        use crate::ax::bindings::kAXErrorIllegalArgument;
+        use crate::ax::bindings::kAXErrorActionUnsupported;
         let (sent_tx, sent_rx) = std::sync::mpsc::channel();
         let ax_tx = sent_tx.clone();
         let outcome = right_click_element(
@@ -2229,7 +2317,7 @@ mod tests {
             true,
             |target| {
                 assert_eq!(target, 73);
-                kAXErrorIllegalArgument
+                kAXErrorActionUnsupported
             },
             move || {
                 let _ = ax_tx.send("ax");
@@ -2406,5 +2494,31 @@ mod tests {
             None,
             window
         ));
+    }
+}
+
+#[cfg(test)]
+mod wp3c_review_tests {
+    use super::*;
+
+    /// wp3c review: an AXShowMenu the app provably did not receive answers a
+    /// coded refusal with `dispatched: false`, not a plain failure.
+    #[test]
+    fn an_undelivered_show_menu_is_a_coded_refusal() {
+        let error = right_click_element(
+            73_u32,
+            "[4]",
+            true,
+            |_| crate::ax::bindings::kAXErrorAPIDisabled,
+            || panic!("an undelivered AX action cannot report delivery"),
+            |_| panic!("no pixel right-click after a proved non-delivery"),
+        )
+        .expect_err("not delivered");
+        let refusal = super::super::not_delivered_refusal(&error).expect("coded refusal");
+        assert_eq!(refusal.is_error, Some(true));
+        let fields = refusal.structured_content.expect("structured refusal");
+        assert_eq!(fields["code"], "action_unavailable");
+        assert_eq!(fields["effect"], "refused");
+        assert_eq!(fields["dispatched"], false);
     }
 }

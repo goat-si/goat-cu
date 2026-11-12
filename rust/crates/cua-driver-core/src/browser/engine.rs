@@ -49,7 +49,7 @@ use super::platform::{
     BrowserConsentOutcome, BrowserConsentRequest, BrowserPlatform, BrowserVisualAction,
     BrowserVisualActionKind, ExistingProfileSetupRequest,
 };
-use super::prepare::ManagedBrowsers;
+use super::prepare::{IsolatedLaunchBreaker, ManagedBrowsers};
 use super::reconnect::{ReconnectGates, ReconnectKey};
 use super::refusal::{BrowserRefusal, BrowserRefusalCode};
 use super::semantic::{
@@ -87,6 +87,7 @@ pub struct BrowserEngine {
     pub(crate) store: BrowserStore,
     pub(crate) pool: CdpPool,
     pub(crate) managed_browsers: ManagedBrowsers,
+    pub(crate) isolated_launch_breaker: IsolatedLaunchBreaker,
     pub(crate) existing_profile_grants: ExistingProfileGrants,
     pub(crate) approval_broker: Arc<crate::consent::ApprovalBroker>,
     pub(crate) protected_resource_ownership: Arc<crate::consent::ProtectedResourceOwnershipStore>,
@@ -681,6 +682,7 @@ impl BrowserEngine {
             store: BrowserStore::new(),
             pool: CdpPool::new(),
             managed_browsers: Default::default(),
+            isolated_launch_breaker: Default::default(),
             existing_profile_grants: ExistingProfileGrants::new(),
             approval_broker,
             protected_resource_ownership,
@@ -1359,9 +1361,11 @@ impl BrowserEngine {
         let mut grant = self
             .existing_profile_grant(session, transport_session, pid)
             .await?;
-        let driver_owned = self.is_driver_owned_pid_for_session(session, pid)
-            || transport_session
-                .is_some_and(|owner| self.is_driver_owned_pid_for_session(owner, pid));
+        let driver_owned = self.is_driver_owned_pid_for_session(session, pid).await
+            || match transport_session {
+                Some(owner) => self.is_driver_owned_pid_for_session(owner, pid).await,
+                None => false,
+            };
         let access_class = endpoint_access_class(grant.is_some(), driver_owned, class.process_role)
             .map_err(|refusal| with_existing_profile_next_call(refusal, session, pid, window_id))?;
         // A person's own profile lists their tabs' addresses: refuse before
@@ -1577,10 +1581,16 @@ impl BrowserEngine {
 
         match record.endpoint_access_class {
             EndpointAccessClass::DriverOwned => {
-                let lifecycle_is_live = self.is_driver_owned_pid_for_session(session, record.pid)
-                    || record.transport_session.as_deref().is_some_and(|owner| {
-                        self.is_driver_owned_pid_for_session(owner, record.pid)
-                    });
+                let lifecycle_is_live = self
+                    .is_driver_owned_pid_for_session(session, record.pid)
+                    .await
+                    || match record.transport_session.as_deref() {
+                        Some(owner) => {
+                            self.is_driver_owned_pid_for_session(owner, record.pid)
+                                .await
+                        }
+                        None => false,
+                    };
                 if !lifecycle_is_live {
                     return Err(refuse(
                         BrowserRefusalCode::BrowserConsentRequired,

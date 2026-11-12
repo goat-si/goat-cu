@@ -11,7 +11,7 @@ use cua_driver_core::{
 use serde_json::Value;
 use std::sync::Arc;
 
-use crate::ax::bindings::{element_screen_center, kAXErrorSuccess, perform_action, AXUIElementRef};
+use crate::ax::bindings::{kAXErrorSuccess, perform_action, AXUIElementRef};
 
 use super::ToolState;
 
@@ -129,7 +129,12 @@ impl Tool for DoubleClickTool {
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
         let cursor_key = super::cursor_tools::resolve_cursor_key(&args);
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match latency::resolve(|| self.state.snapshots.resolve(pid, &args)) {
+        let evidence = crate::process_identity::evidence(&args, pid).await;
+        let resolved = match latency::resolve(|| {
+            self.state
+                .snapshots
+                .resolve_for_instance(pid, &args, evidence)
+        }) {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -211,15 +216,35 @@ impl Tool for DoubleClickTool {
                     || async move {
                         latency::spawn_action_blocking(move || {
                             let _lease = lease;
-                            ax_double_click(
-                                pid,
+                            let act = || {
+                                ax_double_click(
+                                    pid,
+                                    wid,
+                                    element_guard.as_ptr(),
+                                    idx,
+                                    &ck,
+                                    has_ax_open,
+                                    foreground,
+                                )
+                            };
+                            if !foreground {
+                                return act();
+                            }
+                            // Upstream #6947: front, act, restore, as click's
+                            // foreground AX path does; activation can enable
+                            // the control.
+                            let mut outcome = None;
+                            crate::input::skylight::with_foreground_assist(
+                                pid as libc::pid_t,
                                 wid,
-                                element_guard.as_ptr(),
-                                idx,
-                                &ck,
-                                has_ax_open,
-                                foreground,
-                            )
+                                || {
+                                    outcome = Some(act()?);
+                                    Ok(())
+                                },
+                            )?;
+                            outcome.ok_or_else(|| {
+                                anyhow::anyhow!("foreground double_click did not execute")
+                            })
                         })
                         .await
                     },
@@ -258,7 +283,15 @@ impl Tool for DoubleClickTool {
                 Ok(Ok(ElementDoubleClick::Pixel(msg))) => {
                     ToolResult::text(format!("{msg}{}", changes.result_suffix()))
                 }
-                Ok(Err(e)) => ToolResult::error(format!("double_click failed: {e}")),
+                // In the background a double-click that provably sent nothing
+                // is a coded refusal; in the foreground the window was fronted.
+                Ok(Err(e)) => super::element_disabled_error(pid, wid, &e, foreground)
+                    .or_else(|| {
+                        (!foreground)
+                            .then(|| super::not_delivered_refusal(&e))
+                            .flatten()
+                    })
+                    .unwrap_or_else(|| ToolResult::error(format!("double_click failed: {e}"))),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
         }
@@ -306,11 +339,13 @@ fn ax_double_click_result(message: &str, suffix: &str) -> ToolResult {
 
 /// AXOpen first when the element advertises it, else a pixel double-click.
 ///
-/// An AXOpen error that does not prove nothing was sent (Finder opens a row
-/// and still returns an error) may have opened the item: report that, and
-/// never send a pixel double-click after it, which would land in whatever
-/// opened. Only an error that proves nothing was sent falls back to pixels,
-/// and only in the foreground.
+/// The AXOpen return is classified by the core write-outcome rule
+/// (`click::perform_outcome`, #279). An error that may have acted (Finder
+/// opens a row and still returns an error; IllegalArgument and
+/// InvalidUIElement included) may have opened the item: report that, and never
+/// send a pixel double-click after it, which would land in whatever opened. A
+/// proved non-delivery stops with nothing else sent. Only a fall-through
+/// (nothing was sent) falls back to pixels, and only in the foreground.
 pub(super) fn double_click_element<P, T: Copy>(
     target: T,
     idx: usize,
@@ -326,18 +361,36 @@ pub(super) fn double_click_element<P, T: Copy>(
                 "AXOpen performed on element [{idx}]."
             )));
         }
-        if !super::click::perform_error_proves_nothing_was_sent(err) {
-            return Ok(ElementDoubleClick::Ax(format!(
-                "⚠️ Sent AXOpen to element [{idx}], but the app returned AX error {err}, which \
-                 does not mean it failed: it may have opened. Read the window before repeating \
-                 it."
-            )));
+        match super::click::perform_outcome(err) {
+            cua_driver_core::mutation::WriteOutcome::FallThrough(_) => {}
+            cua_driver_core::mutation::WriteOutcome::StopNotDelivered(_) => {
+                return Err(crate::input::ax_actions::ActionNotDelivered {
+                    code: "action_unavailable",
+                    message: format!(
+                        "AXOpen was not delivered to element [{idx}] (AX error {err}); nothing \
+                         was sent."
+                    ),
+                }
+                .into());
+            }
+            _ => {
+                return Ok(ElementDoubleClick::Ax(format!(
+                    "⚠️ Sent AXOpen to element [{idx}], but the app returned AX error {err}, \
+                     which does not mean it failed: it may have opened. Read the window before \
+                     repeating it."
+                )));
+            }
         }
         if !foreground {
-            anyhow::bail!(
-                "AXOpen returned {err} for element [{idx}]; background delivery will not \
-                 improvise a pointer fallback after choosing the semantic route"
-            );
+            return Err(crate::input::ax_actions::ActionNotDelivered {
+                code: "background_unavailable",
+                message: format!(
+                    "AXOpen returned {err} for element [{idx}] and nothing was sent; background \
+                     delivery will not improvise a pointer fallback after choosing the semantic \
+                     route"
+                ),
+            }
+            .into());
         }
         tracing::debug!(
             "AXOpen returned {err} for element [{idx}], falling back to pixel double-click"
@@ -356,6 +409,16 @@ fn ax_double_click(
     foreground: bool,
 ) -> anyhow::Result<ElementDoubleClick> {
     let element = element_ptr as AXUIElementRef;
+    // Upstream #6702/#7041: read AXEnabled right before input; after a
+    // foreground activation, wait for the app to enable the control.
+    if foreground {
+        crate::input::ax_actions::ensure_ax_action_enabled_after_activation(
+            element_ptr,
+            "double_click",
+        )?;
+    } else {
+        crate::input::ax_actions::ensure_ax_action_enabled(element_ptr, "double_click", false)?;
+    }
     double_click_element(
         element,
         idx,
@@ -374,45 +437,57 @@ fn pixel_double_click(
     cursor_key: &str,
     foreground: bool,
 ) -> anyhow::Result<String> {
-    // Resolve screen center and fall back to pixel double-click.
-    let (cx, cy) = unsafe { element_screen_center(element) }
-        .ok_or_else(|| anyhow::anyhow!("Cannot resolve screen center for element [{idx}]"))?;
+    // SAFETY: the caller holds a live reference to `element` for this call.
+    let retained = unsafe { crate::ax::snapshot::RetainedElement::retain(element as usize) };
+    let target = super::element_pointer::target_for(pid, wid, idx, retained);
+    pixel_double_click_at(target.as_ref(), idx, foreground, |point| {
+        // Drive THIS session's cursor (threaded in via `cursor_key`), not "default".
+        crate::cursor::overlay::send_command(
+            cursor_key.to_owned(),
+            cursor_overlay::OverlayCommand::ClickPulse {
+                x: point.screen.0,
+                y: point.screen.1,
+            },
+        );
+        // Use the window-local primitive (not bare click_at_xy): a plain
+        // click_at_xy does NOT reliably reach a backgrounded / non-key window —
+        // it no-ops on AppKit controls that hit-test the window-local stamp.
+        crate::input::mouse::click_at_xy_with_window_local(
+            pid,
+            point.screen.0,
+            point.screen.1,
+            point.window_local.0,
+            point.window_local.1,
+            wid,
+            2,
+            &[],
+            crate::input::mouse::WindowClickDelivery::from_foreground(foreground),
+        )
+    })
+}
 
-    // Drive THIS session's cursor (threaded in via `cursor_key`), not "default".
-    crate::cursor::overlay::send_command(
-        cursor_key.to_owned(),
-        cursor_overlay::OverlayCommand::ClickPulse { x: cx, y: cy },
-    );
-    // Use the window-local primitive (not bare click_at_xy): a plain
-    // click_at_xy does NOT reliably reach a backgrounded / non-key window — it
-    // no-ops on AppKit controls that hit-test the window-local stamp. Mirror the
-    // delivering path the `click` pixel branch uses so the double-click actually
-    // lands without foregrounding the app.
-    // Window-routed target: we MUST have the window's bounds to translate the
-    // screen center into a window-local stamp. If bounds are missing, refuse
-    // rather than stamping screen coords as window-local — that no-ops or hits
-    // the wrong location while still routing to `wid`.
-    let (wx, wy) = crate::windows::window_bounds_by_id(wid)
-        .map(|b| (cx - b.x, cy - b.y))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Cannot resolve window bounds for window_id {wid}; refusing to stamp \
-             screen coordinates as window-local for element [{idx}]."
-            )
-        })?;
-    crate::input::mouse::click_at_xy_with_window_local(
-        pid,
-        cx,
-        cy,
-        wx,
-        wy,
-        wid,
-        2,
-        &[],
-        crate::input::mouse::WindowClickDelivery::from_foreground(foreground),
-    )?;
+/// The pixel double-click at an element, only at its checked center
+/// (`element_pointer::checked_point`: pointer admission for the exact window
+/// in the background, a readable element frame and window bounds, the center
+/// inside the window and on the element). A foreground fallback after AXOpen
+/// and a background pointer route both pass it; anything else refuses before
+/// an event is posted (#272 review).
+pub(super) fn pixel_double_click_at(
+    target: &dyn super::element_pointer::ElementTarget,
+    idx: usize,
+    foreground: bool,
+    post: impl FnOnce(&super::element_pointer::ElementPoint) -> anyhow::Result<()>,
+) -> anyhow::Result<String> {
+    let point = super::element_pointer::checked_point(target, foreground).map_err(|refusal| {
+        crate::input::ax_actions::ActionNotDelivered {
+            code: refusal.code,
+            message: format!("element [{idx}]: {}", refusal.message),
+        }
+    })?;
+    post(&point)?;
     Ok(format!(
-        "✅ Double-clicked element [{idx}] at ({cx:.1}, {cy:.1})."
+        "✅ Double-clicked element [{idx}] at ({:.1}, {:.1}).",
+        point.screen.0, point.screen.1
     ))
 }
 
@@ -423,9 +498,17 @@ mod tests {
     #[test]
     fn an_axopen_error_that_may_have_opened_sends_no_pixel_double_click() {
         use crate::ax::bindings::{
-            kAXErrorAttributeUnsupported, kAXErrorCannotComplete, kAXErrorIllegalArgument,
+            kAXErrorAPIDisabled, kAXErrorActionUnsupported, kAXErrorAttributeUnsupported,
+            kAXErrorCannotComplete, kAXErrorIllegalArgument, kAXErrorInvalidUIElement,
         };
-        for err in [kAXErrorCannotComplete, kAXErrorAttributeUnsupported] {
+        // #279: IllegalArgument and InvalidUIElement after a sent AXOpen may
+        // have opened the item too.
+        for err in [
+            kAXErrorCannotComplete,
+            kAXErrorAttributeUnsupported,
+            kAXErrorIllegalArgument,
+            kAXErrorInvalidUIElement,
+        ] {
             for foreground in [false, true] {
                 let outcome = double_click_element::<String, _>(
                     73_u32,
@@ -445,8 +528,21 @@ mod tests {
                 );
             }
         }
-        // An error that proves nothing was sent: background fails, foreground
-        // falls back to one pixel double-click.
+        // A proved non-delivery sends nothing else, in either mode.
+        for foreground in [false, true] {
+            let error = double_click_element::<String, _>(
+                73_u32,
+                3,
+                true,
+                foreground,
+                |_| kAXErrorAPIDisabled,
+                |_| panic!("no pointer fallback after a proved non-delivery"),
+            )
+            .expect_err("not delivered");
+            assert!(error.to_string().contains("nothing was sent"), "{error}");
+        }
+        // A fall-through proves nothing was sent: background fails,
+        // foreground falls back to one pixel double-click.
         assert!(double_click_element::<String, _>(
             73_u32,
             3,
@@ -454,7 +550,7 @@ mod tests {
             false,
             |target| {
                 assert_eq!(target, 73);
-                kAXErrorIllegalArgument
+                kAXErrorActionUnsupported
             },
             |_| { panic!("no pointer fallback in the background") }
         )
@@ -467,7 +563,7 @@ mod tests {
             true,
             |target| {
                 assert_eq!(target, 73);
-                kAXErrorIllegalArgument
+                kAXErrorActionUnsupported
             },
             |target| {
                 assert_eq!(target, 73);
@@ -518,5 +614,38 @@ mod tests {
             background_action_for_element(false),
             cua_driver_core::background_input::BackgroundAction::WindowPointer
         );
+    }
+}
+
+#[cfg(test)]
+mod wp3c_review_tests {
+    use super::*;
+
+    /// wp3c review: an AXOpen the app provably did not receive, and a
+    /// background fall-through that stops before any pointer input, answer
+    /// coded refusals with `dispatched: false`.
+    #[test]
+    fn an_undelivered_or_unsent_double_click_is_a_coded_refusal() {
+        use crate::ax::bindings::{kAXErrorAPIDisabled, kAXErrorActionUnsupported};
+        for (err, foreground, code) in [
+            (kAXErrorAPIDisabled, false, "action_unavailable"),
+            (kAXErrorAPIDisabled, true, "action_unavailable"),
+            (kAXErrorActionUnsupported, false, "background_unavailable"),
+        ] {
+            let error = double_click_element::<String, _>(
+                73_u32,
+                3,
+                true,
+                foreground,
+                |_| err,
+                |_| panic!("no pointer fallback"),
+            )
+            .expect_err("nothing was sent");
+            let refusal = super::super::not_delivered_refusal(&error).expect("coded refusal");
+            let fields = refusal.structured_content.expect("structured refusal");
+            assert_eq!(fields["code"], code, "{err} {foreground}");
+            assert_eq!(fields["effect"], "refused");
+            assert_eq!(fields["dispatched"], false);
+        }
     }
 }

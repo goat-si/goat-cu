@@ -96,7 +96,10 @@ impl Tool for PressKeyTool {
                     "scope": "desktop", "path": "SendInput", "key": key_display,
                     "effect": "unverifiable"
                 })),
-                Ok(Err(error)) => ToolResult::error(error.to_string()),
+                Ok(Err(error)) if crate::input::keyboard::is_foreground_envelope(&error) => {
+                    crate::input::keyboard::foreground_input_error(error)
+                }
+                Ok(Err(error)) => keyboard_dispatch_error(error),
                 Err(error) => ToolResult::error(format!("desktop key task failed: {error}")),
             };
         }
@@ -235,7 +238,7 @@ impl Tool for PressKeyTool {
             let (cx, cy) = match resolve_onscreen_point_with_scroll(
                 &admitted,
                 hwnd,
-                idx as usize,
+                idx,
                 cx,
                 cy,
                 "focusing for key delivery",
@@ -317,7 +320,7 @@ impl Tool for PressKeyTool {
             }
             let focus_target = elem_idx.map(|idx| {
                 let point = admitted.as_ref().map(|element| element.center);
-                (idx as usize, point)
+                (idx, point)
             });
             let send_result = tokio::task::spawn_blocking({
                 let admitted = admitted.clone();
@@ -338,6 +341,7 @@ impl Tool for PressKeyTool {
                     "✅ Sent {key_display} via SendInput on pid {raw_pid} (delivery_mode:foreground)."
                 )),
                 Ok(Err(e)) if e.downcast_ref::<FocusUncertain>().is_some() => crate::uia_mutation::foreground_focus_uncertain_result(e.to_string()),
+                Ok(Err(e)) if crate::input::keyboard::is_foreground_envelope(&e) => crate::input::keyboard::foreground_input_error(e),
                 Ok(Err(e)) => keyboard_dispatch_error(e),
                 Err(e)     => keyboard_join_error(e),
             };

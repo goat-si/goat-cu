@@ -58,3 +58,18 @@ budget stop and without passing over anything: no children below
 `max_depth`, no failed `AXChildren` read, no node whose attributes could not
 be read, no omitted tabs. Only then can `verify_state` answer `unsatisfied`
 for an element that is not there instead of `unknown`.
+
+Answers that name a pid also report `process_instance`: an opaque label of the
+process that owned the pid when the answer was read (its kernel start time:
+macOS `pbi_start_tvsec`/`pbi_start_tvusec`, Linux `/proc/<pid>/stat` field 22,
+Windows `GetProcessTimes` creation time), on each `list_apps` running app, each
+`list_windows` record and the `get_window_state` answer. Compare it for
+equality only; the same pid with a different label is a different process. It
+is reported only when the start time read before and after the answer agree,
+so a pid that was reused or unreadable mid-read gets none. A screenshot-only
+`get_window_state` that refreshed an existing snapshot also omits it, on every
+platform: that answer's rows belong to the earlier read. On macOS and Windows
+`get_window_state` element tokens are also bound to the process they were read
+from: once the pid names another process start, using them refuses with
+`process_instance_mismatch` (`process_instance_unverified` when the identity
+could not be read). Linux tokens are not bound to the process yet.

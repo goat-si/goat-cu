@@ -141,7 +141,8 @@ pub fn prime_exact_window_key(
          window is {:?}, its focused element is in window {:?}), so no keys were sent: they \
          could have gone to another window of the same app. Close the other window, or use \
          delivery_mode:\"foreground\"",
-        now.window, now.element_window
+        now.window,
+        now.element_window
     ))
 }
 
@@ -1171,6 +1172,26 @@ fn await_key_focus_with(
     }
 }
 
+/// Name the window that holds key focus in a refused-key message, so the next
+/// call acts on it. A modal dialog or panel (LibreOffice's Tip of the Day,
+/// Confirmation after File > Reload, Delete Contents) holds focus after an
+/// earlier step; the agent otherwise only sees a bare window id and retries.
+fn with_blocker_hint(message: String, blocker: Option<(u32, &str)>) -> String {
+    let Some((id, title)) = blocker else {
+        return message;
+    };
+    let name = if title.is_empty() {
+        format!("an untitled window (window_id {id})")
+    } else {
+        format!("the window \"{title}\" (window_id {id})")
+    };
+    format!(
+        "{message}. Focus is held by {name}, most likely an open dialog or panel: \
+         get_window_state it, answer it (click its OK, Yes or Close button, or press_key \
+         escape on that window_id), then repeat this call"
+    )
+}
+
 /// Make `target_wid` the app's key window (no activation, no raise, no
 /// pointer), confirmed by re-reading the app's focus, and return a guard that
 /// hands key back. `Err` when it cannot be confirmed.
@@ -1388,6 +1409,18 @@ fn enter_scope_with(
     ) {
         Ok(primed) => primed,
         Err(error) => {
+            // Name the window that holds focus instead (upstream #7192 / CUA-3763).
+            let blocker = env
+                .key_focus(pid)
+                .window
+                .filter(|own| *own != target_wid)
+                .map(|own| {
+                    let title = crate::windows::describe_window(own)
+                        .map(|info| info.title)
+                        .unwrap_or_default();
+                    (own, title)
+                });
+            let error = with_blocker_hint(error, blocker.as_ref().map(|(id, t)| (*id, t.as_str())));
             note_focus_change();
             // Records or a focused-window write may still have moved key
             // inside the app: hand it back like a scope's hand-back does, and
@@ -2566,7 +2599,7 @@ pub fn front_process_matches(target_pid: libc::pid_t, target_wid: u32) -> Option
 /// Returns `true` only when the target PSN resolved and WindowServer accepted
 /// `SLPSSetFrontProcessWithOptions`.
 pub fn set_front_process_persistently(target_pid: libc::pid_t, target_wid: u32) -> bool {
-    crate::window_change_detector::note_intentional_activation();
+    crate::focus_arbiter::note_intentional();
     let Some(set_front) = set_front_process_fn() else {
         return false;
     };
@@ -2600,6 +2633,18 @@ fn make_key_window_record(window_id: u32, event_kind: u8) -> [u8; 0xF8] {
 /// make-key records for the requested WindowServer id, then let the caller
 /// raise the matching AX window. No other application window is addressed.
 pub fn make_exact_window_key(target_pid: libc::pid_t, target_wid: u32) -> bool {
+    crate::focus_arbiter::note_intentional();
+    exact_window_key(target_pid, target_wid)
+}
+
+/// Give the user's window `wid` of `pid` key and front back after a target
+/// took it, by the same sequence as [`make_exact_window_key`]. Not a driver
+/// activation: the watcher that undoes the target's change keeps running.
+pub fn return_key_to(pid: libc::pid_t, wid: u32) -> bool {
+    exact_window_key(pid, wid)
+}
+
+fn exact_window_key(target_pid: libc::pid_t, target_wid: u32) -> bool {
     note_focus_change();
     let Some(set_front) = set_front_process_fn() else {
         return false;
@@ -2672,7 +2717,7 @@ fn foreground_turn() -> anyhow::Result<ForegroundTurn> {
         );
     }
     note_focus_change();
-    crate::window_change_detector::note_intentional_activation();
+    crate::focus_arbiter::note_intentional();
     if HOLDS_FOREGROUND_LOCK.with(std::cell::Cell::get) {
         return Ok(ForegroundTurn { _guard: None });
     }
@@ -2783,7 +2828,7 @@ const ACTIVATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_
 fn await_window_focused(pid: libc::pid_t, window_id: u32) -> bool {
     let deadline = std::time::Instant::now() + ACTIVATION_WAIT_TIMEOUT;
     loop {
-        if crate::ax::bindings::focused_window_id_of_pid(pid) == Some(window_id) {
+        if crate::ax::bindings::focused_window_ids_of_pid(pid).is_some_and(|w| w.is(window_id)) {
             return true;
         }
         if std::time::Instant::now() >= deadline {
@@ -2799,15 +2844,16 @@ fn await_window_focused(pid: libc::pid_t, window_id: u32) -> bool {
 /// (a closed Chrome omnibox popup) and can never be key. Empty when neither
 /// is proven.
 fn focus_failure_hint(pid: libc::pid_t, target_wid: u32) -> String {
-    let target = crate::windows::window_info_by_id(target_wid);
-    let focused =
-        crate::ax::bindings::focused_window_id_of_pid(pid).filter(|focused| *focused != target_wid);
+    let target = crate::windows::describe_window(target_wid);
+    let focused = crate::ax::bindings::focused_window_ids_of_pid(pid)
+        .filter(|focused| !focused.is(target_wid))
+        .map(|focused| focused.own);
     focus_failure_hint_from(
         target.as_ref().map(|window| {
             window.is_on_screen && window.bounds.width >= 2.0 && window.bounds.height >= 2.0
         }),
         focused.map(|window_id| {
-            let title = crate::windows::window_info_by_id(window_id)
+            let title = crate::windows::describe_window(window_id)
                 .map(|window| window.title)
                 .unwrap_or_default();
             (window_id, title)
@@ -2861,7 +2907,7 @@ pub fn with_foreground_hid_activation(
         anyhow::bail!("could not resolve target window for foreground HID delivery");
     }
 
-    let focused_window_id = crate::ax::bindings::focused_window_id_of_pid(target_pid);
+    let focused_window_id = crate::ax::bindings::focused_window_ids_of_pid(target_pid);
     if preserves_exact_existing_focus(prev_ok, prev_psn, target_psn, focused_window_id, target_wid)
     {
         // Re-activating an already key exact window can clear Chromium's
@@ -2909,12 +2955,12 @@ fn preserves_exact_existing_focus(
     previous_process_known: bool,
     previous_psn: [u8; 8],
     target_psn: [u8; 8],
-    focused_window_id: Option<u32>,
+    focused_window_id: Option<crate::ax::exact_target::AxWindowId>,
     target_window_id: u32,
 ) -> bool {
     previous_process_known
         && previous_psn == target_psn
-        && focused_window_id == Some(target_window_id)
+        && focused_window_id.is_some_and(|focused| focused.is(target_window_id))
 }
 
 #[cfg(test)]
@@ -2925,6 +2971,7 @@ mod tests {
         reset_windowserver_connection_invalid_for_test, windowserver_connection_invalid,
         MENU_VALIDATION_KEY_CODE, WINDOWSERVER_INVALID_CONNECTION,
     };
+    use crate::ax::exact_target::AxWindowId;
 
     #[test]
     fn menu_validation_pair_is_exact_cmd_f20_down_and_up() {
@@ -3188,7 +3235,22 @@ mod tests {
     #[test]
     fn exact_existing_focus_avoids_reactivation() {
         let psn = [1, 2, 3, 4, 5, 6, 7, 8];
-        assert!(preserves_exact_existing_focus(true, psn, psn, Some(42), 42));
+        assert!(preserves_exact_existing_focus(
+            true,
+            psn,
+            psn,
+            Some(AxWindowId::window(42)),
+            42
+        ));
+    }
+
+    #[test]
+    fn a_focused_sheet_avoids_reactivation_for_the_sheet_and_its_window() {
+        let psn = [1, 2, 3, 4, 5, 6, 7, 8];
+        let sheet = Some(AxWindowId { own: 43, root: 42 });
+        assert!(preserves_exact_existing_focus(true, psn, psn, sheet, 42));
+        assert!(preserves_exact_existing_focus(true, psn, psn, sheet, 43));
+        assert!(!preserves_exact_existing_focus(true, psn, psn, sheet, 41));
     }
 
     #[test]
@@ -3199,21 +3261,21 @@ mod tests {
             false,
             target,
             target,
-            Some(42),
+            Some(AxWindowId::window(42)),
             42
         ));
         assert!(!preserves_exact_existing_focus(
             true,
             other,
             target,
-            Some(42),
+            Some(AxWindowId::window(42)),
             42
         ));
         assert!(!preserves_exact_existing_focus(
             true,
             target,
             target,
-            Some(41),
+            Some(AxWindowId::window(41)),
             42
         ));
         assert!(!preserves_exact_existing_focus(
@@ -3419,6 +3481,23 @@ mod key_prime_tests {
             let r = prime_exact_window_key(7, || focused, || false, || true, || true);
             assert!(r.unwrap_err().contains("no keys were sent"));
         }
+    }
+
+    #[test]
+    fn a_refused_key_names_the_window_that_holds_focus() {
+        let base = "window 5 could not be confirmed".to_string();
+        let named = super::with_blocker_hint(base.clone(), Some((9, "Tip of the Day")));
+        assert!(
+            named.contains("\"Tip of the Day\" (window_id 9)"),
+            "{named}"
+        );
+        assert!(named.contains("answer it"), "{named}");
+        let untitled = super::with_blocker_hint(base.clone(), Some((9, "")));
+        assert!(
+            untitled.contains("untitled window (window_id 9)"),
+            "{untitled}"
+        );
+        assert_eq!(super::with_blocker_hint(base.clone(), None), base);
     }
 }
 

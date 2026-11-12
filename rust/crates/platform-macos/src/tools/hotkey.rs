@@ -17,6 +17,7 @@ use std::sync::Arc;
 use crate::apps;
 use crate::focus_guard;
 use crate::window_change_detector::WindowChangeDetector;
+use cua_driver_core::security_prompt::PromptInput;
 
 use super::ToolState;
 
@@ -150,15 +151,60 @@ where
 
 fn focus_hotkey_element(pid: i32, element_ptr: usize) -> anyhow::Result<()> {
     let deadline = std::time::Instant::now() + HOTKEY_FOCUS_TIMEOUT;
+    focus_with_retry(
+        || crate::input::ax_actions::focus_element(element_ptr),
+        || crate::input::ax_actions::is_element_focused(pid, element_ptr),
+        || std::time::Instant::now() >= deadline,
+        || std::thread::sleep(HOTKEY_FOCUS_POLL_INTERVAL),
+    )
+}
+
+/// #279.1: a focus write that came back with an error the app may clear on
+/// its own (busy, a transient failure) is retried until the deadline, like a
+/// write that did not stick. Rewriting AXFocused=true is idempotent, and the
+/// hotkey is sent only after the focus read confirms it. A dead element,
+/// accessibility turned off and a bad argument repeat on every write, so
+/// they stop at once.
+fn focus_retry_allowed(error: &anyhow::Error) -> bool {
+    use crate::ax::bindings::{
+        kAXErrorAPIDisabled, kAXErrorIllegalArgument, kAXErrorInvalidUIElement,
+    };
+    error
+        .downcast_ref::<crate::input::ax_actions::FocusWriteError>()
+        .is_some_and(|failure| {
+            ![
+                kAXErrorInvalidUIElement,
+                kAXErrorAPIDisabled,
+                kAXErrorIllegalArgument,
+            ]
+            .contains(&failure.error)
+        })
+}
+
+fn focus_with_retry(
+    mut focus: impl FnMut() -> anyhow::Result<()>,
+    mut focused: impl FnMut() -> bool,
+    mut expired: impl FnMut() -> bool,
+    mut pause: impl FnMut(),
+) -> anyhow::Result<()> {
     loop {
-        crate::input::ax_actions::focus_element(element_ptr)?;
-        if crate::input::ax_actions::is_element_focused(pid, element_ptr) {
+        let write = focus();
+        if let Err(error) = &write {
+            if !focus_retry_allowed(error) {
+                return write;
+            }
+        }
+        if focused() {
             return Ok(());
         }
-        if std::time::Instant::now() >= deadline {
-            anyhow::bail!("requested hotkey element did not become focused");
+        if expired() {
+            return write.and_then(|()| {
+                Err(anyhow::anyhow!(
+                    "requested hotkey element did not become focused"
+                ))
+            });
         }
-        std::thread::sleep(HOTKEY_FOCUS_POLL_INTERVAL);
+        pause();
     }
 }
 
@@ -279,6 +325,7 @@ impl Tool for HotkeyTool {
                 );
             };
             let display = raw_keys.join("+");
+            let prompt = PromptInput::from_args(&args);
             let control = Arc::new(crate::input::key_hold::HoldControl::default());
             #[cfg(test)]
             let test_delivery = self.test_delivery.clone();
@@ -291,6 +338,7 @@ impl Tool for HotkeyTool {
                 if let Some(delivery) = test_delivery {
                     return delivery(&key, &modifier_refs, duration, &control);
                 }
+                crate::security_prompt::refuse_frontmost_keys(prompt)?;
                 crate::input::key_hold::deliver(
                     crate::input::key_hold::KeyRoute::Global(None),
                     &key,
@@ -307,7 +355,11 @@ impl Tool for HotkeyTool {
                         "path": "hid",
                         "effect": "unverifiable"
                     })),
-                Ok(Err(error)) => ToolResult::error(format!("desktop hotkey failed: {error}")),
+                Ok(Err(error)) => {
+                    crate::security_prompt::tool_result(&error).unwrap_or_else(|| {
+                        ToolResult::error(format!("desktop hotkey failed: {error}"))
+                    })
+                }
                 Err(error) => ToolResult::error(format!("desktop hotkey task failed: {error}")),
             };
         }
@@ -324,7 +376,12 @@ impl Tool for HotkeyTool {
         };
         let key_display = raw_keys.join("+");
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match latency::resolve(|| self.state.snapshots.resolve(pid, &args)) {
+        let evidence = crate::process_identity::evidence(&args, pid).await;
+        let resolved = match latency::resolve(|| {
+            self.state
+                .snapshots
+                .resolve_for_instance(pid, &args, evidence)
+        }) {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };
@@ -662,6 +719,7 @@ impl Tool for HotkeyTool {
         // and the prior frontmost is restored if the activation lingers.
         let prior_front = apps::frontmost_pid();
         let snapshot = WindowChangeDetector::snapshot(prior_front);
+        let prompt = PromptInput::from_args(&args);
 
         let control = Arc::new(crate::input::key_hold::HoldControl::default());
         let result = focus_guard::with_focus_suppressed(
@@ -702,9 +760,9 @@ impl Tool for HotkeyTool {
                                 wid,
                                 || {
                                     if screen_sharing_target {
-                                        crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control)
+                                        { crate::security_prompt::refuse_frontmost_keys(prompt)?; crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control) }
                                     } else {
-                                        crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Global(Some(pid)), &key, &m, duration, &control)
+                                        { crate::security_prompt::refuse_frontmost_keys(prompt)?; crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Global(Some(pid)), &key, &m, duration, &control) }
                                     }
                                 },
                             )?;
@@ -720,7 +778,7 @@ impl Tool for HotkeyTool {
                                 wid,
                                 || {
                                     focus_hotkey_element(pid, ptr)?;
-                                    crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control)
+                                    { crate::security_prompt::refuse_frontmost_keys(prompt)?; crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control) }
                                 },
                             )?;
                             Ok(())
@@ -730,7 +788,7 @@ impl Tool for HotkeyTool {
                                 pid as libc::pid_t,
                                 wid,
                                 || {
-                                    crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control)
+                                    { crate::security_prompt::refuse_frontmost_keys(prompt)?; crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control) }
                                 },
                             )?;
                             Ok(())
@@ -767,7 +825,8 @@ impl Tool for HotkeyTool {
             Ok(Err(e)) if e.is::<super::press_key::WindowFocusConflictError>() => {
                 super::press_key::delivery_failed(e)
             }
-            Ok(Err(e)) => ToolResult::error(format!("hotkey failed: {e}")),
+            Ok(Err(e)) => crate::security_prompt::tool_result(&e)
+                .unwrap_or_else(|| ToolResult::error(format!("hotkey failed: {e}"))),
             Err(e) => ToolResult::error(format!("Task error: {e}")),
         }
     }
@@ -829,6 +888,85 @@ fn delivered_structured(foreground: bool) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// #279.1: an AXFocused write the app could not finish (busy, a transient
+    /// failure) is retried until the deadline like a write that did not
+    /// stick; the hotkey still goes only after the focus read confirms it.
+    /// Errors that repeat (a dead element, accessibility off, a bad
+    /// argument) stop at once.
+    #[test]
+    fn a_transient_focus_write_error_keeps_polling_until_the_deadline() {
+        use crate::ax::bindings::{
+            kAXErrorAPIDisabled, kAXErrorCannotComplete, kAXErrorFailure, kAXErrorIllegalArgument,
+            kAXErrorInvalidUIElement,
+        };
+        use crate::input::ax_actions::FocusWriteError;
+        use cua_driver_core::mutation::{Reason, WriteOutcome};
+        use std::cell::Cell;
+        let refused = |code| -> anyhow::Result<()> {
+            Err(FocusWriteError {
+                error: code,
+                outcome: WriteOutcome::StopUncertain(Reason::Unknown),
+            }
+            .into())
+        };
+
+        for busy in [kAXErrorCannotComplete, kAXErrorFailure] {
+            let writes = Cell::new(0);
+            let result = super::focus_with_retry(
+                || {
+                    writes.set(writes.get() + 1);
+                    if writes.get() < 3 {
+                        refused(busy)
+                    } else {
+                        Ok(())
+                    }
+                },
+                || writes.get() >= 3,
+                || false,
+                || {},
+            );
+            assert!(result.is_ok(), "{busy}: {result:?}");
+            assert_eq!(writes.get(), 3, "{busy}");
+
+            let polls = Cell::new(0);
+            let error = super::focus_with_retry(
+                || refused(busy),
+                || false,
+                || {
+                    polls.set(polls.get() + 1);
+                    polls.get() > 4
+                },
+                || {},
+            )
+            .expect_err("a busy app until the deadline stops");
+            assert_eq!(polls.get(), 5, "{busy}");
+            assert_eq!(
+                error.downcast_ref::<FocusWriteError>().map(|e| e.error),
+                Some(busy),
+                "the last write error is reported"
+            );
+        }
+
+        for repeats in [
+            kAXErrorInvalidUIElement,
+            kAXErrorAPIDisabled,
+            kAXErrorIllegalArgument,
+        ] {
+            let writes = Cell::new(0);
+            let result = super::focus_with_retry(
+                || {
+                    writes.set(writes.get() + 1);
+                    refused(repeats)
+                },
+                || panic!("{repeats}: no focus read after a write that will repeat"),
+                || false,
+                || {},
+            );
+            assert!(result.is_err(), "{repeats}");
+            assert_eq!(writes.get(), 1, "{repeats}");
+        }
+    }
+
     #[test]
     fn window_hotkey_reaches_frontmost_disabled_chord_decision() {
         let result = super::lookup_native_menu(true, || Some(())).and_then(|()| {

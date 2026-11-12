@@ -87,6 +87,11 @@ pub mod atspi;
 #[cfg(any(target_os = "linux", test))]
 mod snapshot_queries;
 
+// Pure `process_instance` labelling decisions for answers that name a pid
+// (#299); ungated so its table tests run on any host.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) mod process_instances;
+
 #[cfg(target_os = "linux")]
 pub mod a11y;
 
@@ -98,6 +103,8 @@ pub mod video_wayland;
 
 #[cfg(target_os = "linux")]
 pub mod wayland;
+
+pub mod desktop;
 
 // Pure AT-SPI role / X cursor name tables for presence cursor shapes; tested
 // on every host.
@@ -170,6 +177,7 @@ pub(crate) mod test_env {
         };
         std::env::set_var("DISPLAY", display);
         std::env::remove_var("WAYLAND_DISPLAY");
+        crate::desktop::reclassify();
         guard
     }
 
@@ -184,6 +192,7 @@ pub(crate) mod test_env {
                     None => std::env::remove_var(name),
                 }
             }
+            crate::desktop::reclassify();
         }
     }
 }
@@ -273,7 +282,7 @@ pub fn register_tools_with_cursor_and_provider(
 /// read-only commands such as describe/list-tools must not mutate X11 devices.
 #[cfg(target_os = "linux")]
 pub fn recover_orphaned_mpx_devices() {
-    input::reap_orphaned_master_pointers();
+    input::release_orphaned_master_pairs();
 }
 
 #[cfg(test)]

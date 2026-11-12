@@ -181,7 +181,7 @@ The fields sit next to `code` on an error result, next to `refusal` on a browser
 
 `retry: safe` means a retry cannot duplicate input into an application; it is not permission to retry and says nothing about file or other side effects.
 
-After three single action calls in a row in one session (not counting reads), the result of the third also carries a `hint` to chain the next ones with `run_steps`, and again after every third. It is advice with no `next_call`, and it is never sent for a step that already runs inside `run_steps` or `run_script`. Every model turn costs seconds, so chain actions whenever you already know the next few steps.
+After two single action calls in a row in one session (not counting reads), the result of the second also carries a `hint` with a ready `run_steps` call for that window (add `observe:{}` instead of a separate read), and again after every second one. It is advice with no `next_call`, and it is never sent for a step that already runs inside `run_steps` or `run_script`. Every model turn costs seconds, so chain actions whenever you already know the next few steps.
 
 When the postcondition is visibly satisfied, stop acting. For media, selection alone is not playback: check the title, playing/pause indicator, and elapsed progress after preroll/buffering. For closure, verify the requested window disappeared. State only what the evidence proves.
 

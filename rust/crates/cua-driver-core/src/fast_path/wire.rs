@@ -172,10 +172,17 @@ pub fn skip_reread_screenshot(args: &Value, pid: i32, window_id: u64) -> bool {
     {
         return false;
     }
-    match super::store::global().latest_stats(pid, window_id) {
+    match super::store::global().latest_stats(pid, window_id, session_of(args)) {
         Some((elements, thin)) => elements >= 10 && thin * 2 <= elements,
         None => false,
     }
+}
+
+/// The session a tool call runs as, as the daemon named it. `None` is the
+/// unnamed (daemon-global) caller; the fast-path store only matches it with
+/// entries that same caller published.
+pub fn session_of(args: &Value) -> Option<&str> {
+    args.get("_session_id").and_then(Value::as_str)
 }
 
 /// Tools whose direct (unbatched) result gets a delta when the mode is `on`.
@@ -196,10 +203,19 @@ pub fn returns_delta(tool: &str) -> bool {
 
 /// The window a direct action's delta is read from, when the mode is `on`.
 /// From `pid`/`window_id`, or from the snapshot an `element_token` names.
-pub fn delta_target(args: &Value) -> Option<(i32, u64)> {
+/// `session` is the runtime session the caller's reads run as (the caller
+/// derives it, since these arguments are read before dispatch names it): a
+/// token only maps to a window this session read (#288 review).
+pub fn delta_target(args: &Value, session: Option<&str>) -> Option<(i32, u64)> {
     if !mode().deltas() {
         return None;
     }
+    delta_window(args, session)
+}
+
+/// [`delta_target`] without the mode check: the window these arguments
+/// name for `session`.
+fn delta_window(args: &Value, session: Option<&str>) -> Option<(i32, u64)> {
     let pid = args.get("pid").and_then(Value::as_i64).map(|p| p as i32);
     let window = args.get("window_id").and_then(Value::as_u64);
     if let (Some(pid), Some(window)) = (pid, window) {
@@ -210,7 +226,7 @@ pub fn delta_target(args: &Value) -> Option<(i32, u64)> {
         .and_then(Value::as_str)
         .and_then(crate::element_token::parse_token)?;
     super::store::global()
-        .element(snapshot, index)
+        .element(snapshot, index, session)
         .map(|(pid, window, _)| (pid, window))
 }
 
@@ -310,6 +326,45 @@ mod tests {
         assert_eq!(s["path"], "ax");
         assert_eq!(s["fast_path"]["delta"]["snapshot_id"], "s00000002");
         assert_eq!(result.content.len(), 2);
+    }
+
+    /// #288 review: a token maps to its window only for the session that
+    /// recorded the snapshot, and only for an element it listed. Read
+    /// through the mode-free lookup, so the test never turns the daemon-wide
+    /// mode on under concurrent `tool::` dispatch tests.
+    #[test]
+    fn an_element_token_delta_maps_only_its_sessions_snapshot() {
+        let _guard = crate::fast_path::tests_lock();
+        let snapshot = 3_900_000_123;
+        super::super::store::global().put_snapshot(
+            snapshot,
+            super::super::store::SnapshotFingerprints {
+                pid: 77,
+                window_id: 9,
+                session: Some("__cua_runtime_x:implicit-direct".into()),
+                elements: vec![Default::default()],
+                element_count: 1,
+                thin_frames: 0,
+            },
+        );
+        let args = json!({ "element_token": crate::element_token::token_for(snapshot, 0) });
+        let session = Some("__cua_runtime_x:implicit-direct");
+        let own = delta_window(&args, session);
+        let foreign = delta_window(&args, Some("__cua_runtime_x:other"));
+        let unnamed = delta_window(&args, None);
+        let past_the_list = delta_window(
+            &json!({ "element_token": crate::element_token::token_for(snapshot, 1) }),
+            session,
+        );
+        let absent = delta_window(
+            &json!({ "element_token": crate::element_token::token_for(snapshot + 1, 0) }),
+            session,
+        );
+        assert_eq!(own, Some((77, 9)));
+        assert_eq!(
+            (foreign, unnamed, past_the_list, absent),
+            (None, None, None, None)
+        );
     }
 
     #[test]

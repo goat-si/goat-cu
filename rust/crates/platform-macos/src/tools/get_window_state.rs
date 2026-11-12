@@ -614,6 +614,15 @@ impl Tool for GetWindowStateTool {
         let mut prefetched_facts: Option<cua_driver_core::background_input::BackgroundTargetFacts> =
             None;
         let abandon_events_before_prefetch = crate::capture::native_capture_abandon_events();
+        // AD-G2: the process instance this read names, taken before the walk
+        // and again before publication; a read that spans a restart publishes
+        // a failed capture, whose tokens refuse.
+        let instance_before = latency::spawn_blocking(move || {
+            crate::process_identity::process_fingerprint(i64::from(pid))
+        })
+        .await
+        .ok()
+        .flatten();
         let prefetched_capture = prefetch_capture(should_capture, want_tree, move || {
             crate::capture::screenshot_window_image(window_id)
         });
@@ -739,6 +748,7 @@ impl Tool for GetWindowStateTool {
         let screenshot = if should_capture {
             let out_file = screenshot_out_file.clone();
             let panel_args = args.clone();
+            let fast_path_session = session_id.clone();
             let side_facts = !want_tree && !display_only;
             let res = latency::spawn_blocking(move || {
                 std::thread::scope(|scope| {
@@ -770,7 +780,13 @@ impl Tool for GetWindowStateTool {
                     &bounds,
                     || crate::capture::screenshot_window_image(window_id),
                 )?;
-                crate::fast_path_guard::record_read_image(pid, window_id, &raw, &bounds);
+                crate::fast_path_guard::record_read_image(
+                    pid,
+                    window_id,
+                    &raw,
+                    &bounds,
+                    fast_path_session.as_deref(),
+                );
                 // Resize and encode once from the raw pixels; the PNG bytes
                 // are identical to the former encode-decode-resize round trip.
                 // The model-sized screenshot is capped at point resolution by
@@ -948,18 +964,32 @@ impl Tool for GetWindowStateTool {
             (screenshot_resize_scale.is_some() && refreshed.is_none())
                 .then(|| crate::ax::snapshot::AxSnapshot::from_nodes(&[]))
         });
+        let instance_after = latency::spawn_blocking(move || {
+            crate::process_identity::process_fingerprint(i64::from(pid))
+        })
+        .await
+        .ok()
+        .flatten();
+        let instance =
+            crate::process_identity::instance_capture(pid, instance_before, instance_after);
+        // #299: report the instance only when the read proved one process
+        // start throughout and published the snapshot it describes.
+        let process_instance =
+            crate::process_identity::reported_label(&instance, refreshed.is_some());
         let (snapshot_id, replaced) = match refreshed {
             Some(id) => (Some(id), None),
             None => snapshot_payload
                 .filter(|_| scope_matched && !observation_only)
                 .and_then(|payload| {
-                    self.state.snapshots.publish_sized_for_session(
+                    crate::process_identity::publish_read(
+                        &self.state.snapshots,
                         pid,
                         u64::from(window_id),
                         payload,
                         session_id.as_deref(),
                         screenshot_resize_scale,
                         window_size,
+                        instance,
                     )
                 })
                 .unzip(),
@@ -971,9 +1001,10 @@ impl Tool for GetWindowStateTool {
                     u64::from(window_id),
                     sid,
                     &tree.nodes,
+                    session_id.as_deref(),
                 );
                 if screenshot.is_none() {
-                    crate::fast_path_guard::record_window(pid, window_id);
+                    crate::fast_path_guard::record_window(pid, window_id, session_id.as_deref());
                 }
             }
         }
@@ -1057,6 +1088,9 @@ impl Tool for GetWindowStateTool {
             requested_pid,
             external_panel,
         );
+        if let Some(label) = &process_instance {
+            structured["process_instance"] = serde_json::json!(label);
+        }
         // Surface 6: an opaque snapshot identifier consumers can log
         // alongside the per-element tokens for debug correlation. Same value
         // embedded in every `element_token` emitted in `elements[]` above.
@@ -1154,16 +1188,16 @@ impl Tool for GetWindowStateTool {
                                you cannot wait."
                 });
             }
-            Degradation::AxWindowUnresolved { ax_window_count } => {
+            Degradation::AxWindowUnresolved {
+                ax_window_count,
+                ax_windows_error,
+            } => {
                 structured["degraded"] = serde_json::json!(true);
-                structured["degraded_reason"] = serde_json::json!(format!(
-                    "ax_window_unresolved: window_id {window_id} exists and is owned by \
-                     pid {pid}, but none of the {ax_window_count} AXWindow element(s) \
-                     under that pid reports this CGWindowID. The tree is returned EMPTY \
-                     on purpose: the accessibility elements reachable under this pid \
-                     belong to other surfaces (the menu bar, other windows), not to the \
-                     requested window, so presenting them would misground the next \
-                     action."
+                structured["degraded_reason"] = serde_json::json!(ax_window_unresolved_reason(
+                    window_id,
+                    pid,
+                    ax_window_count,
+                    ax_windows_error,
                 ));
                 structured["escalation"] = serde_json::json!({
                     "recommended": "foreground",
@@ -1237,7 +1271,7 @@ impl Tool for GetWindowStateTool {
         // names the surface even on the capture-only path, where no AX tree is
         // present to identify it. Omitted per-field when WindowServer reports an
         // empty string.
-        if let Some(info) = crate::windows::window_info_by_id(window_id) {
+        if let Some(info) = crate::windows::describe_window(window_id) {
             if !info.app_name.is_empty() {
                 structured["app_name"] = serde_json::json!(info.app_name);
             }
@@ -1411,7 +1445,10 @@ enum Degradation {
     AxTreeEmpty,
     /// The requested window is live and owned by this pid, but no AXWindow
     /// claims its CGWindowID, so the walk deliberately covered nothing.
-    AxWindowUnresolved { ax_window_count: usize },
+    AxWindowUnresolved {
+        ax_window_count: usize,
+        ax_windows_error: Option<crate::ax::bindings::AXError>,
+    },
     /// The window scope is unresolved because the app is still launching and
     /// did not answer accessibility within the caller's budget.
     AxAppLaunching,
@@ -1447,12 +1484,17 @@ fn degradation_for(
     if !walk_attempted {
         return Degradation::None;
     }
-    if let Some(crate::ax::WindowScope::AxUnresolved { ax_window_count }) = scope {
+    if let Some(crate::ax::WindowScope::AxUnresolved {
+        ax_window_count,
+        ax_windows_error,
+    }) = scope
+    {
         if app_lookup_timed_out {
             return Degradation::AxAppLaunching;
         }
         return Degradation::AxWindowUnresolved {
             ax_window_count: *ax_window_count,
+            ax_windows_error: *ax_windows_error,
         };
     }
     if let Some(crate::ax::WindowScope::SheetOfWindow { parent_window_id }) = scope {
@@ -1464,6 +1506,30 @@ fn degradation_for(
         return Degradation::AxTreeEmpty;
     }
     Degradation::None
+}
+
+fn ax_window_unresolved_reason(
+    window_id: u32,
+    pid: i32,
+    ax_window_count: usize,
+    ax_windows_error: Option<crate::ax::bindings::AXError>,
+) -> String {
+    let evidence = match ax_windows_error {
+        Some(error) => format!(
+            "reading that pid's AXWindows failed with AXError {error} ({})",
+            crate::ax::bindings::ax_error_name(error)
+        ),
+        None => format!(
+            "none of the {ax_window_count} AXWindow element(s) under that pid reports this \
+             CGWindowID"
+        ),
+    };
+    format!(
+        "ax_window_unresolved: window_id {window_id} exists and is owned by pid {pid}, but \
+         {evidence}. The tree is returned EMPTY on purpose: the accessibility elements \
+         reachable under this pid belong to other surfaces (the menu bar, other windows), \
+         not to the requested window, so presenting them would misground the next action."
+    )
 }
 
 /// Render the actionable nodes from the AX walk into the
@@ -2056,8 +2122,15 @@ mod window_scope_contract_tests {
     fn resolvable_scopes_are_not_refused() {
         assert!(window_scope_refusal(800, 11, &WindowScope::Matched).is_none());
         assert!(
-            window_scope_refusal(800, 11, &WindowScope::AxUnresolved { ax_window_count: 2 })
-                .is_none(),
+            window_scope_refusal(
+                800,
+                11,
+                &WindowScope::AxUnresolved {
+                    ax_window_count: 2,
+                    ax_windows_error: None
+                }
+            )
+            .is_none(),
             "a live same-pid window degrades; it does not error"
         );
     }
@@ -2071,11 +2144,42 @@ mod window_scope_contract_tests {
             degradation_for(
                 true,
                 0,
-                Some(&WindowScope::AxUnresolved { ax_window_count: 3 }),
+                Some(&WindowScope::AxUnresolved {
+                    ax_window_count: 3,
+                    ax_windows_error: None
+                }),
                 false
             ),
-            Degradation::AxWindowUnresolved { ax_window_count: 3 }
+            Degradation::AxWindowUnresolved {
+                ax_window_count: 3,
+                ax_windows_error: None
+            }
         );
+    }
+
+    #[test]
+    fn an_ax_windows_read_error_is_named_instead_of_a_zero_window_count() {
+        let error = Some(crate::ax::bindings::kAXErrorCannotComplete);
+        let degradation = degradation_for(
+            true,
+            0,
+            Some(&WindowScope::AxUnresolved {
+                ax_window_count: 0,
+                ax_windows_error: error,
+            }),
+            false,
+        );
+        assert_eq!(
+            degradation,
+            Degradation::AxWindowUnresolved {
+                ax_window_count: 0,
+                ax_windows_error: error
+            }
+        );
+        let reason = ax_window_unresolved_reason(800, 11, 0, error);
+        assert!(reason.contains("AXError -25204 (kAXErrorCannotComplete)"));
+        assert!(!reason.contains("none of the 0 AXWindow"));
+        assert!(ax_window_unresolved_reason(800, 11, 2, None).contains("none of the 2 AXWindow"));
     }
 
     /// DSH-29: a Save sheet read by its own window id points at the document
@@ -2103,7 +2207,10 @@ mod window_scope_contract_tests {
             degradation_for(
                 true,
                 0,
-                Some(&WindowScope::AxUnresolved { ax_window_count: 0 }),
+                Some(&WindowScope::AxUnresolved {
+                    ax_window_count: 0,
+                    ax_windows_error: None
+                }),
                 true
             ),
             Degradation::AxAppLaunching
@@ -2123,7 +2230,10 @@ mod window_scope_contract_tests {
         let unresolved = degradation_for(
             true,
             0,
-            Some(&WindowScope::AxUnresolved { ax_window_count: 0 }),
+            Some(&WindowScope::AxUnresolved {
+                ax_window_count: 0,
+                ax_windows_error: None,
+            }),
             false,
         );
         assert_eq!(

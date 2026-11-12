@@ -52,6 +52,11 @@ use windows::Win32::UI::Accessibility::{
 ///
 /// `None` means the property could not be read. Callers fail open in that case
 /// so a transient UIA query never blocks an otherwise valid coordinate action.
+///
+/// # Safety
+///
+/// `element_ptr` must be zero or a live `IUIAutomationElement` pointer that the
+/// caller retains for the duration of the call.
 pub unsafe fn element_is_offscreen(element_ptr: usize) -> Option<bool> {
     if element_ptr == 0 {
         return None;
@@ -73,12 +78,6 @@ pub unsafe fn element_is_offscreen(element_ptr: usize) -> Option<bool> {
 ///
 /// Returns `None` when neither strategy lands the element inside its host
 /// window - callers fall back to the existing off-screen failure in that case.
-///
-/// # Safety
-/// `element_ptr` must be a live `IUIAutomationElement` vtable pointer. Callers
-/// hold it alive through a `RetainedElement` guard (its COM `AddRef`) for the
-/// duration of this call. We borrow the pointer without consuming the cache's
-/// refcount (the constructed handle is `forget`-ten before return).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RevealOutcome {
     NotNeeded((i32, i32)),
@@ -87,6 +86,12 @@ pub(crate) enum RevealOutcome {
     Uncertain,
 }
 
+/// # Safety
+///
+/// `element_ptr` must be a live `IUIAutomationElement` vtable pointer. Callers
+/// hold it alive through a `RetainedElement` guard (its COM `AddRef`) for the
+/// duration of this call. We borrow the pointer without consuming the cache's
+/// refcount (the constructed handle is `forget`-ten before return).
 pub(crate) unsafe fn scroll_into_view_and_recenter(
     host_hwnd: u64,
     element_ptr: usize,
@@ -157,6 +162,13 @@ pub(crate) struct ScrollWrite {
     pub stop: Option<crate::uia_mutation::MutationStop>,
 }
 
+/// Scroll the cached container `element_ptr` names, recording each write so a
+/// partial or uncertain scroll reports what it completed.
+///
+/// # Safety
+///
+/// `element_ptr` must be a live `IUIAutomationElement` pointer that the caller
+/// retains for the duration of the call.
 pub(crate) unsafe fn scroll_element(
     element_ptr: usize,
     direction: &str,

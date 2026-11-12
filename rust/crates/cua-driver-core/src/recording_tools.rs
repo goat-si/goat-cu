@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 
 use crate::{
     protocol::ToolResult,
-    recording::{RecordingSession, RecordingState},
+    recording::{RecordingSession, RecordingState, StopBy},
     tool::{Tool, ToolDef, ToolRegistry},
 };
 
@@ -186,8 +186,9 @@ impl Tool for StartRecordingTool {
                 } else if video_failed {
                     let err = state.last_error.clone().unwrap_or_else(|| "unknown".into());
                     let hint = if crate::video_ffmpeg::find_ffmpeg().is_none() {
-                        "\n\nffmpeg was not found. Call install_ffmpeg (then again with \
-                         confirm=true) to install it, then restart recording."
+                        "\n\nffmpeg was not found. Install it with your package manager \
+                         (brew install ffmpeg, winget install Gyan.FFmpeg, or \
+                         apt/dnf/pacman install ffmpeg), then restart recording."
                     } else {
                         ""
                     };
@@ -244,10 +245,9 @@ impl Tool for StopRecordingTool {
     }
 
     async fn invoke(&self, _args: Value) -> ToolResult {
-        // Manual stop is unconditional — `None` requester tears down whatever
-        // recording is active. Session-scoped teardown is driven by the
-        // registry-owned session-end hook, which calls `stop_owner(sid)`.
-        match self.session.stop_owner(None) {
+        // Manual stop tears down whatever recording is live. Session-scoped
+        // teardown is the registry-owned session-end hook's `StopBy::Owner`.
+        match self.session.stop(StopBy::Anyone) {
             Ok(()) => {
                 let state = self.session.current_state();
                 let video_note = state
@@ -928,7 +928,7 @@ mod tests {
                 expected,
                 "{args}"
             );
-            session.stop_owner(None).unwrap();
+            session.stop(StopBy::Anyone).unwrap();
         }
     }
 
@@ -975,7 +975,7 @@ mod tests {
         let text = serde_json::to_string(&result.content).unwrap()
             + &serde_json::to_string(&result.structured_content).unwrap_or_default();
         assert!(!text.contains("hunter2-Secret"), "{text}");
-        session.stop_owner(None).unwrap();
+        session.stop(StopBy::Anyone).unwrap();
         for entry in std::fs::read_dir(directory.path()).unwrap() {
             let path = entry.unwrap().path();
             if path.is_file() {
