@@ -72,3 +72,7 @@ Method as 015-017: `git merge-file` per file (`/tmp/goat-cu-sync/wp1h-trial.sh`)
 
 NOT RUN: live multi-display macOS overlay, live GNOME Shell helper, the GTK3 e2e harness (incl. upstream's disabled-control case),
 Windows runtime, PowerShell installer tests.
+
+Reviews: A (macOS cursor) PASS; B (the rest) NEAR-PASS. Follow-ups from them: 08c5ca6e (Windows `element_is_enabled` joins COM
+before reading, so the disabled refusal cannot fail open), ed282703 (the AX click's retired `ShowFocusRect` send, which the merge
+had left in place). Whole-head receipt at ed282703: 24 steps, failures=0 (050).

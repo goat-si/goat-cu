@@ -79,6 +79,9 @@
 | 7d048914 | final review before merge | type_text message "Return not confirmed" (a failed post may have gone out); libei wait counts text parts only; GOAT.md names both chord refusal codes |
 | c2067c65 | wp1h | sync 56a69039 → 7dc3cc43 (018): macOS cursor on every display and action marks retired, with GOAT's #287 parked loop and no-guessed-scale rule; disabled Linux/Windows controls indexed and refused; Computer History deprecated (GOAT's start guide too); permissions direct-capture status; installer 0.47.19; vendored cua-telemetry 0.26.0 |
 | 9b9b29af | wp1h | upstream's Windows-only disabled-row test sets GOAT's `checked`/`expanded` (Windows-target check 101 → 0) |
+| af2d3826 | docs | wp1h record (018) |
+| 08c5ca6e | wp1h review B | Windows `element_is_enabled` joins COM before reading `IsEnabled`, so the disabled-control refusal cannot fail open on a fresh blocking-pool thread |
+| ed282703 | wp1h review A | macOS AX click drops the retired `ShowFocusRect` send (upstream's removal the merge had not re-applied) |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -109,6 +112,11 @@ Re-fetch before the last D (~16:20 UTC): origin/main `40c6f6eb` and agent-deskto
   `PointOwnership::Unknown` and the caller presses unguarded (`atspi/native/hit_test.rs:309`, fail-open predates this lane). Smallest
   fixes: skip the substitution when parent and hit node name different buses; reserve a budget slice for the stacking pass.
 - `rust/VERSION` (0.38.0-goat.1) lags the workspace version (0.40.1-goat.1), identically on origin/main; nothing reads it.
+- wp1h review B: GOAT's `press_key`/`hotkey` token paths do not refuse a disabled target on any platform (macOS reads `AXEnabled`
+  only for menu chords; Windows `tools/press_key.rs:275-281`, `tools/hotkey.rs:396`; Linux `tools/press_key.rs:146`). Disabled controls
+  are indexed on Linux and Windows since wp1h, as on macOS, so a key sent by token can reach one. Smallest fix: call each platform's
+  `refuse_if_disabled` after resolving the token, before focus. And both platforms' `refuse_if_disabled` let a tool act when the live
+  state cannot be read (upstream's design; a destroyed element is caught by the stale-token checks).
 - `run_steps` copies a step's `hint`/`next_call` into its report only for a failed step (`batch_tools.rs:1849-1868`), so a non-error
   step that carries advice (type_text's landed line without its Return) reaches a batched caller only through the 300-character
   message; a3bd993b puts both instructions in its first 220 characters. Copying hints for ok steps changes run_steps output for every
@@ -233,6 +241,7 @@ change is provably additive. `contract/manifest.json` and both UniFFI binding se
 | whole head | eb04e2a0 | `/tmp/goat-cu-sync/receipt-final.sh` 24 steps, failures=0: kache doctor, host `cargo check --all-targets` (platform-macos, core, cursor-overlay, cua-driver, sdk, contract), core lib + integration, contract lib, cursor-overlay lib, platform-macos lib, platform-windows host, Linux x86_64 and Windows MSVC target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, cargo deny, `cargo build -p cua-driver`, platform-linux host lib, e2e `--tests` check, check_protocol, protocol and output deltas, Wayland helper node checks. Linux container at the same content: cursor-overlay 157, platform-linux --lib --features portal-input 1229 / 15 ignored; default features 1170 / 15 and clippy at ff6658cc (no Rust change after it but fd7b782a's test-only doc) |
 | whole head | 7cac46e0 | the same 24 steps, failures=0. Linux container: cursor-overlay 157, cua-driver-core --lib 1826 / 3, platform-linux --lib 1171 / 15 (with and without a leaked marker) and clippy; portal-input 1229 / 1 failed under the receipt's concurrent load (`a_text_stops_when_its_tool_call_is_over`, a fixed-settle test from upstream), 1230 / 0 rerun idle → fixed in 743260c6 (portal-input 1230 / 15, default 1171 / 15, clippy both, 30/30 standalone) |
 | wp1h | c2067c65 / 9b9b29af | receipt 22/24 at c2067c65 (windows-target, windows-bins: E0063 in upstream's Windows-only test) → both 0 at 9b9b29af; focused suites and the Linux container in 018 |
+| whole head | ed282703 | 24 steps, failures=0: core-lib 1825 / 3, core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 207, linux-host 110, Linux and Windows target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol (compatible in every launch form; daemon 0.8.0 = 0.8.0), protocol delta problems 0 (only `invoke_menu.delivery_mode`; set_config/type_text reworded), output delta adds only `process_instance`, helper tests. Linux container at c2067c65 (no Linux code after it): platform-linux 1173 / 15, portal-input 1232 / 15, cursor-overlay 158, core 1826 / 3, clippy both feature sets |
 
 Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
 

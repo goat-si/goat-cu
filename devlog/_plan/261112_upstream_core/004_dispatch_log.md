@@ -206,3 +206,11 @@ codes. All in 7d048914; round 2 with the same reviewer (`cu-final-review-7d04891
 2026-11-12: the re-fetch before the last D found trycua/cua at 7dc3cc43 → unit wp1h (018). Fresh reviews dispatched at c2067c65, split as in
 earlier units: `cu-review-wp1h-a-c2067c65-s24` (macOS cursor, #287, scale rule) and `cu-review-wp1h-b-c2067c65-s24` (disabled controls,
 history, permissions, releases, completeness; 9b9b29af added to its scope); both returned codex / system24/deepseek-v4.1-flash / high.
+2026-11-12: both wp1h reviews steered at 17:25 UTC past their 60-minute bound. `cu-review-wp1h-b-c2067c65-s24` NEAR-PASS: completeness,
+GOAT patches, versions, history deprecation and 9b9b29af sound; F1 medium (Windows `element_is_enabled` read UIA without COM on a
+blocking-pool thread, so the disabled refusal failed open) accepted → 08c5ca6e (Windows target check and clippy 0, host 207; runtime
+NOT RUN); F2 (press_key/hotkey do not refuse a disabled token; macOS neither) and F3 (unreadable state acts) accepted as 050 follow-ups.
+`cu-review-wp1h-a-c2067c65-s24` PASS: per-display rendering, #287 parked loop, known_scale and the exemption re-pin verified (it
+recomputed the fingerprint); low, the AX click still sent the retired `ShowFocusRect` → ed282703 (macOS lib 2038 / 48, clippy 0);
+`_cueRequested` residue identical in upstream, kept. Fresh final review of 08c5ca6e and ed282703 dispatched as
+`cu-final-review-ed282703-s24` (codex / system24/deepseek-v4.1-flash / high). Receipt at ed282703: 24/24.
