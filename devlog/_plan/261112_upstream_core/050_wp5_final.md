@@ -61,6 +61,8 @@
 | ff6658cc | wp3c delta review | coded undelivered AX refusals (right_click, double_click, press_key, non-fronted scroll) are typed NOT_DELIVERED, so a run_steps step that sent nothing counts as not delivered (was DeliveredUnverified / retry Unsafe); GOAT.md fronted-window exception; Linux fd test marker carries the spawning pid |
 | 8939c283 | docs | wp3c delta review r2 decisions |
 | 8248c43b | wp1g | sync b9e38d1a → 56a69039 (cua-driver-rs 0.47.19): CHANGELOG entry, published installer version 0.47.18; GOAT keeps its versions (017) |
+| eb04e2a0 | docs | wp1g re-fetch and unit record |
+| fd7b782a | wp1f/CI review | `ToolRegistry::isolate_desktop` doc names its limit: calls dispatched through the registry only (test-only item) |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -87,6 +89,11 @@ Re-fetch after ff6658cc (~11:45 UTC): origin/main `40c6f6eb` and agent-desktop `
   `PointOwnership::Unknown` and the caller presses unguarded (`atspi/native/hit_test.rs:309`, fail-open predates this lane). Smallest
   fixes: skip the substitution when parent and hit node name different buses; reserve a budget slice for the stacking pass.
 - `rust/VERSION` (0.38.0-goat.1) lags the workspace version (0.40.1-goat.1), identically on origin/main; nothing reads it.
+- wp1f review P3 (upstream b9e38d1a, taken as merged): `wayland/text_keys.rs:90` opens the literal `libxkbcommon.so.0`, so a future
+  static or bundled libxkbcommon build would refuse typing as "needs libxkbcommon 1.0" although the symbols are present; no such
+  artifact ships. And about 20 unit tests (`niri/keyboard.rs:816` onward, `libei.rs:3527` onward) unwrap `xkb1()`, so a
+  `platform-linux --lib` job on a libxkbcommon 0.10 host (Ubuntu 20.04) would panic rather than exercise the refusal; no such lane
+  exists (CI and the receipt container have 1.x).
 - wp1c round-2 review P3 (rebutted, residual): the `TypeTextDelivery` → `line_without_return` mapping in `type_text` `invoke` is two
   adjacent arms with no direct test; both ends are pinned (`submit_step`, `completed_text_result`), and pinning the arms needs a
   delivery-enum or AX-rung restructure.
@@ -199,6 +206,7 @@ change is provably additive. `contract/manifest.json` and both UniFFI binding se
 | wp1b | d5e23ca6 | failures=0 (fixed helper): core browser 329, cursor-overlay 157, e2e standalone_browser_behavior 3, macOS security_prompt 10, browser 104, Linux container platform-linux 1168 |
 | wp1c | d0fb0350 | failures=0: macOS type_text 60, type_text_chars 4, e2e check, Linux container platform-linux 1168 |
 | wp1e | 068c9a00 | failures=0 (15 steps): contract 91, contract-gen --check, uniffi --check, contract_parity, schema_consistency, protocol_schema_test 2, check_protocol, macOS invoke_menu 33, windows host 207, Linux container 1168, requalify new tests 2, python compat 2 |
+| whole head | eb04e2a0 | `/tmp/goat-cu-sync/receipt-final.sh` 24 steps, failures=0: kache doctor, host `cargo check --all-targets` (platform-macos, core, cursor-overlay, cua-driver, sdk, contract), core lib + integration, contract lib, cursor-overlay lib, platform-macos lib, platform-windows host, Linux x86_64 and Windows MSVC target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, cargo deny, `cargo build -p cua-driver`, platform-linux host lib, e2e `--tests` check, check_protocol, protocol and output deltas, Wayland helper node checks. Linux container at the same content: cursor-overlay 157, platform-linux --lib --features portal-input 1229 / 15 ignored; default features 1170 / 15 and clippy at ff6658cc (no Rust change after it but fd7b782a's test-only doc) |
 
 Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
 

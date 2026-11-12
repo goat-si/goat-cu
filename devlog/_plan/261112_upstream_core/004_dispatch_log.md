@@ -159,3 +159,11 @@ had resumed as a second run; cancelled as a duplicate. Decisions recorded with r
 11:2x UTC GOAT restart: `cu-review-wp1f-ci-b0c7a85a-s24`, `cu-final-83aeb256-1f2060af-s24`.
 2026-11-12: fresh reviews dispatched for the new commits: `cu-review-ff6658cc-s24` (typed NOT_DELIVERED refusals, Linux fd marker) and
 `cu-review-wp1g-8248c43b-s24` (wp1g sync); both returned codex / system24/deepseek-v4.1-flash / reasoningEffort=high.
+2026-11-12: `cu-review-wp1f-ci-b0c7a85a-s24`: 3be03b46 PASS (each file equals a git merge-file of GOAT base, 4f2aa028, b9e38d1a; every
+V_1.0.0 use goes through the resolved table and refuses before sending), b0c7a85a PASS (diagnosis reproduced from the code, test-only).
+P3-1 (type_text_chars drops the structured refusal) rebutted: Linux does not register TypeTextCharsTool (`tools/impl_.rs:5196-5198`),
+and `renamed_tool` routes type_text_chars calls to type_text (`cua-driver-core/src/tool.rs:883`, `:2091`), whose errors go through
+`text_route_error_result`. P3-2 (static/bundled libxkbcommon) and P3-3 (unit tests on a 0.10 host) accepted as recorded follow-ups
+(050). P3-4 (isolate_desktop doc) accepted → fd7b782a (core check and clippy --all-targets -D warnings exit 0). Decisions recorded with
+review_findings.record. The detached whole-head receipt started last turn was killed at turn end (nohup did not survive); rerun inside
+the turn at eb04e2a0: 24 steps, failures=0 (050).
