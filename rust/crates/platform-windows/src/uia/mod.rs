@@ -2235,6 +2235,9 @@ mod tests {
             actions: vec!["toggle".into()],
             enabled: Some(false),
             selected: Some(false),
+            // GOAT's row states; unset here, so the row shows only enablement.
+            checked: None,
+            expanded: None,
             element_ptr: 0,
             center_x: 0,
             center_y: 0,
