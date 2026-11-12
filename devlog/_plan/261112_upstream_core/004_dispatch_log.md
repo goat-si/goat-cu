@@ -71,3 +71,9 @@ caller's derived read session); round 3 `cu-wp2-review-288-r3-s24-261112` dispat
 completed; lead moved the listings' first pass before enumeration, committed 0654beae; round 3 `cu-wp2-review-ab-r3-s24-261112`
 dispatched (continueFrom), returned codex / system24/deepseek-v4.1-flash / reasoningEffort=high. Decisions recorded with
 review_findings.record for every round.
+2026-11-12: `cu-wp1b-review-s24-261112` FAILED (actual return: "Error running remote compact task: Provider error 400 … Invalid
+'input[124].name': string does not match pattern" — the same provider compaction failure as the first wp1 review); no findings were
+recorded before it. Retried split in two narrower reviews — `cu-wp1b-review-a-s24-261112` (prepare.rs, lockfiles, docs) and
+`cu-wp1b-review-b-s24-261112` (cursor release vs click ordering, Linux gates), both returned codex / system24/deepseek-v4.1-flash /
+reasoningEffort=high.
+2026-11-12: final receipt dry run (/tmp/goat-cu-sync/receipt-final.sh, not a recorded receipt) on ece9964a: failures=0.

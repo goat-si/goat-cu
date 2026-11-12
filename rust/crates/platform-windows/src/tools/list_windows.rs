@@ -149,10 +149,15 @@ impl Tool for ListWindowsTool {
                 })
             })
             .collect();
-        let instance_after = crate::process_instance::read_instances(
-            pids.iter().copied(),
-            crate::process_instance::instance_start_time,
-        );
+        let after_pids: Vec<u32> = pids.iter().copied().collect();
+        let instance_after = tokio::task::spawn_blocking(move || {
+            crate::process_instance::read_instances(
+                after_pids,
+                crate::process_instance::instance_start_time,
+            )
+        })
+        .await
+        .unwrap_or_default();
         crate::process_instance::label_records(&mut records, &instance_before, &instance_after);
 
         let total = records.len();

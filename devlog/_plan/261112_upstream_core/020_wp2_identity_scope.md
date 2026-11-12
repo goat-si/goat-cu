@@ -187,7 +187,9 @@ existing `process_fingerprint`, which also rejects an exited pid). Wired into Li
 (`/proc/<pid>/stat` field 22) and Windows list_apps / list_windows / get_window_state (`GetProcessTimes`). Lead adjustment, same reason as
 #299 round-1 finding 4: the child's listings took the first pass after enumerating; it now runs before enumeration over every pid
 (Linux `proc_fs::all_pids`, Windows a `list_processes` snapshot) or the filtered pid, so a pid reused mid-listing gets no label. Element
-tokens on Linux/Windows were already bound to the instance (`publish_*_with_instance`, U15 #260). Docs paragraph names all three sources
+tokens are bound to the instance on Windows (U15 #260: `publish_*_with_instance`, `resolve_live` in the action tools) but NOT on Linux:
+every Linux resolve site is `snapshots.resolve(pid, &args)` (NotChecked) and no Linux publication carries an instance (corrected after
+#299 review round 3; see the follow-up below). Docs paragraph names all three sources
 and the macOS screenshot-only refresh case.
 
 | Command (rust/) | Exit | Result |
@@ -201,6 +203,23 @@ and the macOS screenshot-only refresh case.
 | child: `cargo test -p platform-macos --lib`; `cargo test -p cua-driver --test removed_tool_docs_test`; `cargo clippy -p platform-windows -p platform-linux --all-targets` | 0 / 0 / 0 | 2013 passed 48 ignored; 2 passed; no warnings from either crate |
 
 NOT RUN: any Linux or Windows runtime read (no host); the listing order change is type-checked only.
+
+### #299 review round 3 (`cu-wp2-review-ab-r3-s24-261112`, on 0654beae) — NEAR-PASS
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | P2 | second start-time pass of Linux/Windows list_windows ran on the async runtime | ACCEPTED: the pass runs in `spawn_blocking` (Linux list_windows.rs, Windows list_windows.rs) |
+| 2 | P2 | record claimed Linux tokens were already instance-bound | ACCEPTED: sentence corrected above. Linux token binding (`publish_*_with_instance` + `resolve_for_instance` at the eight Linux resolve sites: click.rs:1040, double_click.rs:97, hotkey.rs:110, press_key.rs:137, right_click.rs:96, scroll.rs:355, set_value.rs:155, type_text.rs:530) is a **follow-up unit**, not done here: it changes refusal behaviour of every Linux element action and can only be type-checked on this host. The Linux label is still accurate (docs scope token binding to macOS) |
+| 3 | P3 | get_window_state first read came after the window/app metadata lookup | ACCEPTED: moved above it (Linux before `is_process_live`/`list_windows_dispatch`, Windows before `lookup_window_for_pid`) |
+| 4 | P3 | Windows (and Linux) labelled a screenshot-only refresh of an existing snapshot | ACCEPTED: `answer_label(before, after, refreshed)` on both platforms; failing first `a_refreshed_snapshot_answer_reports_no_label` (Windows process_instance.rs:359, Linux process_instances.rs:89: `Some("77")` vs None) |
+| 5 | P3 | Windows label reads build a full fingerprint (image path query) | REBUTTED: `process_fingerprint` is the established exit-checked reader also used for token binding; a second unsafe start-time-only reader that cannot be run on this host is a worse trade than one extra `QueryFullProcessImageNameW` per pid inside blocking tasks |
+| 6 | P3 | contract schema description said "macOS" only | ACCEPTED: description names all three platforms (wire description only; check_protocol treats it as a rewording) |
+
+| Command (rust/) | Exit | Result |
+|---|---|---|
+| `cargo test -p platform-windows --lib -- a_refreshed_snapshot_answer_reports_no_label` / platform-linux same (helper ignoring refresh) | 101 / 101 | as above |
+| `cargo test -p platform-windows --lib` / `-p platform-linux --lib` / `-p cua-driver-contract --lib` after | 0 / 0 / 0 | 207 / 110 / 91 passed |
+| Linux target / Windows target `cargo check --all-targets` (stand-in tools) | 0 / 0 | nom note / the 5 HEAD-era warnings |
 
 ## #288 independent review (`cu-wp2-review-288-s24-261112`, on e0851769) — NEAR-PASS, 4 findings
 

@@ -223,7 +223,7 @@ pub struct ListAppsOutput {
 fn process_instance_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "string",
-        "description": "Opaque label of the process instance that owned pid when this answer was read (macOS: its kernel start time). Compare for equality only: the same pid with a different label is a different process, the earlier one having exited. Absent when it could not be read or the platform does not report it."
+        "description": "Opaque label of the process instance that owned pid when this answer was read (its kernel start time on macOS, Linux and Windows). Compare for equality only: the same pid with a different label is a different process, the earlier one having exited. Absent when it could not be read or did not hold for the whole answer."
     })
 }
 

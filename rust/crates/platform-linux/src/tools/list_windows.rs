@@ -129,10 +129,15 @@ impl Tool for ListWindowsTool {
             lines.push(note);
         }
         let mut records: Vec<Value> = windows.iter().map(window_record_json).collect();
-        let instance_after = crate::process_instances::read_instances(
-            pids.iter().copied(),
-            crate::proc_fs::process_instance_id,
-        );
+        let after_pids: Vec<u32> = pids.iter().copied().collect();
+        let instance_after = tokio::task::spawn_blocking(move || {
+            crate::process_instances::read_instances(
+                after_pids,
+                crate::proc_fs::process_instance_id,
+            )
+        })
+        .await
+        .unwrap_or_default();
         crate::process_instances::label_records(&mut records, &instance_before, &instance_after);
         let structured = json!({ "windows": records });
         ToolResult::text(lines.join("\n")).with_structured(structured)

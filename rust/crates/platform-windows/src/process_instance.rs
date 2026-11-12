@@ -66,6 +66,20 @@ pub(crate) fn instance_start_time(pid: u32) -> Option<u64> {
     process_fingerprint(pid).ok()?.start_time
 }
 
+/// The label a `get_window_state` answer reports: none when the read only
+/// refreshed an existing snapshot's screenshot, since that snapshot's element
+/// rows (and tokens) were read earlier and may describe an older instance.
+pub(crate) fn answer_label(
+    before: Option<u64>,
+    after: Option<u64>,
+    refreshed_snapshot: bool,
+) -> Option<String> {
+    if refreshed_snapshot {
+        return None;
+    }
+    label_instance(before, after)
+}
+
 /// #299: one start-time read per pid. The tool takes this pass before it
 /// builds the answer and a second one after, then keeps a label only where
 /// the two agree.
@@ -337,6 +351,18 @@ mod tests {
         assert_eq!(label_instance(None, Some(77)), None);
         assert_eq!(label_instance(Some(77), None), None);
         assert_eq!(label_instance(None, None), None);
+    }
+
+    /// #299 review: a screenshot-only read that refreshed an existing
+    /// snapshot reports no label, even with agreeing reads (as on macOS).
+    #[test]
+    fn a_refreshed_snapshot_answer_reports_no_label() {
+        assert_eq!(
+            answer_label(Some(77), Some(77), false),
+            Some("77".to_owned())
+        );
+        assert_eq!(answer_label(Some(77), Some(77), true), None);
+        assert_eq!(answer_label(Some(77), Some(78), false), None);
     }
 
     /// #299: each record naming a live pid carries its instance label; an

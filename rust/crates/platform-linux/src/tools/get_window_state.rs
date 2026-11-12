@@ -554,6 +554,14 @@ impl Tool for GetWindowStateTool {
         );
         let walk_timeout = std::time::Duration::from_millis(timeout_ms);
 
+        // #299: the process instance this answer names, read before the
+        // window metadata and the walk, and again after them; only two equal
+        // reads label it.
+        let instance_before =
+            tokio::task::spawn_blocking(move || crate::proc_fs::process_instance_id(pid))
+                .await
+                .ok()
+                .flatten();
         let process_is_live = crate::proc_fs::is_process_live(pid);
         // Enumerate the pid's windows ONCE and reuse the result for both the
         // window-ownership check (Wayland) and the additive window metadata
@@ -625,13 +633,6 @@ impl Tool for GetWindowStateTool {
                 == Some(true);
         let state = self.state.clone();
         let state_for_capture = state.clone();
-        // #299: the process instance this answer names, read before the walk
-        // and again after it; only two equal reads label it.
-        let instance_before =
-            tokio::task::spawn_blocking(move || crate::proc_fs::process_instance_id(pid))
-                .await
-                .ok()
-                .flatten();
         // Held to the end of this call: ticketed publications borrow it, and
         // dropping it retires a ticket that never landed (goat-si/cua-driver#133).
         let ticket = (should_capture && !observation_only)
@@ -1293,15 +1294,18 @@ impl Tool for GetWindowStateTool {
                 }
 
                 // #299: name the process instance this answer describes, but
-                // only when the reads before and after it agree.
+                // only when the reads before and after it agree and the answer
+                // published the rows it describes.
                 let instance_after =
                     tokio::task::spawn_blocking(move || crate::proc_fs::process_instance_id(pid))
                         .await
                         .ok()
                         .flatten();
-                if let Some(label) =
-                    crate::process_instances::label_instance(instance_before, instance_after)
-                {
+                if let Some(label) = crate::process_instances::answer_label(
+                    instance_before,
+                    instance_after,
+                    refreshed.is_some(),
+                ) {
                     structured["process_instance"] = json!(label);
                 }
 
