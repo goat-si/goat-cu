@@ -491,7 +491,9 @@ impl RightClickTool {
                     false,
                     Some(ownership.clone()),
                 ),
-                Ok(Err(e)) => ToolResult::error(format!("Right-click failed: {e}")),
+                // A right-click that provably sent nothing is a coded refusal.
+                Ok(Err(e)) => super::not_delivered_refusal(&e)
+                    .unwrap_or_else(|| ToolResult::error(format!("Right-click failed: {e}"))),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
         }
@@ -1660,7 +1662,13 @@ pub(super) fn right_click_element<T: Copy>(
 ) -> anyhow::Result<ElementRightClick> {
     match right_click_ax_stage(target, label, advertises_show_menu, show_menu, ax_delivered) {
         RightClickAxStage::Completed(delivery) => Ok(delivery),
-        RightClickAxStage::NotDelivered(message) => Err(anyhow::anyhow!(message)),
+        RightClickAxStage::NotDelivered(message) => {
+            Err(crate::input::ax_actions::ActionNotDelivered {
+                code: "action_unavailable",
+                message,
+            }
+            .into())
+        }
         RightClickAxStage::PixelFallback => pixel(target).map(ElementRightClick::Pixel),
     }
 }
@@ -1745,8 +1753,12 @@ pub(super) fn pixel_right_click_at(
     label: &str,
     post: impl FnOnce(&super::element_pointer::ElementPoint) -> anyhow::Result<()>,
 ) -> anyhow::Result<String> {
-    let point = super::element_pointer::checked_point(target, false)
-        .map_err(|refusal| anyhow::anyhow!("{label}: {}", refusal.message))?;
+    let point = super::element_pointer::checked_point(target, false).map_err(|refusal| {
+        crate::input::ax_actions::ActionNotDelivered {
+            code: refusal.code,
+            message: format!("{label}: {}", refusal.message),
+        }
+    })?;
     post(&point)?;
     Ok(format!(
         "Right-clicked {label} at element center ({:.0}, {:.0}) (pixel right-click; \
@@ -2482,5 +2494,31 @@ mod tests {
             None,
             window
         ));
+    }
+}
+
+#[cfg(test)]
+mod wp3c_review_tests {
+    use super::*;
+
+    /// wp3c review: an AXShowMenu the app provably did not receive answers a
+    /// coded refusal with `dispatched: false`, not a plain failure.
+    #[test]
+    fn an_undelivered_show_menu_is_a_coded_refusal() {
+        let error = right_click_element(
+            73_u32,
+            "[4]",
+            true,
+            |_| crate::ax::bindings::kAXErrorAPIDisabled,
+            || panic!("an undelivered AX action cannot report delivery"),
+            |_| panic!("no pixel right-click after a proved non-delivery"),
+        )
+        .expect_err("not delivered");
+        let refusal = super::super::not_delivered_refusal(&error).expect("coded refusal");
+        assert_eq!(refusal.is_error, Some(true));
+        let fields = refusal.structured_content.expect("structured refusal");
+        assert_eq!(fields["code"], "action_unavailable");
+        assert_eq!(fields["effect"], "refused");
+        assert_eq!(fields["dispatched"], false);
     }
 }

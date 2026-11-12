@@ -517,6 +517,54 @@ impl ElementDisabled {
     pub const CODE: &'static str = "element_disabled";
 }
 
+/// An AX action the app provably did not act on: nothing was sent
+/// (ActionUnsupported, NotImplemented) or it was not delivered (APIDisabled),
+/// or a route stopped before any input. Tools answer it as a coded refusal
+/// with `dispatched: false` (#279, wp3c review).
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct ActionNotDelivered {
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// A sent AX action whose error return does not prove it failed: it may have
+/// acted, so it is reported as unverifiable and never resent (#277, #279).
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct ActionMayHaveActed {
+    pub message: String,
+}
+
+/// The core write-outcome rule for a sent AX Perform of `action` that
+/// returned `err`: `Ok` when delivered, [`ActionNotDelivered`] when nothing
+/// reached the app, [`ActionMayHaveActed`] otherwise.
+pub fn classify_perform_return(action: &str, err: AXError) -> anyhow::Result<()> {
+    use cua_driver_core::mutation::WriteOutcome;
+    match crate::ax::write_outcome::native_write_outcome(
+        crate::ax::write_outcome::NativeWriteKind::Perform,
+        true,
+        &crate::ax::write_outcome::Settable::Unknown(crate::ax::bindings::kAXErrorFailure),
+        err,
+    ) {
+        WriteOutcome::Delivered => Ok(()),
+        WriteOutcome::FallThrough(_) | WriteOutcome::StopNotDelivered(_) => {
+            Err(ActionNotDelivered {
+                code: "action_unavailable",
+                message: format!("{action} was not delivered (AX error {err}); nothing was sent"),
+            }
+            .into())
+        }
+        _ => Err(ActionMayHaveActed {
+            message: format!(
+                "Sent {action}, but the app returned AX error {err}, which does not mean it \
+                 failed: it may have acted. Read the window before repeating it."
+            ),
+        }
+        .into()),
+    }
+}
+
 /// The error for a target that reads AXEnabled=false; the action is not sent.
 /// In the background the check runs before key priming, any selection write
 /// and the action, so the click has changed nothing and the error is a coded
@@ -594,12 +642,7 @@ pub fn perform_ax_action(element_ptr: usize, action: &str) -> anyhow::Result<()>
     let ax_action = map_action(action)?;
     ensure_ax_action_enabled(element_ptr, ax_action, false)?;
     let err = unsafe { perform_action(element_ptr as AXUIElementRef, ax_action) };
-
-    if err == kAXErrorSuccess {
-        Ok(())
-    } else {
-        anyhow::bail!("AXUIElementPerformAction({action}) failed with error {err}")
-    }
+    classify_perform_return(ax_action, err)
 }
 
 /// The AX action named by a tool's `action` argument. Accepts the short

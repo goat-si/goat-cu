@@ -1486,6 +1486,12 @@ fn right_and_double_click_pixel_routes_post_only_at_a_checked_point() {
             error.to_string().contains("nothing was sent"),
             "{label}: {error}"
         );
+        let refusal = super::super::not_delivered_refusal(&error).expect("coded refusal");
+        assert_eq!(
+            refusal.structured_content.expect("structured")["dispatched"],
+            false,
+            "{label}"
+        );
         for foreground in [false, true] {
             let error =
                 super::super::double_click::pixel_double_click_at(&fake, 4, foreground, |_| {

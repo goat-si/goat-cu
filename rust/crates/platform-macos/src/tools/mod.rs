@@ -101,6 +101,19 @@ pub(super) fn invalid_arguments(
     pre_dispatch_refusal("invalid_arguments", message)
 }
 
+/// The coded refusal for an [`ActionNotDelivered`] error, if `error` is one.
+///
+/// [`ActionNotDelivered`]: crate::input::ax_actions::ActionNotDelivered
+pub(super) fn not_delivered_refusal(
+    error: &anyhow::Error,
+) -> Option<cua_driver_core::protocol::ToolResult> {
+    let not_delivered = error.downcast_ref::<crate::input::ax_actions::ActionNotDelivered>()?;
+    Some(pre_dispatch_refusal(
+        not_delivered.code,
+        not_delivered.message.clone(),
+    ))
+}
+
 fn native_window_id(
     window_id: Option<u64>,
 ) -> Result<Option<u32>, cua_driver_core::protocol::ToolResult> {

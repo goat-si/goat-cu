@@ -518,6 +518,26 @@ pub(super) fn invalid_key(error: anyhow::Error) -> ToolResult {
     }))
 }
 
+/// The result of a semantic key action (AXConfirm, AXCancel …) whose perform
+/// did not return success, by the core write-outcome rule (#279, wp3c
+/// review): a coded refusal when nothing reached the app, an unverifiable
+/// answer when it may have acted, otherwise the delivery failure.
+fn semantic_perform_error(error: anyhow::Error) -> ToolResult {
+    if let Some(refusal) = super::not_delivered_refusal(&error) {
+        return refusal;
+    }
+    if let Some(uncertain) = error.downcast_ref::<crate::input::ax_actions::ActionMayHaveActed>() {
+        return ToolResult::text(format!("⚠️ {uncertain}")).with_structured(serde_json::json!({
+            "path": "ax_semantic",
+            "verified": false,
+            "effect": "unverifiable",
+            "keys_sent": false,
+            "code": "ax_action_unverified",
+        }));
+    }
+    delivery_failed(error)
+}
+
 pub(super) fn delivery_failed(error: anyhow::Error) -> ToolResult {
     if let Some(refusal) = crate::security_prompt::tool_result(&error) {
         return refusal;
@@ -868,7 +888,7 @@ impl Tool for PressKeyTool {
                             Ok(Ok((confirmed, None))) => {
                                 semantic_press_result(&display_key, action, pid, confirmed)
                             }
-                            Ok(Err(error)) => delivery_failed(error),
+                            Ok(Err(error)) => semantic_perform_error(error),
                             Err(error) => delivery_failed(anyhow::anyhow!(
                                 "semantic key task failed: {error}"
                             )),
@@ -4172,5 +4192,41 @@ mod menu_lookup_tests {
         let result = super::task_failure("the menu task failed; it may have run".to_owned());
         let fields = result.structured_content.unwrap();
         assert_eq!(fields["effect"], "unverifiable");
+    }
+}
+
+#[cfg(test)]
+mod wp3c_review_tests {
+    use crate::ax::bindings::{
+        kAXErrorAPIDisabled, kAXErrorActionUnsupported, kAXErrorCannotComplete,
+        kAXErrorIllegalArgument, kAXErrorSuccess,
+    };
+    use crate::input::ax_actions::classify_perform_return;
+
+    /// wp3c review: press_key's semantic AXConfirm / AXCancel perform follows
+    /// the core rule: a refusal when nothing reached the app, an unverifiable
+    /// answer (not a delivery failure) when it may have acted.
+    #[test]
+    fn a_semantic_key_perform_error_is_classified() {
+        assert!(classify_perform_return("AXConfirm", kAXErrorSuccess).is_ok());
+        for err in [kAXErrorAPIDisabled, kAXErrorActionUnsupported] {
+            let result = super::semantic_perform_error(
+                classify_perform_return("AXConfirm", err).expect_err("not sent"),
+            );
+            assert_eq!(result.is_error, Some(true), "{err}");
+            let fields = result.structured_content.expect("structured refusal");
+            assert_eq!(fields["code"], "action_unavailable", "{err}");
+            assert_eq!(fields["effect"], "refused");
+            assert_eq!(fields["dispatched"], false);
+        }
+        for err in [kAXErrorIllegalArgument, kAXErrorCannotComplete] {
+            let result = super::semantic_perform_error(
+                classify_perform_return("AXCancel", err).expect_err("may have acted"),
+            );
+            assert_ne!(result.is_error, Some(true), "{err}");
+            let fields = result.structured_content.expect("structured result");
+            assert_eq!(fields["effect"], "unverifiable", "{err}");
+            assert_eq!(fields["code"], "ax_action_unverified");
+        }
     }
 }

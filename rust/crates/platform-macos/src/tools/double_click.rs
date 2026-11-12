@@ -283,7 +283,14 @@ impl Tool for DoubleClickTool {
                 Ok(Ok(ElementDoubleClick::Pixel(msg))) => {
                     ToolResult::text(format!("{msg}{}", changes.result_suffix()))
                 }
+                // In the background a double-click that provably sent nothing
+                // is a coded refusal; in the foreground the window was fronted.
                 Ok(Err(e)) => super::element_disabled_error(pid, wid, &e, foreground)
+                    .or_else(|| {
+                        (!foreground)
+                            .then(|| super::not_delivered_refusal(&e))
+                            .flatten()
+                    })
                     .unwrap_or_else(|| ToolResult::error(format!("double_click failed: {e}"))),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
@@ -357,10 +364,14 @@ pub(super) fn double_click_element<P, T: Copy>(
         match super::click::perform_outcome(err) {
             cua_driver_core::mutation::WriteOutcome::FallThrough(_) => {}
             cua_driver_core::mutation::WriteOutcome::StopNotDelivered(_) => {
-                anyhow::bail!(
-                    "AXOpen was not delivered to element [{idx}] (AX error {err}); nothing was \
-                     sent."
-                );
+                return Err(crate::input::ax_actions::ActionNotDelivered {
+                    code: "action_unavailable",
+                    message: format!(
+                        "AXOpen was not delivered to element [{idx}] (AX error {err}); nothing \
+                         was sent."
+                    ),
+                }
+                .into());
             }
             _ => {
                 return Ok(ElementDoubleClick::Ax(format!(
@@ -371,10 +382,15 @@ pub(super) fn double_click_element<P, T: Copy>(
             }
         }
         if !foreground {
-            anyhow::bail!(
-                "AXOpen returned {err} for element [{idx}]; background delivery will not \
-                 improvise a pointer fallback after choosing the semantic route"
-            );
+            return Err(crate::input::ax_actions::ActionNotDelivered {
+                code: "background_unavailable",
+                message: format!(
+                    "AXOpen returned {err} for element [{idx}] and nothing was sent; background \
+                     delivery will not improvise a pointer fallback after choosing the semantic \
+                     route"
+                ),
+            }
+            .into());
         }
         tracing::debug!(
             "AXOpen returned {err} for element [{idx}], falling back to pixel double-click"
@@ -462,8 +478,12 @@ pub(super) fn pixel_double_click_at(
     foreground: bool,
     post: impl FnOnce(&super::element_pointer::ElementPoint) -> anyhow::Result<()>,
 ) -> anyhow::Result<String> {
-    let point = super::element_pointer::checked_point(target, foreground)
-        .map_err(|refusal| anyhow::anyhow!("element [{idx}]: {}", refusal.message))?;
+    let point = super::element_pointer::checked_point(target, foreground).map_err(|refusal| {
+        crate::input::ax_actions::ActionNotDelivered {
+            code: refusal.code,
+            message: format!("element [{idx}]: {}", refusal.message),
+        }
+    })?;
     post(&point)?;
     Ok(format!(
         "✅ Double-clicked element [{idx}] at ({:.1}, {:.1}).",
@@ -594,5 +614,38 @@ mod tests {
             background_action_for_element(false),
             cua_driver_core::background_input::BackgroundAction::WindowPointer
         );
+    }
+}
+
+#[cfg(test)]
+mod wp3c_review_tests {
+    use super::*;
+
+    /// wp3c review: an AXOpen the app provably did not receive, and a
+    /// background fall-through that stops before any pointer input, answer
+    /// coded refusals with `dispatched: false`.
+    #[test]
+    fn an_undelivered_or_unsent_double_click_is_a_coded_refusal() {
+        use crate::ax::bindings::{kAXErrorAPIDisabled, kAXErrorActionUnsupported};
+        for (err, foreground, code) in [
+            (kAXErrorAPIDisabled, false, "action_unavailable"),
+            (kAXErrorAPIDisabled, true, "action_unavailable"),
+            (kAXErrorActionUnsupported, false, "background_unavailable"),
+        ] {
+            let error = double_click_element::<String, _>(
+                73_u32,
+                3,
+                true,
+                foreground,
+                |_| err,
+                |_| panic!("no pointer fallback"),
+            )
+            .expect_err("nothing was sent");
+            let refusal = super::super::not_delivered_refusal(&error).expect("coded refusal");
+            let fields = refusal.structured_content.expect("structured refusal");
+            assert_eq!(fields["code"], code, "{err} {foreground}");
+            assert_eq!(fields["effect"], "refused");
+            assert_eq!(fields["dispatched"], false);
+        }
     }
 }
