@@ -256,3 +256,5 @@ paragraph understated the later Rust commits → 050 corrected. Round 2 (`contin
 Round 2 (`cu-final-review-terra-d24195a8-r2b-s24`; a first attempt was rejected because `continueFrom` takes no `isolation`) NEAR-PASS:
 L2 the check saw only retained entries → 519c4751 (a whole-run history of each id's first window, two should_panic tests red against
 d24195a8); L1 missing receipt rows → 050. Bound wp7 receipt at 519c4751 failures=0. Round 3 (`continueFrom`) dispatched.
+Round 3 (`cu-final-review-terra-519c4751-r3-s24`) NEAR-PASS: history sound, rows fixed; L1 `should_panic` over the whole test → 4c740b16
+(catch only the final store's panic; red with a scratch setup collision). Bound wp7 receipt again at 4c740b16 failures=0. Round 4 dispatched.

@@ -111,6 +111,8 @@
 | d24195a8 | final review of 8ef0f280 | the scoped-view test stores fixed ids instead of ids minted from the process-wide counter (which could equal another test's fixed id); a test build's `remember` panics when an id is already stored for another pid or window |
 | d21d40b2 | docs | gpt-6.1-terra final review, d24195a8, receipt scope corrected |
 | 519c4751 | final review round 2 | the test-build check remembers the first window of every snapshot id for the whole run (evicted or not, and before the screenshot-only return), with two tests that panic on reuse after eviction and on a screenshot-only read |
+| 0caeded3 | docs | wp7 receipt at 519c4751, review-fix receipts, round-2 outcome |
+| 4c740b16 | final review round 3 | the two shared-id tests catch the panic of only their final, conflicting store, so a collision during setup fails them instead of satisfying `should_panic` |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -387,7 +389,8 @@ and a `deprecated` entry only). `contract/manifest.json` and both UniFFI binding
 | wp1p | 52f2b794 | `bash -n`, connect-step 15, install version fallback 40 / 7 skipped (upstream layout) (019h) |
 | final review fixes | 0e2064fe | red first (scratch): each of the two tests' first stores replayed between the other's reads gave "other_window" (window_state_view.rs:2129, :2272); the old `type_text` texts fail the new Chromium/Safari assertions (type_text.rs:5074); rewordings fail at type_text.rs:5070 and set_value.rs:2806. Green in the wp7 receipt |
 | final review fixes | d24195a8, 519c4751 | red first: with 0e2064fe's collision put back (scratch) the module failed 1 of 5 runs without a check and 5 of 5 with it; a minted/fixed collision (scoped test given `s00000009`) 5 of 5; the two new tests did not panic against d24195a8's retained-entry check (window_state_view.rs:2263, :2280) and pass with 519c4751's history, which also fails both scratch collisions 5 of 5. Green in the wp7 receipt |
-| wp7 receipt | 519c4751 | `cxc receipt test -- zsh /tmp/goat-cu-sync/receipt-wp7.sh`, failures=0: rustfmt --check of window_state_view.rs and type_text.rs (set_value.rs is not rustfmt-clean on origin/main either), platform-macos type_text + set_value 199 / 1, platform-macos --lib 2038 / 48, the four named window_state_view tests, window_state_view 30 of 30 runs (48 passed), core --lib 1830 / 3, clippy -D warnings (platform-macos, cua-driver-core); Linux container core --lib 1833 / 3, window_state_view 30 of 30 runs, clippy core -D warnings. Logs: /tmp/goat-cu-sync/receipt-wp7/ |
+| round 3 fix | 4c740b16 | red (scratch): with another window holding the setup id `s0000c202`, the `should_panic` form passed; the new form fails at the setup store naming both windows; with the history check removed both new tests fail ("the call should panic") |
+| wp7 receipt | 519c4751, again at 4c740b16 | `cxc receipt test -- zsh /tmp/goat-cu-sync/receipt-wp7.sh`, failures=0 at each: rustfmt --check of window_state_view.rs and type_text.rs (set_value.rs is not rustfmt-clean on origin/main either), platform-macos type_text + set_value 199 / 1, platform-macos --lib 2038 / 48, the four named window_state_view tests, window_state_view 30 of 30 runs (48 passed), core --lib 1830 / 3, clippy -D warnings (platform-macos, cua-driver-core); Linux container core --lib 1833 / 3, window_state_view 30 of 30 runs, clippy core -D warnings. Logs: /tmp/goat-cu-sync/receipt-wp7/ (4c740b16) |
 
 Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
 
@@ -409,3 +412,5 @@ final review of 0e2064fe and the records, moved to gpt-6.1-terra (high) at the u
 ids could equal another test's fixed id → d24195a8; L1 receipt wording → this record. Round 2 with the same reviewer reviews d24195a8.
 Round 2 NEAR-PASS at d21d40b2: L2 the check saw only retained entries (an id reused after eviction or by a screenshot-only read went
 unseen) → 519c4751; L1 the receipt rows for 0e2064fe and d24195a8 were missing → added above. Round 3 reviews 519c4751 and the rows.
+Round 3 NEAR-PASS at 0caeded3: the history is sound for its rule and the rows resolve round 2's finding; L1 `should_panic` over the whole
+test could be satisfied by a setup collision → 4c740b16. Round 4 reviews 4c740b16.
