@@ -135,6 +135,8 @@ ecc91d48` is empty, so every receipt and review of those commits holds for their
 | 4bd80f01 | wp1q | sync 2319d456 → ed9fd9a5 (019i): installer pin 0.47.24 (upstream's published version); vendored cua-telemetry 0.27.1 (version only) |
 | f8f70174 | docs | PR #300 merged; replay onto r3; wp1q; round-4 PASS; rustix follow-up |
 | 49006a01 | final review of r3 | macOS `type_text`'s unverified web next step leads the result after the read-first condition, ahead of the count and detail, so run_steps' 300-character step message keeps the whole step (the px route for Safari and Firefox) |
+| 51ade830 | docs | r3 final review outcome, type_text step fix, 019i manifest wording |
+| d1aa1023 | docs | r3 final review round 2 PASS |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -419,6 +421,8 @@ and a `deprecated` entry only). `contract/manifest.json` and both UniFFI binding
 | final review fixes | d24195a8, 519c4751 | red first: with 0e2064fe's collision put back (scratch) the module failed 1 of 5 runs without a check and 5 of 5 with it; a minted/fixed collision (scoped test given `s00000009`) 5 of 5; the two new tests did not panic against d24195a8's retained-entry check (window_state_view.rs:2263, :2280) and pass with 519c4751's history, which also fails both scratch collisions 5 of 5. Green in the wp7 receipt |
 | round 3 fix | 4c740b16 | red (scratch): with another window holding the setup id `s0000c202`, the `should_panic` form passed; the new form fails at the setup store naming both windows; with the history check removed both new tests fail ("the call should panic") |
 | wp7 receipt | 519c4751, again at 4c740b16 | `cxc receipt test -- zsh /tmp/goat-cu-sync/receipt-wp7.sh`, failures=0 at each: rustfmt --check of window_state_view.rs and type_text.rs (set_value.rs is not rustfmt-clean on origin/main either), platform-macos type_text + set_value 199 / 1, platform-macos --lib 2038 / 48, the four named window_state_view tests, window_state_view 30 of 30 runs (48 passed), core --lib 1830 / 3, clippy -D warnings (platform-macos, cua-driver-core); Linux container core --lib 1833 / 3, window_state_view 30 of 30 runs, clippy core -D warnings. Logs: /tmp/goat-cu-sync/receipt-wp7/ (4c740b16) |
+| r3 final fix | 49006a01 | red first: the strengthened sweep (whole browser step at every detail 0-300 and count) failed at detail 2, count 1234567 (type_text.rs:5136); green with the fix; platform-macos type_text + set_value 199 / 1, platform-macos --lib 2038 / 48, clippy macOS clean |
+| final receipt (r3) | d1aa1023 | `cxc receipt test -- zsh /tmp/goat-cu-sync/receipt-final-r3.sh`, 18 steps, failures=0: the wp7 steps above (platform-macos --lib 2038 / 48, core --lib 1830 / 3, window_state_view 30 of 30, Linux core 1833 / 3 and 30 of 30, clippy macOS and Linux core, rustfmt) plus wp1q's: `bash -n`, connect-step 15 passed, install version fallback 40 passed / 7 skipped (upstream layout), `cargo metadata --locked`, `cargo check --locked -p cua-telemetry` (0.27.1), `cargo check --locked -p cua-driver` on macOS and in the Linux container. Also at ecc91d48 (the replay, wp7's close). Logs: /tmp/goat-cu-sync/receipt-final-r3/. Later commits change devlog only |
 
 Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
 
