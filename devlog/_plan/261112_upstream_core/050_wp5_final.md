@@ -109,6 +109,8 @@
 | a0bc8020 | docs | CI fix abc581b7, wp1o and wp1p in this record; re-fetch 21:40 UTC |
 | 8ef0f280 | docs | morph review outcomes, 0e2064fe, rebuttal and follow-ups; 019h release-state note |
 | d24195a8 | final review of 8ef0f280 | the scoped-view test stores fixed ids instead of ids minted from the process-wide counter (which could equal another test's fixed id); a test build's `remember` panics when an id is already stored for another pid or window |
+| d21d40b2 | docs | gpt-6.1-terra final review, d24195a8, receipt scope corrected |
+| 519c4751 | final review round 2 | the test-build check remembers the first window of every snapshot id for the whole run (evicted or not, and before the screenshot-only return), with two tests that panic on reuse after eviction and on a screenshot-only read |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -383,6 +385,9 @@ and a `deprecated` entry only). `contract/manifest.json` and both UniFFI binding
 | CI fix | abc581b7 | red first (scratch): the CI failure and "unknown_snapshot" each reproduced exactly; then `window_state_view` 30/30 runs and core-lib 2× 1828 / 3 (macOS), the Linux container receipt at 902b6e30 and goat-ci on 34f79cb5 in "CI after the receipt" |
 | wp1o | 34f79cb5 | CHANGELOG top 40 lines identical to 2fc7f3c7; the 8 version files byte-identical to the parent (019g) |
 | wp1p | 52f2b794 | `bash -n`, connect-step 15, install version fallback 40 / 7 skipped (upstream layout) (019h) |
+| final review fixes | 0e2064fe | red first (scratch): each of the two tests' first stores replayed between the other's reads gave "other_window" (window_state_view.rs:2129, :2272); the old `type_text` texts fail the new Chromium/Safari assertions (type_text.rs:5074); rewordings fail at type_text.rs:5070 and set_value.rs:2806. Green in the wp7 receipt |
+| final review fixes | d24195a8, 519c4751 | red first: with 0e2064fe's collision put back (scratch) the module failed 1 of 5 runs without a check and 5 of 5 with it; a minted/fixed collision (scoped test given `s00000009`) 5 of 5; the two new tests did not panic against d24195a8's retained-entry check (window_state_view.rs:2263, :2280) and pass with 519c4751's history, which also fails both scratch collisions 5 of 5. Green in the wp7 receipt |
+| wp7 receipt | 519c4751 | `cxc receipt test -- zsh /tmp/goat-cu-sync/receipt-wp7.sh`, failures=0: rustfmt --check of window_state_view.rs and type_text.rs (set_value.rs is not rustfmt-clean on origin/main either), platform-macos type_text + set_value 199 / 1, platform-macos --lib 2038 / 48, the four named window_state_view tests, window_state_view 30 of 30 runs (48 passed), core --lib 1830 / 3, clippy -D warnings (platform-macos, cua-driver-core); Linux container core --lib 1833 / 3, window_state_view 30 of 30 runs, clippy core -D warnings. Logs: /tmp/goat-cu-sync/receipt-wp7/ |
 
 Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
 
@@ -402,3 +407,5 @@ follow-up); fresh final review at 34f79cb5 (7cab649b through abc581b7 and wp1o) 
 L1/L2 → 0e2064fe, L3 → follow-up; wp1p review at 902b6e30 (52f2b794, 902b6e30) NEAR-PASS: L3 → 019h, L1 rebutted (follow-ups). A fresh
 final review of 0e2064fe and the records, moved to gpt-6.1-terra (high) at the user's request, NEAR-PASS at 8ef0f280: M1 minted snapshot
 ids could equal another test's fixed id → d24195a8; L1 receipt wording → this record. Round 2 with the same reviewer reviews d24195a8.
+Round 2 NEAR-PASS at d21d40b2: L2 the check saw only retained entries (an id reused after eviction or by a screenshot-only read went
+unseen) → 519c4751; L1 the receipt rows for 0e2064fe and d24195a8 were missing → added above. Round 3 reviews 519c4751 and the rows.

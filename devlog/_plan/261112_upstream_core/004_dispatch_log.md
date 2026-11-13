@@ -253,3 +253,6 @@ line. Fresh final review `cu-final-review-morph-0e2064fe-s24` dispatched for 0e2
 which can equal another test's fixed id → d24195a8 (fixed ids; a test-build `remember` panics on an id stored for two windows; red: the
 old collision fails 5 of 5 with the check, 1 of 5 without; a minted/fixed collision 5 of 5); L1 the whole-head receipt row and review
 paragraph understated the later Rust commits → 050 corrected. Round 2 (`continueFrom`, same reviewer) dispatched for d24195a8.
+Round 2 (`cu-final-review-terra-d24195a8-r2b-s24`; a first attempt was rejected because `continueFrom` takes no `isolation`) NEAR-PASS:
+L2 the check saw only retained entries → 519c4751 (a whole-run history of each id's first window, two should_panic tests red against
+d24195a8); L1 missing receipt rows → 050. Bound wp7 receipt at 519c4751 failures=0. Round 3 (`continueFrom`) dispatched.
