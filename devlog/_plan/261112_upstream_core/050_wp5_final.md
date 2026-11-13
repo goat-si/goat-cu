@@ -133,6 +133,8 @@ ecc91d48` is empty, so every receipt and review of those commits holds for their
 | Commit | Unit | Content |
 |---|---|---|
 | 4bd80f01 | wp1q | sync 2319d456 → ed9fd9a5 (019i): installer pin 0.47.24 (upstream's published version); vendored cua-telemetry 0.27.1 (version only) |
+| f8f70174 | docs | PR #300 merged; replay onto r3; wp1q; round-4 PASS; rustix follow-up |
+| 49006a01 | final review of r3 | macOS `type_text`'s unverified web next step leads the result after the read-first condition, ahead of the count and detail, so run_steps' 300-character step message keeps the whole step (the px route for Safari and Firefox) |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -286,8 +288,8 @@ Re-fetch after the final review closed (2026-11-13 01:36 UTC): origin/main `c93f
   No goat-cu code calls an xattr function and `cargo deny` passes in CI; `cargo update -p rustix` would move it when wanted.
 - Final review rounds 2-3 (informational): an embedded web view after pixel focus reads "do not repeat it" next to the mark's "type
   again only if the text is missing" (the px rung is terminal); the non-web branch says "read the field" where the field could not be
-  read; with a field title over ~27 characters the browser-tab step's px clause falls past run_steps' 300-character cut (the read and
-  its condition always survive, and the cut ends in "...").
+  read; with a field title over ~27 characters the browser-tab step's px clause fell past run_steps' 300-character cut (the read and
+  its condition always survived) — fixed in 49006a01, where the step leads the result.
 
 ### Issue dispositions (path:line at the final head)
 
@@ -442,3 +444,6 @@ Round 3 NEAR-PASS at 0caeded3: the history is sound for its rule and the rows re
 test could be satisfied by a setup collision → 4c740b16. Round 4 reviews 4c740b16.
 Round 4 PASS at 18fdf61b, no findings. After PR #300's squash merge, a fresh final review covers the r3 branch (the replay, wp1q and these
 records).
+Fresh final review of r3 NEAR-PASS at f8f70174: replay, wp1q and the snapshot guard verified; medium: the browser next step could be cut
+by a long field title in run_steps' step message → 49006a01; low: 019i overstated the vendored manifest's blob identity → 019i corrected.
+Round 2 (same reviewer) reviews 49006a01.

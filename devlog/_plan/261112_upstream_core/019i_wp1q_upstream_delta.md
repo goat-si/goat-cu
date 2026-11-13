@@ -12,8 +12,11 @@ carries. Merge `/tmp/goat-cu-sync/wp1q-merge.sh` (base 2319d456).
 
 `cua-driver-rs-v0.47.24` is released (2026-11-12T21:52Z, 58 assets, prerelease-flagged like 0.47.18-0.47.23), and upstream's
 published-version file reads 0.47.24. The `cua-telemetry` tree is `0fa62eaf` at 7f2252fb, 2319d456 and ed9fd9a5, and every vendored
-`cua-telemetry` file, `targets.json` and `sandbox-images.json` has the same blob as ed9fd9a5, so only the written-out version and the
-source commit move. No driver release in the range (`libs/cua-driver/rust/CHANGELOG.md` unchanged). GOAT versions kept.
+`cua-telemetry` source file (`build.rs`, `src/`, `tests/`), `targets.json` and `sandbox-images.json` has the same blob as ed9fd9a5.
+The vendored `Cargo.toml` is GOAT's written-out manifest (workspace fields expanded, the `cua-connections` dev-dependency left out; see
+`vendor/README.md`), so only its version, its fork comment and the source commit move. No driver release in the range
+(`libs/cua-driver/rust/CHANGELOG.md` unchanged). GOAT versions kept. The vendored crate is a path dependency, not a workspace member, so
+its own tests do not build here; `cargo check --locked -p cua-telemetry` builds 0.27.1.
 
 agent-desktop main `947b051f`, 2 commits after `54855b62`: a7765959 release 1.3.0 (CHANGELOG, versions) and 947b051f `rustix` 1.1.6
 for RUSTSEC-2026-0486. Neither is a core gap from 003; the advisory is recorded as a follow-up in 050.

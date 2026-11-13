@@ -261,3 +261,5 @@ Round 3 (`cu-final-review-terra-519c4751-r3-s24`) NEAR-PASS: history sound, rows
 Round 4 (`cu-final-review-terra-4c740b16-r4-s24`) PASS, no findings. PR #300 squash-merged (c93f8dbb); commits after 34f79cb5 replayed
 as `cu/261112-upstream-core-r3` (tree equal), wp7 closed with a receipt at ecc91d48; wp1q (019i) on top. Fresh final review
 `cu-final-review-terra-r3-s24` (gpt-6.1-terra, high) dispatched for the r3 branch.
+`cu-final-review-terra-r3-s24` NEAR-PASS at f8f70174: medium browser next step cut by a long field title → 49006a01 (red at
+type_text.rs:5136); low 019i manifest wording → fixed. Round 2 (`continueFrom`) dispatched.
