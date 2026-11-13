@@ -121,98 +121,30 @@ fn probe_distinguishes_blocked_and_destroyed_window() {
     assert_eq!(probe_root(hwnd), RootVerdict::WindowGone);
 }
 
-/// The marker a test process passes to the lone child it spawns: its pid under a prefix, so a
-/// bare pid or any other value left in the environment cannot match.
-fn lone_child_marker(parent: u32) -> String {
-    format!("spawned-by-{parent}")
-}
-
-/// What a test process does, from the marker it inherited and its parent pid read from the
-/// process list.
-#[derive(Debug, PartialEq, Eq)]
-enum LoneChildRole {
-    /// Spawn the lone child and wait for it.
-    Parent,
-    /// Run the test body.
-    Child,
-    /// A marker is set but the parent cannot be read: spawning again could repeat without end,
-    /// so the test fails instead.
-    Unverified,
-}
-
-fn lone_child_role(marker: Option<&str>, parent: Option<u32>) -> LoneChildRole {
-    match (marker, parent) {
-        (None, _) => LoneChildRole::Parent,
-        (Some(marker), Some(parent)) if marker == lone_child_marker(parent) => LoneChildRole::Child,
-        // A marker some other process left in the environment: run as a parent, whose child's
-        // marker names this live process.
-        (Some(_), Some(_)) => LoneChildRole::Parent,
-        (Some(_), None) => LoneChildRole::Unverified,
-    }
-}
-
-fn parent_pid() -> Option<u32> {
-    let me = std::process::id();
-    crate::win32::apps::list_processes()
-        .into_iter()
-        .find(|process| process.pid == me)
-        .map(|process| process.parent_pid)
-}
-
-#[test]
-fn lone_child_role_never_spawns_from_an_unverified_child() {
-    use LoneChildRole::{Child, Parent, Unverified};
-    assert_eq!(
-        lone_child_role(Some(&lone_child_marker(42)), Some(42)),
-        Child
-    );
-    // A leaked value never makes the suite the lone child.
-    assert_eq!(lone_child_role(Some("42"), Some(42)), Parent);
-    assert_eq!(
-        lone_child_role(Some(&lone_child_marker(41)), Some(42)),
-        Parent
-    );
-    assert_eq!(lone_child_role(None, Some(42)), Parent);
-    assert_eq!(lone_child_role(None, None), Parent);
-    // A child whose parent cannot be read stops instead of spawning another child.
-    assert_eq!(
-        lone_child_role(Some(&lone_child_marker(42)), None),
-        Unverified
-    );
-    assert_eq!(lone_child_role(Some("42"), None), Unverified);
-}
-
+/// The timed call in a process of its own: other tests in this binary create UIA clients,
+/// blocked windows and COM apartments on other threads, so the suite runs the body as an ignored
+/// test in a child test process and only checks that it passed there.
 #[test]
 fn bounded_element_from_handle_times_out_without_probe() {
-    // The bound times one real UIA call, while other tests in this binary create UIA clients,
-    // blocked windows and COM apartments on other threads of the same process; time the call in
-    // a process that runs this test alone.
-    const ALONE: &str = "CUA_UIA_BOUNDED_TIMEOUT_ALONE";
-    let marker = std::env::var(ALONE).ok();
-    match lone_child_role(marker.as_deref(), parent_pid()) {
-        LoneChildRole::Child => {}
-        LoneChildRole::Unverified => panic!(
-            "{ALONE} is {marker:?} but this process's parent is not in the process list, so \
-             it cannot tell whether it is the lone child; not spawning another"
-        ),
-        LoneChildRole::Parent => {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "uia::client::tests::bounded_element_from_handle_times_out_without_probe",
-                ])
-                .env(ALONE, lone_child_marker(std::process::id()))
-                .output()
-                .unwrap();
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                output.status.success() && stdout.contains(" 1 passed;"),
-                "{stdout}{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
-    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "uia::client::tests::bounded_element_from_handle_times_out_alone",
+            "--ignored",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains(" 1 passed;"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "run alone in a child process by bounded_element_from_handle_times_out_without_probe"]
+fn bounded_element_from_handle_times_out_alone() {
     let window = BlockedWindow::new();
     let hwnd = window.hwnd;
     let (tx, rx) = mpsc::channel();
