@@ -107,6 +107,8 @@
 | 902b6e30 | wp1m review | the carve-out sentence names only the two tools' acting results (discovery and refusal payloads carry no `verified`); the capability-derived test gap recorded as a follow-up |
 | 0e2064fe | final review of 34f79cb5 | two `window_state_view` tests no longer store the same snapshot id (`s0000ab01`/`s0000ab02`, one entry per id in the shared store); macOS `type_text` names the typed browser tools for Chromium and the px form for Safari, Firefox and embedded web views; stronger page-tool guards in the `type_text` and `set_value` tests |
 | a0bc8020 | docs | CI fix abc581b7, wp1o and wp1p in this record; re-fetch 21:40 UTC |
+| 8ef0f280 | docs | morph review outcomes, 0e2064fe, rebuttal and follow-ups; 019h release-state note |
+| d24195a8 | final review of 8ef0f280 | the scoped-view test stores fixed ids instead of ids minted from the process-wide counter (which could equal another test's fixed id); a test build's `remember` panics when an id is already stored for another pid or window |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -248,7 +250,8 @@ the local head.
   none. 0e2064fe makes the description, next step and reason name the px form for them; telling the browsers apart in the tag needs the
   bundle id in `web_readback_next_rung`. And upstream's design records still describe `page` as an acting rung
   (`docs/browser-tool-implementation-plan.md:47`, `:49`; `docs/test-matrix.md:251` "Page selector/JavaScript"); both files are
-  byte-identical to upstream 2319d456, so they are left for upstream.
+  byte-identical to upstream 2319d456 (blob `a8b8a0d4` and `2d2cf7a2`, equal to the `sha` that `gh api
+  repos/trycua/cua/contents/libs/cua-driver/<path>?ref=2319d456` returns), so they are left for upstream.
 - `platform-macos/src/tools/set_value.rs` is not rustfmt-clean (on origin/main too; e0851769 adds one more hunk at `:131`), so the
   wp7 receipt checks rustfmt only on the files it changed that were clean.
 - Final review rounds 2-3 (informational): an embedded web view after pixel focus reads "do not repeat it" next to the mark's "type
@@ -376,7 +379,7 @@ and a `deprecated` entry only). `contract/manifest.json` and both UniFFI binding
 | whole head | 1f1d4edd | `TMPDIR=/private/tmp`: the same 24 steps, failures=0: core-lib 1828 / 3, core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 200, linux-host 110, target checks, clippy macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol compatible, protocol delta problems 0, output delta adds only `process_instance`, helper tests |
 | wp1n | 5e172dbe | `bash -n`, connect-step 15, install version fallback 40 / 7 skipped (upstream layout) |
 | final review round 2 fix | 491904b1 | the sweep over detail lengths 0-300 red at type_text.rs:5118, then tools::type_text 63 / 1; platform-macos --lib 2038 / 48; clippy -p platform-macos --all-targets -D warnings clean. Only this file changed after the 1f1d4edd receipt |
-| whole head (final) | 03af2302 | `TMPDIR=/private/tmp`, kache doctor 0: the same 24 steps, failures=0: core-lib 1828 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 200, linux-host 110, Linux x86_64 and Windows MSVC target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, cargo deny (bans, licenses, sources ok), build-driver, e2e check, check_protocol compatible in every launch form (daemon 0.8.0 = 0.8.0), protocol delta problems 0, output delta removes nothing, Wayland helper checks. After it, the only Rust change is abc581b7 (one test module) |
+| whole head | 03af2302 | `TMPDIR=/private/tmp`, kache doctor 0: the same 24 steps, failures=0: core-lib 1828 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 200, linux-host 110, Linux x86_64 and Windows MSVC target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, cargo deny (bans, licenses, sources ok), build-driver, e2e check, check_protocol compatible in every launch form (daemon 0.8.0 = 0.8.0), protocol delta problems 0, output delta removes nothing, Wayland helper checks. It does not cover the later Rust commits abc581b7, 0e2064fe and d24195a8 (`window_state_view` tests, macOS `type_text` texts, two test guards, a test-build store check); their narrower receipts are the rows below |
 | CI fix | abc581b7 | red first (scratch): the CI failure and "unknown_snapshot" each reproduced exactly; then `window_state_view` 30/30 runs and core-lib 2× 1828 / 3 (macOS), the Linux container receipt at 902b6e30 and goat-ci on 34f79cb5 in "CI after the receipt" |
 | wp1o | 34f79cb5 | CHANGELOG top 40 lines identical to 2fc7f3c7; the 8 version files byte-identical to the parent (019g) |
 | wp1p | 52f2b794 | `bash -n`, connect-step 15, install version fallback 40 / 7 skipped (upstream layout) (019h) |
@@ -391,9 +394,11 @@ of their final form are under narrow fresh reviews: `cu-delta-review-019c3858-s2
 After wp1h: wp1i 190a160e NEAR-PASS → 7cab649b; wp1j c8a91fc0 PASS; wp1k bc02a591 NEAR-PASS → a2539a20, round 2 PASS; fresh final review
 of 7cab649b NEAR-PASS → 1f1d4edd (af4e914b PASS), round 2 PASS (also wp1n 5e172dbe) with lows → 491904b1, round 3 PASS at 491904b1;
 wp1m 99de9504 NEAR-PASS, its findings documentation only → 03af2302. Every code commit's final form has a PASS or a reviewed fix; the
-commits after 491904b1 change docs and devlog only. Docs-only commits are not reviewed separately.
+commits after 491904b1 up to 27f04c31 change docs and devlog only (later code commits: abc581b7, 0e2064fe, d24195a8, reviewed below).
+Docs-only commits are not reviewed separately.
 After PR #300's CI failure at 27f04c31 and the user's model changes (DeepSeek final reviews replaced by Grok 4.7, whose two tasks failed at
 once with "usage balance exhausted"; then morph/morph-dsv41flash-1017, high): wp1m morph review at 34f79cb5 PASS (two lows → 902b6e30 and a
 follow-up); fresh final review at 34f79cb5 (7cab649b through abc581b7 and wp1o) NEAR-PASS: M1 the `s0000ab01` snapshot-id collision and
 L1/L2 → 0e2064fe, L3 → follow-up; wp1p review at 902b6e30 (52f2b794, 902b6e30) NEAR-PASS: L3 → 019h, L1 rebutted (follow-ups). A fresh
-final review of 0e2064fe and the records closes the lane.
+final review of 0e2064fe and the records, moved to gpt-6.1-terra (high) at the user's request, NEAR-PASS at 8ef0f280: M1 minted snapshot
+ids could equal another test's fixed id → d24195a8; L1 receipt wording → this record. Round 2 with the same reviewer reviews d24195a8.

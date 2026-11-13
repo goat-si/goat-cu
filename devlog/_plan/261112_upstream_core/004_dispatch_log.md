@@ -247,3 +247,9 @@ snapshot id → 0e2064fe (red both directions "other_window"); L1 negative-only 
 typed tools → 0e2064fe (red with old texts and scratch rewordings); L3 upstream design docs → follow-up. `cu-review-wp1p-902b6e30-s24`
 NEAR-PASS: L3 019h release-state note fixed; L1 (`bring_to_front`, `clipboard_write`) rebutted with the contract doc's window-activation
 line. Fresh final review `cu-final-review-morph-0e2064fe-s24` dispatched for 0e2064fe and the records.
+2026-11-13: per the user, current subagents moved to gpt-6.1-terra (high): `cu-final-review-morph-0e2064fe-s24` cancelled (terminal
+`interrupted`) and recreated with the same brief as `cu-final-review-terra-0e2064fe-s24` (selection verified; the brief's head typo
+8ef0f2807 corrected to the full SHA). NEAR-PASS at 8ef0f280: M1 the scoped-view test stored ids minted from the process-wide counter,
+which can equal another test's fixed id → d24195a8 (fixed ids; a test-build `remember` panics on an id stored for two windows; red: the
+old collision fails 5 of 5 with the check, 1 of 5 without; a minted/fixed collision 5 of 5); L1 the whole-head receipt row and review
+paragraph understated the later Rust commits → 050 corrected. Round 2 (`continueFrom`, same reviewer) dispatched for d24195a8.
