@@ -2266,11 +2266,21 @@ mod tests {
         assert!(second["tree_diff"].as_str().unwrap().contains("~ [1]"));
     }
 
+    /// The panic message of `call`, which must panic. Only that call may
+    /// panic: a refusal anywhere else in a test fails the test.
+    fn panic_message(call: impl FnOnce() + std::panic::UnwindSafe) -> String {
+        let payload = std::panic::catch_unwind(call).expect_err("the call should panic");
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+            .unwrap_or_default()
+    }
+
     /// A test build refuses a snapshot id stored for a second window even
     /// after the per-window cap evicted the first entry: every test shares
     /// the store, so the id must belong to one test.
     #[test]
-    #[should_panic(expected = "two tests share it")]
     fn a_snapshot_id_reused_for_another_window_after_eviction_panics() {
         remember_for_test("s0000c201", 420101, 99101, "- [1] AXButton \"A\"\n");
         for n in 2..=(STORE_PER_WINDOW as u32 + 1) {
@@ -2281,16 +2291,19 @@ mod tests {
             snapshot_row("s0000c201", 1).is_none(),
             "the per-window cap evicted the first read"
         );
-        remember_for_test("s0000c201", 420101, 99102, "- [1] AXButton \"B\"\n");
+        let message = panic_message(|| {
+            remember_for_test("s0000c201", 420101, 99102, "- [1] AXButton \"B\"\n")
+        });
+        assert!(message.contains("two tests share it"), "{message}");
     }
 
     /// A screenshot-only read keeps an existing entry, and it is refused too
     /// when it names another window's snapshot id.
     #[test]
-    #[should_panic(expected = "two tests share it")]
     fn a_screenshot_only_read_under_another_windows_snapshot_id_panics() {
         remember_for_test("s0000c211", 420102, 99103, "- [1] AXButton \"A\"\n");
-        remember_for_test("s0000c211", 420102, 99104, "");
+        let message = panic_message(|| remember_for_test("s0000c211", 420102, 99104, ""));
+        assert!(message.contains("two tests share it"), "{message}");
     }
 
     #[test]
