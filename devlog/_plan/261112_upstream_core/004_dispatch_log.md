@@ -239,3 +239,34 @@ cut the condition, test band, em dash, non-web wording) → 491904b1; round 3 di
 2026-11-12: round 3 (`cu-final-review-491904b1-r3-s24`) PASS at 491904b1: the condition sits in the mark at offset 0 of every untrusted
 line; 3 612 composed combinations, none without it; three informational notes recorded. `cu-review-wp1m-99de9504-s24` (steered)
 NEAR-PASS: M1 `select_text`/`menu_bar_extras` carve-out → named in the contract doc and a 050 follow-up; L1, L2 fixed in 019e.
+2026-11-12: PR #300 CI failure at 27f04c31 (window_state_view shared store) → abc581b7. Per the user, DeepSeek final reviews were replaced by
+Grok 4.7 (`cu-review-wp1m-grok-27f04c31-s24`, `cu-final-review-grok-27f04c31-s24`), both failed at once (402, Grok usage balance
+exhausted); later reviews on morph/morph-dsv41flash-1017 (high), selections verified. `cu-review-wp1m-morph-34f79cb5-s24` PASS (L1 carve-out
+wording → 902b6e30, L2 → 050 follow-up). `cu-final-review-morph-34f79cb5-s24` NEAR-PASS: M1 two window_state_view tests stored the same
+snapshot id → 0e2064fe (red both directions "other_window"); L1 negative-only text guards and L2 Safari/Firefox sent to the Chromium-only
+typed tools → 0e2064fe (red with old texts and scratch rewordings); L3 upstream design docs → follow-up. `cu-review-wp1p-902b6e30-s24`
+NEAR-PASS: L3 019h release-state note fixed; L1 (`bring_to_front`, `clipboard_write`) rebutted with the contract doc's window-activation
+line. Fresh final review `cu-final-review-morph-0e2064fe-s24` dispatched for 0e2064fe and the records.
+2026-11-13: per the user, current subagents moved to gpt-6.1-terra (high): `cu-final-review-morph-0e2064fe-s24` cancelled (terminal
+`interrupted`) and recreated with the same brief as `cu-final-review-terra-0e2064fe-s24` (selection verified; the brief's head typo
+8ef0f2807 corrected to the full SHA). NEAR-PASS at 8ef0f280: M1 the scoped-view test stored ids minted from the process-wide counter,
+which can equal another test's fixed id → d24195a8 (fixed ids; a test-build `remember` panics on an id stored for two windows; red: the
+old collision fails 5 of 5 with the check, 1 of 5 without; a minted/fixed collision 5 of 5); L1 the whole-head receipt row and review
+paragraph understated the later Rust commits → 050 corrected. Round 2 (`continueFrom`, same reviewer) dispatched for d24195a8.
+Round 2 (`cu-final-review-terra-d24195a8-r2b-s24`; a first attempt was rejected because `continueFrom` takes no `isolation`) NEAR-PASS:
+L2 the check saw only retained entries → 519c4751 (a whole-run history of each id's first window, two should_panic tests red against
+d24195a8); L1 missing receipt rows → 050. Bound wp7 receipt at 519c4751 failures=0. Round 3 (`continueFrom`) dispatched.
+Round 3 (`cu-final-review-terra-519c4751-r3-s24`) NEAR-PASS: history sound, rows fixed; L1 `should_panic` over the whole test → 4c740b16
+(catch only the final store's panic; red with a scratch setup collision). Bound wp7 receipt again at 4c740b16 failures=0. Round 4 dispatched.
+Round 4 (`cu-final-review-terra-4c740b16-r4-s24`) PASS, no findings. PR #300 squash-merged (c93f8dbb); commits after 34f79cb5 replayed
+as `cu/261112-upstream-core-r3` (tree equal), wp7 closed with a receipt at ecc91d48; wp1q (019i) on top. Fresh final review
+`cu-final-review-terra-r3-s24` (gpt-6.1-terra, high) dispatched for the r3 branch.
+`cu-final-review-terra-r3-s24` NEAR-PASS at f8f70174: medium browser next step cut by a long field title → 49006a01 (red at
+type_text.rs:5136); low 019i manifest wording → fixed. Round 2 (`continueFrom`) dispatched.
+Round 2 (`cu-final-review-terra-r3-r2-s24`) PASS at 51ade830, no findings.
+2026-11-13: PR #301 Windows CI failure (bounded UIA timing test, 4.51 s) → 404071fa. Windows probe task `cu-win-uia-isolation-s24` on
+desktop-c795oh4 stopped at the toolchain gate (no cargo/rustc; GOAT in Session 0). Fresh final review `cu-final-review-terra-pr301-win-s24`
+FAIL at 37c0d627: P2 unbounded respawn when the child cannot read its parent → 20aedc79; P3 record wording → 050. Round 2 dispatched.
+Round 2 (`cu-final-review-terra-pr301-win-r2-s24`) NEAR-PASS: P3 a matching inherited marker skipped isolation → f8518928 (the body is an
+ignored test the suite test runs in a child with `--exact --ignored`; no marker). Round 3 dispatched.
+Round 3 (`cu-final-review-terra-pr301-win-r3-s24`) PASS at 0c726647, no findings.

@@ -99,6 +99,51 @@
 | 1f1d4edd | final review of 7cab649b | the untrusted web read-back result leads with the read-first rule inside run_steps' 300-character step message; Safari's address-field refusal reads with `page` and acts through element actions; `same_pid_keyboard_ambiguity` names `get_browser_state` and the `browser_*` tools |
 | 5e172dbe | wp1n | sync 01596ffc → fd4505cf (019f): installer pin 0.47.22 (upstream's published version) |
 | 491904b1 | final review round 2 | the unverified mark carries the condition on typing again ("type again only if the text is missing"), so no cut can keep the write without it |
+| 03af2302 | docs | the contract doc names the `select_text`/`menu_bar_extras` carve-out (wp1m review); wp1m, wp1n and final review records |
+| 27f04c31 | docs | final receipt at 03af2302 and last re-fetch |
+| abc581b7 | CI fix | two `window_state_view` tests no longer share the process-wide snapshot store: the "both" case moves to an unused window id, and a test build keeps 4096 snapshots in total (production 32, per-window 8) so parallel reads cannot evict a test's own (goat-ci run 43301885942) |
+| 34f79cb5 | wp1o | sync fd4505cf → 2fc7f3c7 (019g): release 0.47.24 CHANGELOG entry; GOAT versions kept |
+| 52f2b794 | wp1p | sync 2fc7f3c7 → 2319d456 (019h): installer pin 0.47.23 (upstream's published version) |
+| 902b6e30 | wp1m review | the carve-out sentence names only the two tools' acting results (discovery and refusal payloads carry no `verified`); the capability-derived test gap recorded as a follow-up |
+| 0e2064fe | final review of 34f79cb5 | two `window_state_view` tests no longer store the same snapshot id (`s0000ab01`/`s0000ab02`, one entry per id in the shared store); macOS `type_text` names the typed browser tools for Chromium and the px form for Safari, Firefox and embedded web views; stronger page-tool guards in the `type_text` and `set_value` tests |
+| a0bc8020 | docs | CI fix abc581b7, wp1o and wp1p in this record; re-fetch 21:40 UTC |
+| 8ef0f280 | docs | morph review outcomes, 0e2064fe, rebuttal and follow-ups; 019h release-state note |
+| d24195a8 | final review of 8ef0f280 | the scoped-view test stores fixed ids instead of ids minted from the process-wide counter (which could equal another test's fixed id); a test build's `remember` panics when an id is already stored for another pid or window |
+| d21d40b2 | docs | gpt-6.1-terra final review, d24195a8, receipt scope corrected |
+| 519c4751 | final review round 2 | the test-build check remembers the first window of every snapshot id for the whole run (evicted or not, and before the screenshot-only return), with two tests that panic on reuse after eviction and on a screenshot-only read |
+| 0caeded3 | docs | wp7 receipt at 519c4751, review-fix receipts, round-2 outcome |
+| 4c740b16 | final review round 3 | the two shared-id tests catch the panic of only their final, conflicting store, so a collision during setup fails them instead of satisfying `should_panic` |
+| 18fdf61b | docs | round-3 outcome, 4c740b16 and its receipt |
+
+### PR #300 merged; follow-up branch cu/261112-upstream-core-r3 (base origin/main c93f8dbb)
+
+PR #300 was squash-merged on 2026-11-12 22:11 UTC as `c93f8dbb`, whose tree equals `34f79cb5`. The eleven commits after `34f79cb5`
+were replayed onto it with `git cherry-pick 34f79cb5..18fdf61b` as the local branch `cu/261112-upstream-core-r3`; `git diff 18fdf61b
+ecc91d48` is empty, so every receipt and review of those commits holds for their replays.
+
+| r2 commit | r3 commit | | r2 commit | r3 commit |
+|---|---|---|---|---|
+| 52f2b794 (wp1p) | d590786b | | d24195a8 | a32beed3 |
+| 902b6e30 | f92761d7 | | d21d40b2 | c1f2dddc |
+| 0e2064fe | c2834601 | | 519c4751 | 33d44ae2 |
+| a0bc8020 | d52c942e | | 0caeded3 | 26a62280 |
+| 8ef0f280 | 9a1a9f86 | | 4c740b16 | 18c30d1a |
+| | | | 18fdf61b | ecc91d48 |
+
+| Commit | Unit | Content |
+|---|---|---|
+| 4bd80f01 | wp1q | sync 2319d456 → ed9fd9a5 (019i): installer pin 0.47.24 (upstream's published version); vendored cua-telemetry 0.27.1 (version only) |
+| f8f70174 | docs | PR #300 merged; replay onto r3; wp1q; round-4 PASS; rustix follow-up |
+| 49006a01 | final review of r3 | macOS `type_text`'s unverified web next step leads the result after the read-first condition, ahead of the count and detail, so run_steps' 300-character step message keeps the whole step (the px route for Safari and Firefox) |
+| 51ade830 | docs | r3 final review outcome, type_text step fix, 019i manifest wording |
+| d1aa1023 | docs | r3 final review round 2 PASS |
+| 9ac0dc10 | docs | final receipt at d1aa1023 on the r3 branch (pushed as PR #301) |
+| 404071fa | CI fix | the Windows bounded-UIA timing test runs alone in a child test process (goat-ci run 43348554460) |
+| 37c0d627 | docs | PR #301 Windows UIA timing test fix 404071fa |
+| 20aedc79 | final review of 37c0d627 | the lone-child check has three outcomes: a child whose parent is missing from the process list fails instead of spawning another child |
+| dd05718c | docs | PR #301 fix review FAIL, 20aedc79, overlap stated as an estimate |
+| f8518928 | final review round 2 | the timed UIA body is its own ignored test, which the suite test always runs in a child process (`--exact <name> --ignored`); no marker, no parent-pid lookup |
+| 0c726647 | docs | PR #301 fix round 2, f8518928 ignored-child form |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -131,6 +176,14 @@ origin/main `40c6f6eb` and agent-desktop `54855b62` unchanged at each.
 Last re-fetch before the final D (2026-11-12 20:30 UTC, after the receipt at 03af2302): trycua/cua main `fd4505cf` (no commit after wp1n),
 origin/main `40c6f6eb`, agent-desktop `54855b62` — no new in-scope delta. The remote lane branch reads `99de9504` (pushed by the
 coordinator), an ancestor of the local head.
+Re-fetch after abc581b7 (~20:50 UTC): trycua/cua main `2fc7f3c7` (release 0.47.24) → unit wp1o (019g). Re-fetch after 34f79cb5
+(~21:10 UTC): trycua/cua main `2319d456` (published installer 0.47.23) → unit wp1p (019h).
+Last re-fetch (2026-11-12 21:40 UTC, after 902b6e30): trycua/cua main `2319d456` (no commit after wp1p), origin/main `40c6f6eb`,
+agent-desktop `54855b62` — no new in-scope delta. The remote lane branch reads `34f79cb5` (pushed by the coordinator), an ancestor of
+the local head.
+Re-fetch after the final review closed (2026-11-13 01:36 UTC): origin/main `c93f8dbb` (PR #300, squash), trycua/cua main `ed9fd9a5`
+(10 commits after 2319d456; installer 0.47.24 and cua-sdk 0.27.1 → unit wp1q, 019i), agent-desktop `947b051f` (release 1.3.0 and a
+`rustix` bump; no core gap, 019i).
 
 ### Follow-ups recorded, not done in this lane
 
@@ -223,10 +276,32 @@ coordinator), an ancestor of the local head.
   the `ActionResult`. Follow-up: give both their capabilities and the action-result projection. The contract doc names the carve-out
   (GOAT patch to keep on the next sync). Also stale: `tool.rs:990-999` says `type_text_chars` is registered on Linux; no roster
   registers it.
+- wp1m morph review (34f79cb5): `every_native_input_tool_publishes_the_action_result` is capability-derived, so a future native-input tool
+  that advertises no capability and is not an action-result tool passes unseen. Smallest fix: a GOAT test with a per-platform expected
+  set of native-input tool names, `select_text` and `menu_bar_extras` listed as the current exceptions.
+  The wp1p review (902b6e30) asked to name `bring_to_front` and `clipboard_write` there too: rebutted, since the contract doc's own
+  (upstream) text lists window activation among the mutating tools that keep their own typed results (`docs/action-result-contract.md:56-57`),
+  which is `bring_to_front` (it advertises `window.activate`, `tool.rs:1041`), and `clipboard_write` changes the clipboard, not desktop
+  input. The expected set in the fix should still list both as outside the rule.
+- Final review of 34f79cb5: macOS `type_text`'s escalation tag stays `page` for every non-Electron web area
+  (`web_readback_next_rung`, `type_text.rs:1204`), which `action_record` maps to binding a browser page route; Safari and Firefox have
+  none. 0e2064fe makes the description, next step and reason name the px form for them; telling the browsers apart in the tag needs the
+  bundle id in `web_readback_next_rung`. And upstream's design records still describe `page` as an acting rung
+  (`docs/browser-tool-implementation-plan.md:47`, `:49`; `docs/test-matrix.md:251` "Page selector/JavaScript"); both files are
+  byte-identical to upstream 2319d456 (blob `a8b8a0d4` and `2d2cf7a2`, equal to the `sha` that `gh api
+  repos/trycua/cua/contents/libs/cua-driver/<path>?ref=2319d456` returns), so they are left for upstream.
+- `platform-macos/src/tools/set_value.rs` is not rustfmt-clean (on origin/main too; e0851769 adds one more hunk at `:131`), so the
+  wp7 receipt checks rustfmt only on the files it changed that were clean.
+- `uia::client::tests::probe_distinguishes_blocked_and_destroyed_window` asserts its 1 s probe of a blocked window returns in under 2 s in
+  the shared test process, the same shape as the bounded-UIA test before 404071fa; it has not failed, and the same child-process
+  isolation (an ignored body test run by a suite test in a child process, as in f8518928) would apply if it does.
+- goat-cu's lock has `rustix` 1.1.4 (through `async-io`/`zbus` for platform-linux, among others), inside RUSTSEC-2026-0486's range for
+  rustix's xattr functions (informational, unsound with a zero-length buffer; patched in 1.1.6, which agent-desktop 947b051f takes).
+  No goat-cu code calls an xattr function and `cargo deny` passes in CI; `cargo update -p rustix` would move it when wanted.
 - Final review rounds 2-3 (informational): an embedded web view after pixel focus reads "do not repeat it" next to the mark's "type
   again only if the text is missing" (the px rung is terminal); the non-web branch says "read the field" where the field could not be
-  read; with a field title over ~27 characters the browser-tab step's px clause falls past run_steps' 300-character cut (the read and
-  its condition always survive, and the cut ends in "...").
+  read; with a field title over ~27 characters the browser-tab step's px clause fell past run_steps' 300-character cut (the read and
+  its condition always survived) — fixed in 49006a01, where the step leads the result.
 
 ### Issue dispositions (path:line at the final head)
 
@@ -259,6 +334,46 @@ helper safety harnesses. Logs: /tmp/goat-cu-sync/receipt-final/.
 
 ### CI after the receipt
 
+- PR #301 at 9ac0dc10 (run 43348554460, `PR Windows schema contract and platform unit`, `platform-windows --lib`):
+  `uia::client::tests::bounded_element_from_handle_times_out_without_probe` failed at client_tests.rs:141 with "elapsed: 4.5124081s"
+  (445 passed). The test is unchanged since the initial commit and this branch changes nothing in `platform-windows`. It times one real
+  `ElementFromHandle` on a hidden window whose thread never pumps messages, with the bounded client (connection timeout 2000 ms), and
+  asserts under 4 s; earlier runs passed, so the call normally ends after about one connection timeout. The log has completion times
+  only: the failure at 02:03:21.41 and the 4.51 s elapsed put the call's start at about 02:03:16.9, and three UIA tests in the same
+  process completed after that estimate (`concurrent_clients_do_not_hit_reentrant_failure`, 4 clients and `GetRootElement`, 17.26;
+  `probe_distinguishes_blocked_and_destroyed_window`, its own blocked window, 18.27; `uia_is_usable_on_a_thread_already_in_an_sta`,
+  18.66), so they probably overlapped it; the binary's 448 tests run on libtest's default threads on a 4-vCPU runner. In-process UIA
+  contention is the working hypothesis, not a measured cause; isolation removes it, and the child still fails if UIA itself overruns
+  (body, 4 s bound and watchdog unchanged). Production calls
+  `probe_root` (a 1 s `window_thread_responds`) before `ElementFromHandle` and never depends on this timing. Fix (final form f8518928):
+  the timed body is its own ignored test, `bounded_element_from_handle_times_out_alone`, and `bounded_element_from_handle_times_out_without_probe`
+  always runs it in a child test process (`--exact <name> --ignored`) and requires its ` 1 passed;`; no goat-ci step runs platform-windows
+  with `--ignored`. The 4 s bound, the body and every production timeout are unchanged. (404071fa first used a `spawned-by-<parent pid>`
+  marker as `mutter_display` does; review rounds showed an unreadable parent could respawn without bound (20aedc79) and a matching
+  inherited marker could skip isolation, so f8518928 dropped the marker.)
+  Checked from macOS: `cargo check --locked --target x86_64-pc-windows-msvc -p platform-windows --all-targets` passes; cross clippy has
+  nothing in client_tests.rs. NOT RUN on Windows: `desktop-c795oh4` has no Rust toolchain and its GOAT runs in Session 0 without a desktop
+  (probe task `cu-win-uia-isolation-s24`), `parkjs-win` is unreachable; goat-ci on the pushed head is the Windows run.
+  Final review of 37c0d627 (fresh, gpt-6.1-terra) FAIL: P2 a child whose parent is missing from the Toolhelp list counted as a parent
+  and spawned again, without bound under a persistent failure → 20aedc79 (three outcomes; red with a standalone copy of both decisions:
+  the old one gets 2 of 7 rows wrong, the new one none); P3 the record stated the overlap as established → reworded above.
+- PR #300 at 27f04c31 (run 43301885942, `PR Linux schema contract and platform unit`, `cua-driver-core --lib`):
+  `window_state_view::tests::an_elements_diff_counts_only_the_elements_it_returns` failed at window_state_view.rs:2641 with
+  `since_status` "diff" instead of "no_change" (1830 passed). Its "both" case read window 7021, which
+  `since_returns_diff_then_falls_back` also reads, and `since:"latest"` names a window's most recent read in the process-wide snapshot
+  store, so the other test's read landing between this test's second and third reads made "latest" the other test's snapshot. Red
+  (scratch, not committed): replaying that read between the two reads gave the CI failure exactly (left "diff", right "no_change",
+  "both"; `/tmp/goat-cu-sync/wsv-red.log`). Running the module alone then showed a second shared-store failure:
+  `since_with_elements_returns_every_element_and_passes_the_typed_check` read "unknown_snapshot" (`wsv-module.log`, 45 passed / 1
+  failed) because the store keeps 32 snapshots across all windows and parallel tests evicted the one it had just stored; storing 32 other
+  windows' snapshots between its reads reproduced it (`wsv2-red.log`). Fix abc581b7: the "both" case uses window 7030, which no other
+  test uses, and a test build keeps 4096 snapshots in total (`#[cfg(test)]`; production 32; the per-window cap of 8 unchanged; no test
+  exercises the total cap). No assertion changed. Each scratch passes with its fix in place. macOS: `window_state_view` 46 passed in
+  30 of 30 runs, `cua-driver-core --lib` 2× 1828 passed / 3 ignored. Linux container at 902b6e30 (no Rust change after abc581b7):
+  both named tests passed (`--exact`), `window_state_view` 46 passed in 30 of 30 runs, `cua-driver-core --lib` 1831 passed / 3 ignored
+  and `clippy -p cua-driver-core --all-targets -D warnings` exit 0 (`/tmp/goat-cu-sync/wsv-focused-902b6e30.log`). goat-ci on 34f79cb5 (which contains abc581b7):
+  `PR Linux schema contract and platform unit`, `PR macOS schema contract`, `PR Windows schema contract and platform unit`, Clippy macOS
+  and Linux, `deny` and the Linux and Windows arm64 builds green.
 - PR #300 at 5c760643 (run 43183852970, Linux `cua-driver-core --lib`): `batch_tools::tests::pauses_between_steps_but_not_after_the_last`
   failed at tests.rs:1400 with "2. click ERROR (time_budget): step exceeded its execution budget" (1825 passed). The test runs on a paused
   tokio clock and replaces only step 1's deadline with a trigger (`deadline_override.take()`, batch_tools.rs:1037); step 2 keeps a real
@@ -331,7 +446,16 @@ and a `deprecated` entry only). `contract/manifest.json` and both UniFFI binding
 | whole head | 1f1d4edd | `TMPDIR=/private/tmp`: the same 24 steps, failures=0: core-lib 1828 / 3, core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 200, linux-host 110, target checks, clippy macOS and Linux x86_64, deny, build-driver, e2e check, check_protocol compatible, protocol delta problems 0, output delta adds only `process_instance`, helper tests |
 | wp1n | 5e172dbe | `bash -n`, connect-step 15, install version fallback 40 / 7 skipped (upstream layout) |
 | final review round 2 fix | 491904b1 | the sweep over detail lengths 0-300 red at type_text.rs:5118, then tools::type_text 63 / 1; platform-macos --lib 2038 / 48; clippy -p platform-macos --all-targets -D warnings clean. Only this file changed after the 1f1d4edd receipt |
-| whole head (final) | 03af2302 | `TMPDIR=/private/tmp`, kache doctor 0: the same 24 steps, failures=0: core-lib 1828 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 200, linux-host 110, Linux x86_64 and Windows MSVC target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, cargo deny (bans, licenses, sources ok), build-driver, e2e check, check_protocol compatible in every launch form (daemon 0.8.0 = 0.8.0), protocol delta problems 0, output delta removes nothing, Wayland helper checks. Later commits change devlog only |
+| whole head | 03af2302 | `TMPDIR=/private/tmp`, kache doctor 0: the same 24 steps, failures=0: core-lib 1828 / 3 (+2 isolated child runs), core-int 93, contract-lib 91, overlay-lib 158, macos-lib 2038 / 48, windows-host 200, linux-host 110, Linux x86_64 and Windows MSVC target checks (libs and bins), clippy -D warnings macOS and Linux x86_64, cargo deny (bans, licenses, sources ok), build-driver, e2e check, check_protocol compatible in every launch form (daemon 0.8.0 = 0.8.0), protocol delta problems 0, output delta removes nothing, Wayland helper checks. It does not cover the later Rust commits abc581b7, 0e2064fe and d24195a8 (`window_state_view` tests, macOS `type_text` texts, two test guards, a test-build store check); their narrower receipts are the rows below |
+| CI fix | abc581b7 | red first (scratch): the CI failure and "unknown_snapshot" each reproduced exactly; then `window_state_view` 30/30 runs and core-lib 2× 1828 / 3 (macOS), the Linux container receipt at 902b6e30 and goat-ci on 34f79cb5 in "CI after the receipt" |
+| wp1o | 34f79cb5 | CHANGELOG top 40 lines identical to 2fc7f3c7; the 8 version files byte-identical to the parent (019g) |
+| wp1p | 52f2b794 | `bash -n`, connect-step 15, install version fallback 40 / 7 skipped (upstream layout) (019h) |
+| final review fixes | 0e2064fe | red first (scratch): each of the two tests' first stores replayed between the other's reads gave "other_window" (window_state_view.rs:2129, :2272); the old `type_text` texts fail the new Chromium/Safari assertions (type_text.rs:5074); rewordings fail at type_text.rs:5070 and set_value.rs:2806. Green in the wp7 receipt |
+| final review fixes | d24195a8, 519c4751 | red first: with 0e2064fe's collision put back (scratch) the module failed 1 of 5 runs without a check and 5 of 5 with it; a minted/fixed collision (scoped test given `s00000009`) 5 of 5; the two new tests did not panic against d24195a8's retained-entry check (window_state_view.rs:2263, :2280) and pass with 519c4751's history, which also fails both scratch collisions 5 of 5. Green in the wp7 receipt |
+| round 3 fix | 4c740b16 | red (scratch): with another window holding the setup id `s0000c202`, the `should_panic` form passed; the new form fails at the setup store naming both windows; with the history check removed both new tests fail ("the call should panic") |
+| wp7 receipt | 519c4751, again at 4c740b16 | `cxc receipt test -- zsh /tmp/goat-cu-sync/receipt-wp7.sh`, failures=0 at each: rustfmt --check of window_state_view.rs and type_text.rs (set_value.rs is not rustfmt-clean on origin/main either), platform-macos type_text + set_value 199 / 1, platform-macos --lib 2038 / 48, the four named window_state_view tests, window_state_view 30 of 30 runs (48 passed), core --lib 1830 / 3, clippy -D warnings (platform-macos, cua-driver-core); Linux container core --lib 1833 / 3, window_state_view 30 of 30 runs, clippy core -D warnings. Logs: /tmp/goat-cu-sync/receipt-wp7/ (4c740b16) |
+| r3 final fix | 49006a01 | red first: the strengthened sweep (whole browser step at every detail 0-300 and count) failed at detail 2, count 1234567 (type_text.rs:5136); green with the fix; platform-macos type_text + set_value 199 / 1, platform-macos --lib 2038 / 48, clippy macOS clean |
+| final receipt (r3) | d1aa1023 | `cxc receipt test -- zsh /tmp/goat-cu-sync/receipt-final-r3.sh`, 18 steps, failures=0: the wp7 steps above (platform-macos --lib 2038 / 48, core --lib 1830 / 3, window_state_view 30 of 30, Linux core 1833 / 3 and 30 of 30, clippy macOS and Linux core, rustfmt) plus wp1q's: `bash -n`, connect-step 15 passed, install version fallback 40 passed / 7 skipped (upstream layout), `cargo metadata --locked`, `cargo check --locked -p cua-telemetry` (0.27.1), `cargo check --locked -p cua-driver` on macOS and in the Linux container. Also at ecc91d48 (the replay, wp7's close). Logs: /tmp/goat-cu-sync/receipt-final-r3/. Later commits change devlog only |
 
 Linux runs are in a rust:1.97.1 aarch64 container (plain cargo, Xvfb installed); CI covers x86_64.
 
@@ -343,4 +467,28 @@ of their final form are under narrow fresh reviews: `cu-delta-review-019c3858-s2
 After wp1h: wp1i 190a160e NEAR-PASS → 7cab649b; wp1j c8a91fc0 PASS; wp1k bc02a591 NEAR-PASS → a2539a20, round 2 PASS; fresh final review
 of 7cab649b NEAR-PASS → 1f1d4edd (af4e914b PASS), round 2 PASS (also wp1n 5e172dbe) with lows → 491904b1, round 3 PASS at 491904b1;
 wp1m 99de9504 NEAR-PASS, its findings documentation only → 03af2302. Every code commit's final form has a PASS or a reviewed fix; the
-commits after 491904b1 change docs and devlog only. Docs-only commits are not reviewed separately.
+commits after 491904b1 up to 27f04c31 change docs and devlog only (later code commits: abc581b7, 0e2064fe, d24195a8, reviewed below).
+Docs-only commits are not reviewed separately.
+After PR #300's CI failure at 27f04c31 and the user's model changes (DeepSeek final reviews replaced by Grok 4.7, whose two tasks failed at
+once with "usage balance exhausted"; then morph/morph-dsv41flash-1017, high): wp1m morph review at 34f79cb5 PASS (two lows → 902b6e30 and a
+follow-up); fresh final review at 34f79cb5 (7cab649b through abc581b7 and wp1o) NEAR-PASS: M1 the `s0000ab01` snapshot-id collision and
+L1/L2 → 0e2064fe, L3 → follow-up; wp1p review at 902b6e30 (52f2b794, 902b6e30) NEAR-PASS: L3 → 019h, L1 rebutted (follow-ups). A fresh
+final review of 0e2064fe and the records, moved to gpt-6.1-terra (high) at the user's request, NEAR-PASS at 8ef0f280: M1 minted snapshot
+ids could equal another test's fixed id → d24195a8; L1 receipt wording → this record. Round 2 with the same reviewer reviews d24195a8.
+Round 2 NEAR-PASS at d21d40b2: L2 the check saw only retained entries (an id reused after eviction or by a screenshot-only read went
+unseen) → 519c4751; L1 the receipt rows for 0e2064fe and d24195a8 were missing → added above. Round 3 reviews 519c4751 and the rows.
+Round 3 NEAR-PASS at 0caeded3: the history is sound for its rule and the rows resolve round 2's finding; L1 `should_panic` over the whole
+test could be satisfied by a setup collision → 4c740b16. Round 4 reviews 4c740b16.
+Round 4 PASS at 18fdf61b, no findings. After PR #300's squash merge, a fresh final review covers the r3 branch (the replay, wp1q and these
+records).
+Fresh final review of r3 NEAR-PASS at f8f70174: replay, wp1q and the snapshot guard verified; medium: the browser next step could be cut
+by a long field title in run_steps' step message → 49006a01; low: 019i overstated the vendored manifest's blob identity → 019i corrected.
+Round 2 (same reviewer) reviews 49006a01.
+Round 2 PASS at 51ade830, no findings: the browser step leads the result in all three untrusted branches, other branches and the
+structured payload are unchanged, and the records are accurate. Every code commit on the r3 branch has a PASS of its final form.
+PR #301's Windows CI failure added 404071fa: its fresh final review FAILED on the lone-child recursion (fixed in 20aedc79, see "CI after
+the receipt"); round 2 with the same reviewer reviews 20aedc79.
+Round 2 NEAR-PASS at dd05718c: respawn fixed; P3 a suite that inherited a marker equal to its own parent's pid would time the call in
+the shared process → f8518928 (ignored body test, no marker). Round 3 reviews f8518928.
+Round 3 PASS at 0c726647, no findings: one child always, no recursion, a renamed body fails the parent, the body and bound unchanged; an
+explicit `--ignored`/`--include-ignored` run of the suite would time the body in that process, and no goat-ci step uses either.

@@ -121,8 +121,30 @@ fn probe_distinguishes_blocked_and_destroyed_window() {
     assert_eq!(probe_root(hwnd), RootVerdict::WindowGone);
 }
 
+/// The timed call in a process of its own: other tests in this binary create UIA clients,
+/// blocked windows and COM apartments on other threads, so the suite runs the body as an ignored
+/// test in a child test process and only checks that it passed there.
 #[test]
 fn bounded_element_from_handle_times_out_without_probe() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "uia::client::tests::bounded_element_from_handle_times_out_alone",
+            "--ignored",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains(" 1 passed;"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "run alone in a child process by bounded_element_from_handle_times_out_without_probe"]
+fn bounded_element_from_handle_times_out_alone() {
     let window = BlockedWindow::new();
     let hwnd = window.hwnd;
     let (tx, rx) = mpsc::channel();

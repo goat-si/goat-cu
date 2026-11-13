@@ -2801,6 +2801,14 @@ mod tests {
             !text.contains("act on the page itself use the page tool"),
             "{text}"
         );
+        // Any mention of the page tool is its read form, and acting names
+        // element actions.
+        assert_eq!(
+            text.matches("page tool").count(),
+            text.matches("page tool (get_text, query_dom)").count(),
+            "{text}"
+        );
+        assert!(text.contains("through element actions"), "{text}");
     }
 
     #[test]

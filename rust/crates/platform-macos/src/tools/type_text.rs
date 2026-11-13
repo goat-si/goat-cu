@@ -68,8 +68,8 @@ fn def() -> &'static ToolDef {
             Where AX insertion is unsupported (Chromium/Electron) it falls back to CGEvent typing when the \
             route fits the transport budget; longer text is refused with a safe chunk size. In web content \
             (browser tabs, Slack, VS Code) AXValue does not prove the DOM saw the text, so the result is \
-            `effect:\"unverifiable\"`; exact web targets use pointer focus and PID key delivery. For a browser \
-            tab use get_browser_state and browser_type (`page` only reads); for an embedded web view pass `x, y` (no element_token) to pixel-click \
+            `effect:\"unverifiable\"`; exact web targets use pointer focus and PID key delivery. For a Chromium \
+            tab use get_browser_state and browser_type (`page` only reads); for Safari, Firefox or an embedded web view pass `x, y` (no element_token) to pixel-click \
             the field and type in one call (AX-press a closed control open first).".into(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -740,18 +740,20 @@ fn completed_delivery(delivery: TypeTextDelivery) -> Option<(TypeTextOutcome, bo
 }
 
 /// The next step a browser-tab result names when its AXValue read-back is not
-/// proof that the DOM saw the text.
-const BROWSER_TAB_NEXT_STEP: &str = "In a browser tab check it with get_browser_state, then type \
-     with browser_type if it did not land; in an embedded web view use the px form (x,y) once the \
-     screenshot shows it missing.";
+/// proof that the DOM saw the text. The typed browser tools attach to Chromium
+/// only; Safari and Firefox refuse `get_browser_state`, so they take the px form.
+const BROWSER_TAB_NEXT_STEP: &str = "In a Chromium tab check it with get_browser_state, then type \
+     with browser_type if it did not land; in Safari, Firefox or an embedded web view use the px \
+     form (x,y) once the screenshot shows it missing.";
 
 /// The reason the `page` escalation gives for browser web content: `page` only
-/// reads, so acting on the tab goes through the typed browser tools.
+/// reads, so acting on a Chromium tab goes through the typed browser tools and
+/// Safari or Firefox through the px form.
 const BROWSER_TAB_ESCALATION_REASON: &str = "Browser web content — AXValue read-back cannot prove \
      that the DOM observed the input (and AX type_text on a contenteditable is racy). Confirm via \
-     the screenshot or get_browser_state first; if the text did not land, type it with \
-     browser_type (mode insert_text first; keystrokes if a rich-text editor such as Draft.js, \
-     Lexical or Slate discards the insert).";
+     the screenshot or, in Chromium, get_browser_state first; if the text did not land, type it \
+     with browser_type (mode insert_text first; keystrokes if a rich-text editor such as Draft.js, \
+     Lexical or Slate discards the insert), or in Safari and Firefox with the px form (x,y).";
 
 /// The hint for a line that landed without its Return. The dispatch seam keeps
 /// a hint the tool set, so its generic "read before typing again" never applies.
@@ -842,8 +844,8 @@ fn type_text_outcome_result(
     // CGEvent rung the app may have dropped). Don't dress that as a
     // confirmed insert — tell the agent to look, and point at the
     // right next rung.
-    let (mark, note) = if verified {
-        ("✅ Inserted", String::new())
+    let (mark, note): (std::borrow::Cow<'static, str>, String) = if verified {
+        ("✅ Inserted".into(), String::new())
     } else if line_without_return {
         // Both instructions lead, ahead of the char count and the variable
         // detail (field title, document note, error text), so a run_steps step
@@ -852,7 +854,8 @@ fn type_text_outcome_result(
         (
             "📨 Inserted the line, Return not confirmed — do not repeat type_text, which would insert \
              it again; to submit, read the field first: if it still holds the line unsubmitted and \
-             has focus, press Return with press_key. Inserted",
+             has focus, press Return with press_key. Inserted"
+                .into(),
             String::new(),
         )
     } else if untrusted_web_readback {
@@ -872,22 +875,27 @@ fn type_text_outcome_result(
             "The window's focused element could not be read, so the AXValue read-back \
              cannot be tied to the target window."
         };
-        // The read-first rule and its condition lead, ahead of the char count
-        // and the variable detail (field title, document note), and the next
-        // step comes before the explanation, so run_steps' 300-character step
-        // message can never keep a write without its condition.
+        // The read-first rule, its condition and the next step lead, ahead of
+        // the char count and the variable detail (field title, document note),
+        // so run_steps' 300-character step message keeps them whole (the
+        // browser step is the only place a Safari or Firefox caller learns the
+        // px route) and never a write without its condition.
         (
-            "📨 Sent (unverified): read the field, and type again only if the text is missing.",
-            format!(" {next_step} {surface}"),
+            format!(
+                "📨 Sent (unverified): read the field, and type again only if the text is missing. \
+                 {next_step}"
+            )
+            .into(),
+            format!(" {surface}"),
         )
     } else if path == PATH_KEY_EVENTS_FG {
         (
-            "📨 Sent (unverified)",
+            "📨 Sent (unverified)".into(),
             " — driver could not confirm; verify via screenshot.".to_string(),
         )
     } else {
         (
-            "📨 Sent (unverified)",
+            "📨 Sent (unverified)".into(),
             " — driver could not confirm the text landed; verify via screenshot, \
                       and re-call with delivery_mode:\"foreground\" if it didn't."
                 .to_string(),
@@ -5064,10 +5072,19 @@ mod tests {
             BROWSER_TAB_NEXT_STEP,
             BROWSER_TAB_ESCALATION_REASON,
         ] {
-            for removed in ["execute_javascript", "type_keystrokes", "the `page` tool"] {
+            for removed in [
+                "execute_javascript",
+                "type_keystrokes",
+                "the `page` tool",
+                "page tool",
+            ] {
                 assert!(!text.contains(removed), "{removed:?} in {text:?}");
             }
             assert!(text.contains("browser_type"), "{text:?}");
+            // The typed browser tools attach to Chromium only; Safari and
+            // Firefox callers are sent to the pixel route instead.
+            assert!(text.contains("Chromium"), "{text:?}");
+            assert!(text.contains("Safari"), "{text:?}");
         }
         // After an unverified send the caller reads first and types again only
         // if the text did not land.
@@ -5112,7 +5129,9 @@ mod tests {
             first_line.chars().take(300).collect::<String>()
         };
         // Whatever the field title or note, the cut keeps the condition on
-        // typing again, never an unconditional write.
+        // typing again and the whole browser next step (the only place a
+        // Safari or Firefox caller learns the px route), never an
+        // unconditional write.
         for len in 0..=300 {
             for count in [1, 99_999, 1_234_567] {
                 let bounded = step_message(" ".repeat(len), count);
@@ -5120,10 +5139,12 @@ mod tests {
                     bounded.contains("type again only if the text is missing"),
                     "detail {len}, count {count}: {bounded}"
                 );
+                assert!(
+                    bounded.contains(BROWSER_TAB_NEXT_STEP),
+                    "detail {len}, count {count}: {bounded}"
+                );
             }
         }
-        let bounded = step_message(String::new(), 99_999);
-        assert!(bounded.contains(BROWSER_TAB_NEXT_STEP), "{bounded}");
     }
 
     #[test]

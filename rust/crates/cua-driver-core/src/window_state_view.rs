@@ -928,6 +928,32 @@ fn store() -> &'static Mutex<VecDeque<StoredSnapshot>> {
     STORE.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
+/// Every test in the binary shares the store, which keeps one entry per
+/// snapshot id, so a test that stores another test's id for its own window
+/// replaces that test's read. A test build remembers the window that first
+/// stored each id for the whole run, evicted or not, and refuses the id for any
+/// other window, so a shared id fails every run instead of an unlucky one.
+#[cfg(test)]
+fn refuse_snapshot_id_of_another_window(snapshot_id: &str, ctx: &ViewContext<'_>) {
+    static FIRST_WINDOW: OnceLock<Mutex<std::collections::HashMap<String, (i64, u64)>>> =
+        OnceLock::new();
+    let mut first = FIRST_WINDOW
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (pid, window_id) = *first
+        .entry(snapshot_id.to_owned())
+        .or_insert((ctx.pid, ctx.window_id));
+    drop(first);
+    assert!(
+        (pid, window_id) == (ctx.pid, ctx.window_id),
+        "snapshot id {snapshot_id} was stored for pid {pid} window {window_id} and again for pid {} \
+         window {}: two tests share it in the process-wide store",
+        ctx.pid,
+        ctx.window_id
+    );
+}
+
 /// The key a read is remembered under: a window-basis id names the same
 /// read as its plain snapshot id (goat-si/cua-driver#130). Any other text is
 /// kept as given.
@@ -940,6 +966,8 @@ fn stored_snapshot_key(snapshot_id: &str) -> std::borrow::Cow<'_, str> {
 
 fn remember(snapshot_id: &str, ctx: &ViewContext<'_>, md: &str, structured: &Value) {
     let snapshot_id = &*stored_snapshot_key(snapshot_id);
+    #[cfg(test)]
+    refuse_snapshot_id_of_another_window(snapshot_id, ctx);
     let mut guard = store().lock().unwrap_or_else(|e| e.into_inner());
     // A screenshot-only read keeps its snapshot id and returns no tree. It
     // must not erase the rows that snapshot's tokens were read from.
@@ -1705,10 +1733,10 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let full_id =
-                crate::element_token::format_snapshot_id(crate::element_token::mint_snapshot_id());
-            let scoped_id =
-                crate::element_token::format_snapshot_id(crate::element_token::mint_snapshot_id());
+            // Fixed ids no other test stores: a minted id comes from the
+            // process-wide counter and can equal another test's fixed id.
+            let full_id = format!("s0000c1{i}0");
+            let scoped_id = format!("s0000c1{i}1");
             let ctx = ViewContext {
                 pid: 420001,
                 window_id: 97000 + i as u64,
@@ -1752,8 +1780,7 @@ mod tests {
                 Some(full_id.as_str()),
                 "{args}"
             );
-            let next_id =
-                crate::element_token::format_snapshot_id(crate::element_token::mint_snapshot_id());
+            let next_id = format!("s0000c1{i}2");
             let (mut content, mut next) = payload(&next_id, OLD);
             next["observation_complete"] = json!(true);
             next["observation_incomplete_reasons"] = json!([]);
@@ -2239,10 +2266,50 @@ mod tests {
         assert!(second["tree_diff"].as_str().unwrap().contains("~ [1]"));
     }
 
+    /// The panic message of `call`, which must panic. Only that call may
+    /// panic: a refusal anywhere else in a test fails the test.
+    fn panic_message(call: impl FnOnce() + std::panic::UnwindSafe) -> String {
+        let payload = std::panic::catch_unwind(call).expect_err("the call should panic");
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+            .unwrap_or_default()
+    }
+
+    /// A test build refuses a snapshot id stored for a second window even
+    /// after the per-window cap evicted the first entry: every test shares
+    /// the store, so the id must belong to one test.
+    #[test]
+    fn a_snapshot_id_reused_for_another_window_after_eviction_panics() {
+        remember_for_test("s0000c201", 420101, 99101, "- [1] AXButton \"A\"\n");
+        for n in 2..=(STORE_PER_WINDOW as u32 + 1) {
+            let id = format!("s0000c2{n:02x}");
+            remember_for_test(&id, 420101, 99101, "- [1] AXButton \"A\"\n");
+        }
+        assert!(
+            snapshot_row("s0000c201", 1).is_none(),
+            "the per-window cap evicted the first read"
+        );
+        let message = panic_message(|| {
+            remember_for_test("s0000c201", 420101, 99102, "- [1] AXButton \"B\"\n")
+        });
+        assert!(message.contains("two tests share it"), "{message}");
+    }
+
+    /// A screenshot-only read keeps an existing entry, and it is refused too
+    /// when it names another window's snapshot id.
+    #[test]
+    fn a_screenshot_only_read_under_another_windows_snapshot_id_panics() {
+        remember_for_test("s0000c211", 420102, 99103, "- [1] AXButton \"A\"\n");
+        let message = panic_message(|| remember_for_test("s0000c211", 420102, 99104, ""));
+        assert!(message.contains("two tests share it"), "{message}");
+    }
+
     #[test]
     fn boundary_markers_and_completeness_survive_diff_and_no_change() {
         let window = 88002;
-        let (mut content, mut first) = payload("s0000ab01", OLD);
+        let (mut content, mut first) = payload("s0000ab41", OLD);
         first["observation_complete"] = json!(false);
         first["observation_incomplete_reasons"] = json!([{"kind":"budget","detail":"node_budget"}]);
         first["elements"][0]["boundary"] = json!({"reasons":[{"kind":"budget","detail":"node_budget"}], "children_skipped":{"known":3}});
@@ -2253,14 +2320,14 @@ mod tests {
             .unwrap()
             .contains("[+3 more: node_budget]"));
         assert!(text_of(&content).contains("[more: unknown: not_asserted]"));
-        let (mut content, mut second) = payload("s0000ab02", OLD);
+        let (mut content, mut second) = payload("s0000ab42", OLD);
         second["observation_complete"] = json!(false);
         second["observation_incomplete_reasons"] =
             json!([{"kind":"budget","detail":"node_budget"}]);
         second["elements"][0]["boundary"] = json!({"reasons":[{"kind":"budget","detail":"node_budget"}], "children_skipped":{"known":3}});
         second["elements"][1]["boundary"] = json!({"reasons":[{"kind":"unknown","detail":"not_asserted"}], "children_skipped":"unknown"});
         apply(
-            &opts(json!({"since":"s0000ab01"})),
+            &opts(json!({"since":"s0000ab41"})),
             &ctx(window),
             &mut content,
             &mut second,
