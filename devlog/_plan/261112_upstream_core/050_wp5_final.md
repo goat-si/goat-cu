@@ -447,3 +447,5 @@ records).
 Fresh final review of r3 NEAR-PASS at f8f70174: replay, wp1q and the snapshot guard verified; medium: the browser next step could be cut
 by a long field title in run_steps' step message → 49006a01; low: 019i overstated the vendored manifest's blob identity → 019i corrected.
 Round 2 (same reviewer) reviews 49006a01.
+Round 2 PASS at 51ade830, no findings: the browser step leads the result in all three untrusted branches, other branches and the
+structured payload are unchanged, and the records are accurate. Every code commit on the r3 branch has a PASS of its final form.

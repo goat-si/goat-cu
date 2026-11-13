@@ -263,3 +263,4 @@ as `cu/261112-upstream-core-r3` (tree equal), wp7 closed with a receipt at ecc91
 `cu-final-review-terra-r3-s24` (gpt-6.1-terra, high) dispatched for the r3 branch.
 `cu-final-review-terra-r3-s24` NEAR-PASS at f8f70174: medium browser next step cut by a long field title → 49006a01 (red at
 type_text.rs:5136); low 019i manifest wording → fixed. Round 2 (`continueFrom`) dispatched.
+Round 2 (`cu-final-review-terra-r3-r2-s24`) PASS at 51ade830, no findings.
