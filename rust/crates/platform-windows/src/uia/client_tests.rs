@@ -121,8 +121,57 @@ fn probe_distinguishes_blocked_and_destroyed_window() {
     assert_eq!(probe_root(hwnd), RootVerdict::WindowGone);
 }
 
+/// The marker a test process passes to the lone child it spawns: its pid under a prefix, so a
+/// bare pid or any other value left in the environment cannot match.
+fn lone_child_marker(parent: u32) -> String {
+    format!("spawned-by-{parent}")
+}
+
+/// Whether this process is the lone child its parent spawned.
+fn is_lone_child(marker: Option<&str>, parent: Option<u32>) -> bool {
+    parent.is_some_and(|parent| marker == Some(lone_child_marker(parent).as_str()))
+}
+
+fn parent_pid() -> Option<u32> {
+    let me = std::process::id();
+    crate::win32::apps::list_processes()
+        .into_iter()
+        .find(|process| process.pid == me)
+        .map(|process| process.parent_pid)
+}
+
+#[test]
+fn a_leaked_marker_never_makes_the_suite_the_lone_child() {
+    assert!(is_lone_child(Some(&lone_child_marker(42)), Some(42)));
+    assert!(!is_lone_child(Some("42"), Some(42)));
+    assert!(!is_lone_child(Some(&lone_child_marker(41)), Some(42)));
+    assert!(!is_lone_child(Some(&lone_child_marker(42)), None));
+    assert!(!is_lone_child(None, Some(42)));
+}
+
 #[test]
 fn bounded_element_from_handle_times_out_without_probe() {
+    // The bound times one real UIA call, while other tests in this binary create UIA clients,
+    // blocked windows and COM apartments on other threads of the same process; time the call in
+    // a process that runs this test alone.
+    const ALONE: &str = "CUA_UIA_BOUNDED_TIMEOUT_ALONE";
+    if !is_lone_child(std::env::var(ALONE).ok().as_deref(), parent_pid()) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "uia::client::tests::bounded_element_from_handle_times_out_without_probe",
+            ])
+            .env(ALONE, lone_child_marker(std::process::id()))
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(" 1 passed;"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let window = BlockedWindow::new();
     let hwnd = window.hwnd;
     let (tx, rx) = mpsc::channel();
