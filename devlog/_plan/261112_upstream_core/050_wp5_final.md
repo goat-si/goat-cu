@@ -139,6 +139,8 @@ ecc91d48` is empty, so every receipt and review of those commits holds for their
 | d1aa1023 | docs | r3 final review round 2 PASS |
 | 9ac0dc10 | docs | final receipt at d1aa1023 on the r3 branch (pushed as PR #301) |
 | 404071fa | CI fix | the Windows bounded-UIA timing test runs alone in a child test process (goat-ci run 43348554460) |
+| 37c0d627 | docs | PR #301 Windows UIA timing test fix 404071fa |
+| 20aedc79 | final review of 37c0d627 | the lone-child check has three outcomes: a child whose parent is missing from the process list fails instead of spawning another child |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -289,7 +291,7 @@ Re-fetch after the final review closed (2026-11-13 01:36 UTC): origin/main `c93f
   wp7 receipt checks rustfmt only on the files it changed that were clean.
 - `uia::client::tests::probe_distinguishes_blocked_and_destroyed_window` asserts its 1 s probe of a blocked window returns in under 2 s in
   the shared test process, the same shape as the bounded-UIA test before 404071fa; it has not failed, and the same child-process
-  isolation would apply if it does.
+  isolation, with 20aedc79's three-outcome role check, would apply if it does.
 - goat-cu's lock has `rustix` 1.1.4 (through `async-io`/`zbus` for platform-linux, among others), inside RUSTSEC-2026-0486's range for
   rustix's xattr functions (informational, unsound with a zero-length buffer; patched in 1.1.6, which agent-desktop 947b051f takes).
   No goat-cu code calls an xattr function and `cargo deny` passes in CI; `cargo update -p rustix` would move it when wanted.
@@ -333,16 +335,22 @@ helper safety harnesses. Logs: /tmp/goat-cu-sync/receipt-final/.
   `uia::client::tests::bounded_element_from_handle_times_out_without_probe` failed at client_tests.rs:141 with "elapsed: 4.5124081s"
   (445 passed). The test is unchanged since the initial commit and this branch changes nothing in `platform-windows`. It times one real
   `ElementFromHandle` on a hidden window whose thread never pumps messages, with the bounded client (connection timeout 2000 ms), and
-  asserts under 4 s; earlier runs passed, so the call normally ends after about one connection timeout. The job log puts the call at
-  02:03:16.9-21.4 while other tests in the same process used UIA (`concurrent_clients_do_not_hit_reentrant_failure`, 4 clients and
-  `GetRootElement`, done 17.26; `probe_distinguishes_blocked_and_destroyed_window`, its own blocked window, done 18.27;
-  `uia_is_usable_on_a_thread_already_in_an_sta`, done 18.66) on a 4-vCPU runner running 448 tests in parallel. Production calls
+  asserts under 4 s; earlier runs passed, so the call normally ends after about one connection timeout. The log has completion times
+  only: the failure at 02:03:21.41 and the 4.51 s elapsed put the call's start at about 02:03:16.9, and three UIA tests in the same
+  process completed after that estimate (`concurrent_clients_do_not_hit_reentrant_failure`, 4 clients and `GetRootElement`, 17.26;
+  `probe_distinguishes_blocked_and_destroyed_window`, its own blocked window, 18.27; `uia_is_usable_on_a_thread_already_in_an_sta`,
+  18.66), so they probably overlapped it; the binary's 448 tests run on libtest's default threads on a 4-vCPU runner. In-process UIA
+  contention is the working hypothesis, not a measured cause; isolation removes it, and the child still fails if UIA itself overruns
+  (body, 4 s bound and watchdog unchanged). Production calls
   `probe_root` (a 1 s `window_thread_responds`) before `ElementFromHandle` and never depends on this timing. Fix 404071fa: the test re-runs
   itself alone in a child test process (`--exact`, a `spawned-by-<parent pid>` marker from the process list, the child's ` 1 passed;`
   required), as `mutter_display`'s descriptor test does (019c3858); the 4 s bound, the body and every production timeout are unchanged.
   Checked from macOS: `cargo check --locked --target x86_64-pc-windows-msvc -p platform-windows --all-targets` passes; cross clippy has
   nothing in client_tests.rs. NOT RUN on Windows: `desktop-c795oh4` has no Rust toolchain and its GOAT runs in Session 0 without a desktop
   (probe task `cu-win-uia-isolation-s24`), `parkjs-win` is unreachable; goat-ci on the pushed head is the Windows run.
+  Final review of 37c0d627 (fresh, gpt-6.1-terra) FAIL: P2 a child whose parent is missing from the Toolhelp list counted as a parent
+  and spawned again, without bound under a persistent failure → 20aedc79 (three outcomes; red with a standalone copy of both decisions:
+  the old one gets 2 of 7 rows wrong, the new one none); P3 the record stated the overlap as established → reworded above.
 - PR #300 at 27f04c31 (run 43301885942, `PR Linux schema contract and platform unit`, `cua-driver-core --lib`):
   `window_state_view::tests::an_elements_diff_counts_only_the_elements_it_returns` failed at window_state_view.rs:2641 with
   `since_status` "diff" instead of "no_change" (1830 passed). Its "both" case read window 7021, which
@@ -472,3 +480,5 @@ by a long field title in run_steps' step message → 49006a01; low: 019i oversta
 Round 2 (same reviewer) reviews 49006a01.
 Round 2 PASS at 51ade830, no findings: the browser step leads the result in all three untrusted branches, other branches and the
 structured payload are unchanged, and the records are accurate. Every code commit on the r3 branch has a PASS of its final form.
+PR #301's Windows CI failure added 404071fa: its fresh final review FAILED on the lone-child recursion (fixed in 20aedc79, see "CI after
+the receipt"); round 2 with the same reviewer reviews 20aedc79.

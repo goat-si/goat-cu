@@ -264,3 +264,6 @@ as `cu/261112-upstream-core-r3` (tree equal), wp7 closed with a receipt at ecc91
 `cu-final-review-terra-r3-s24` NEAR-PASS at f8f70174: medium browser next step cut by a long field title → 49006a01 (red at
 type_text.rs:5136); low 019i manifest wording → fixed. Round 2 (`continueFrom`) dispatched.
 Round 2 (`cu-final-review-terra-r3-r2-s24`) PASS at 51ade830, no findings.
+2026-11-13: PR #301 Windows CI failure (bounded UIA timing test, 4.51 s) → 404071fa. Windows probe task `cu-win-uia-isolation-s24` on
+desktop-c795oh4 stopped at the toolchain gate (no cargo/rustc; GOAT in Session 0). Fresh final review `cu-final-review-terra-pr301-win-s24`
+FAIL at 37c0d627: P2 unbounded respawn when the child cannot read its parent → 20aedc79; P3 record wording → 050. Round 2 dispatched.
