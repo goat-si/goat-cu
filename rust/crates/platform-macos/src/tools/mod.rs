@@ -2426,6 +2426,7 @@ mod security_prompt_target_tests {
     }
 
     #[tokio::test]
+    #[ignore = "live: reads HID idle time, accessibility IPC, SkyLight, window list, session state, NSRunningApplication and posts to a dead pid; runs alone in the macOS live lane"]
     async fn unrestricted_mode_lets_the_call_past_the_prompt_guard() {
         let _prompt = PromptShown::start();
         for (name, tool, mut args) in tools() {

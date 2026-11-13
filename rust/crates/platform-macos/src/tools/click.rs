@@ -7962,6 +7962,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "live: the prompt guard reads NSRunningApplication; runs alone in the macOS live lane"]
     async fn an_unknown_action_is_refused_before_dispatch() {
         let tool = ClickTool::new(Arc::new(ToolState::new(false, false, None)));
         let result = tool
