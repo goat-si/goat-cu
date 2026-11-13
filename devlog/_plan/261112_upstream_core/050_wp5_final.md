@@ -137,6 +137,8 @@ ecc91d48` is empty, so every receipt and review of those commits holds for their
 | 49006a01 | final review of r3 | macOS `type_text`'s unverified web next step leads the result after the read-first condition, ahead of the count and detail, so run_steps' 300-character step message keeps the whole step (the px route for Safari and Firefox) |
 | 51ade830 | docs | r3 final review outcome, type_text step fix, 019i manifest wording |
 | d1aa1023 | docs | r3 final review round 2 PASS |
+| 9ac0dc10 | docs | final receipt at d1aa1023 on the r3 branch (pushed as PR #301) |
+| 404071fa | CI fix | the Windows bounded-UIA timing test runs alone in a child test process (goat-ci run 43348554460) |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -285,6 +287,9 @@ Re-fetch after the final review closed (2026-11-13 01:36 UTC): origin/main `c93f
   repos/trycua/cua/contents/libs/cua-driver/<path>?ref=2319d456` returns), so they are left for upstream.
 - `platform-macos/src/tools/set_value.rs` is not rustfmt-clean (on origin/main too; e0851769 adds one more hunk at `:131`), so the
   wp7 receipt checks rustfmt only on the files it changed that were clean.
+- `uia::client::tests::probe_distinguishes_blocked_and_destroyed_window` asserts its 1 s probe of a blocked window returns in under 2 s in
+  the shared test process, the same shape as the bounded-UIA test before 404071fa; it has not failed, and the same child-process
+  isolation would apply if it does.
 - goat-cu's lock has `rustix` 1.1.4 (through `async-io`/`zbus` for platform-linux, among others), inside RUSTSEC-2026-0486's range for
   rustix's xattr functions (informational, unsound with a zero-length buffer; patched in 1.1.6, which agent-desktop 947b051f takes).
   No goat-cu code calls an xattr function and `cargo deny` passes in CI; `cargo update -p rustix` would move it when wanted.
@@ -324,6 +329,20 @@ helper safety harnesses. Logs: /tmp/goat-cu-sync/receipt-final/.
 
 ### CI after the receipt
 
+- PR #301 at 9ac0dc10 (run 43348554460, `PR Windows schema contract and platform unit`, `platform-windows --lib`):
+  `uia::client::tests::bounded_element_from_handle_times_out_without_probe` failed at client_tests.rs:141 with "elapsed: 4.5124081s"
+  (445 passed). The test is unchanged since the initial commit and this branch changes nothing in `platform-windows`. It times one real
+  `ElementFromHandle` on a hidden window whose thread never pumps messages, with the bounded client (connection timeout 2000 ms), and
+  asserts under 4 s; earlier runs passed, so the call normally ends after about one connection timeout. The job log puts the call at
+  02:03:16.9-21.4 while other tests in the same process used UIA (`concurrent_clients_do_not_hit_reentrant_failure`, 4 clients and
+  `GetRootElement`, done 17.26; `probe_distinguishes_blocked_and_destroyed_window`, its own blocked window, done 18.27;
+  `uia_is_usable_on_a_thread_already_in_an_sta`, done 18.66) on a 4-vCPU runner running 448 tests in parallel. Production calls
+  `probe_root` (a 1 s `window_thread_responds`) before `ElementFromHandle` and never depends on this timing. Fix 404071fa: the test re-runs
+  itself alone in a child test process (`--exact`, a `spawned-by-<parent pid>` marker from the process list, the child's ` 1 passed;`
+  required), as `mutter_display`'s descriptor test does (019c3858); the 4 s bound, the body and every production timeout are unchanged.
+  Checked from macOS: `cargo check --locked --target x86_64-pc-windows-msvc -p platform-windows --all-targets` passes; cross clippy has
+  nothing in client_tests.rs. NOT RUN on Windows: `desktop-c795oh4` has no Rust toolchain and its GOAT runs in Session 0 without a desktop
+  (probe task `cu-win-uia-isolation-s24`), `parkjs-win` is unreachable; goat-ci on the pushed head is the Windows run.
 - PR #300 at 27f04c31 (run 43301885942, `PR Linux schema contract and platform unit`, `cua-driver-core --lib`):
   `window_state_view::tests::an_elements_diff_counts_only_the_elements_it_returns` failed at window_state_view.rs:2641 with
   `since_status` "diff" instead of "no_change" (1830 passed). Its "both" case read window 7021, which
