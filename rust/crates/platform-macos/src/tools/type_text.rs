@@ -844,8 +844,8 @@ fn type_text_outcome_result(
     // CGEvent rung the app may have dropped). Don't dress that as a
     // confirmed insert — tell the agent to look, and point at the
     // right next rung.
-    let (mark, note) = if verified {
-        ("✅ Inserted", String::new())
+    let (mark, note): (std::borrow::Cow<'static, str>, String) = if verified {
+        ("✅ Inserted".into(), String::new())
     } else if line_without_return {
         // Both instructions lead, ahead of the char count and the variable
         // detail (field title, document note, error text), so a run_steps step
@@ -854,7 +854,8 @@ fn type_text_outcome_result(
         (
             "📨 Inserted the line, Return not confirmed — do not repeat type_text, which would insert \
              it again; to submit, read the field first: if it still holds the line unsubmitted and \
-             has focus, press Return with press_key. Inserted",
+             has focus, press Return with press_key. Inserted"
+                .into(),
             String::new(),
         )
     } else if untrusted_web_readback {
@@ -874,22 +875,27 @@ fn type_text_outcome_result(
             "The window's focused element could not be read, so the AXValue read-back \
              cannot be tied to the target window."
         };
-        // The read-first rule and its condition lead, ahead of the char count
-        // and the variable detail (field title, document note), and the next
-        // step comes before the explanation, so run_steps' 300-character step
-        // message can never keep a write without its condition.
+        // The read-first rule, its condition and the next step lead, ahead of
+        // the char count and the variable detail (field title, document note),
+        // so run_steps' 300-character step message keeps them whole (the
+        // browser step is the only place a Safari or Firefox caller learns the
+        // px route) and never a write without its condition.
         (
-            "📨 Sent (unverified): read the field, and type again only if the text is missing.",
-            format!(" {next_step} {surface}"),
+            format!(
+                "📨 Sent (unverified): read the field, and type again only if the text is missing. \
+                 {next_step}"
+            )
+            .into(),
+            format!(" {surface}"),
         )
     } else if path == PATH_KEY_EVENTS_FG {
         (
-            "📨 Sent (unverified)",
+            "📨 Sent (unverified)".into(),
             " — driver could not confirm; verify via screenshot.".to_string(),
         )
     } else {
         (
-            "📨 Sent (unverified)",
+            "📨 Sent (unverified)".into(),
             " — driver could not confirm the text landed; verify via screenshot, \
                       and re-call with delivery_mode:\"foreground\" if it didn't."
                 .to_string(),
@@ -5123,7 +5129,9 @@ mod tests {
             first_line.chars().take(300).collect::<String>()
         };
         // Whatever the field title or note, the cut keeps the condition on
-        // typing again, never an unconditional write.
+        // typing again and the whole browser next step (the only place a
+        // Safari or Firefox caller learns the px route), never an
+        // unconditional write.
         for len in 0..=300 {
             for count in [1, 99_999, 1_234_567] {
                 let bounded = step_message(" ".repeat(len), count);
@@ -5131,10 +5139,12 @@ mod tests {
                     bounded.contains("type again only if the text is missing"),
                     "detail {len}, count {count}: {bounded}"
                 );
+                assert!(
+                    bounded.contains(BROWSER_TAB_NEXT_STEP),
+                    "detail {len}, count {count}: {bounded}"
+                );
             }
         }
-        let bounded = step_message(String::new(), 99_999);
-        assert!(bounded.contains(BROWSER_TAB_NEXT_STEP), "{bounded}");
     }
 
     #[test]
