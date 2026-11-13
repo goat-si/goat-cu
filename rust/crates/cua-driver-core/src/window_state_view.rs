@@ -946,6 +946,23 @@ fn remember(snapshot_id: &str, ctx: &ViewContext<'_>, md: &str, structured: &Val
     if md.trim().is_empty() && guard.iter().any(|s| s.snapshot_id == snapshot_id) {
         return;
     }
+    // Every test in the binary shares this store, which keeps one entry per
+    // snapshot id: a test that stores another test's id for its own window
+    // would replace that test's baseline, so a test build refuses it loudly
+    // whatever the thread timing.
+    #[cfg(test)]
+    if let Some(other) = guard
+        .iter()
+        .find(|s| s.snapshot_id == snapshot_id && (s.pid, s.window_id) != (ctx.pid, ctx.window_id))
+    {
+        let (pid, window_id) = (other.pid, other.window_id);
+        drop(guard);
+        panic!(
+            "snapshot id {snapshot_id} is stored for pid {pid} window {window_id} and again for \
+             pid {} window {}: two tests share it in the process-wide store",
+            ctx.pid, ctx.window_id
+        );
+    }
     guard.retain(|s| s.snapshot_id != snapshot_id);
     guard.push_back(StoredSnapshot {
         snapshot_id: snapshot_id.to_owned(),
@@ -1705,10 +1722,10 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let full_id =
-                crate::element_token::format_snapshot_id(crate::element_token::mint_snapshot_id());
-            let scoped_id =
-                crate::element_token::format_snapshot_id(crate::element_token::mint_snapshot_id());
+            // Fixed ids no other test stores: a minted id comes from the
+            // process-wide counter and can equal another test's fixed id.
+            let full_id = format!("s0000c1{i}0");
+            let scoped_id = format!("s0000c1{i}1");
             let ctx = ViewContext {
                 pid: 420001,
                 window_id: 97000 + i as u64,
@@ -1752,8 +1769,7 @@ mod tests {
                 Some(full_id.as_str()),
                 "{args}"
             );
-            let next_id =
-                crate::element_token::format_snapshot_id(crate::element_token::mint_snapshot_id());
+            let next_id = format!("s0000c1{i}2");
             let (mut content, mut next) = payload(&next_id, OLD);
             next["observation_complete"] = json!(true);
             next["observation_incomplete_reasons"] = json!([]);
