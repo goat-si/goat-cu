@@ -141,6 +141,8 @@ ecc91d48` is empty, so every receipt and review of those commits holds for their
 | 404071fa | CI fix | the Windows bounded-UIA timing test runs alone in a child test process (goat-ci run 43348554460) |
 | 37c0d627 | docs | PR #301 Windows UIA timing test fix 404071fa |
 | 20aedc79 | final review of 37c0d627 | the lone-child check has three outcomes: a child whose parent is missing from the process list fails instead of spawning another child |
+| dd05718c | docs | PR #301 fix review FAIL, 20aedc79, overlap stated as an estimate |
+| f8518928 | final review round 2 | the timed UIA body is its own ignored test, which the suite test always runs in a child process (`--exact <name> --ignored`); no marker, no parent-pid lookup |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -291,7 +293,7 @@ Re-fetch after the final review closed (2026-11-13 01:36 UTC): origin/main `c93f
   wp7 receipt checks rustfmt only on the files it changed that were clean.
 - `uia::client::tests::probe_distinguishes_blocked_and_destroyed_window` asserts its 1 s probe of a blocked window returns in under 2 s in
   the shared test process, the same shape as the bounded-UIA test before 404071fa; it has not failed, and the same child-process
-  isolation, with 20aedc79's three-outcome role check, would apply if it does.
+  isolation (an ignored body test run by a suite test in a child process, as in f8518928) would apply if it does.
 - goat-cu's lock has `rustix` 1.1.4 (through `async-io`/`zbus` for platform-linux, among others), inside RUSTSEC-2026-0486's range for
   rustix's xattr functions (informational, unsound with a zero-length buffer; patched in 1.1.6, which agent-desktop 947b051f takes).
   No goat-cu code calls an xattr function and `cargo deny` passes in CI; `cargo update -p rustix` would move it when wanted.
@@ -342,9 +344,12 @@ helper safety harnesses. Logs: /tmp/goat-cu-sync/receipt-final/.
   18.66), so they probably overlapped it; the binary's 448 tests run on libtest's default threads on a 4-vCPU runner. In-process UIA
   contention is the working hypothesis, not a measured cause; isolation removes it, and the child still fails if UIA itself overruns
   (body, 4 s bound and watchdog unchanged). Production calls
-  `probe_root` (a 1 s `window_thread_responds`) before `ElementFromHandle` and never depends on this timing. Fix 404071fa: the test re-runs
-  itself alone in a child test process (`--exact`, a `spawned-by-<parent pid>` marker from the process list, the child's ` 1 passed;`
-  required), as `mutter_display`'s descriptor test does (019c3858); the 4 s bound, the body and every production timeout are unchanged.
+  `probe_root` (a 1 s `window_thread_responds`) before `ElementFromHandle` and never depends on this timing. Fix (final form f8518928):
+  the timed body is its own ignored test, `bounded_element_from_handle_times_out_alone`, and `bounded_element_from_handle_times_out_without_probe`
+  always runs it in a child test process (`--exact <name> --ignored`) and requires its ` 1 passed;`; no goat-ci step runs platform-windows
+  with `--ignored`. The 4 s bound, the body and every production timeout are unchanged. (404071fa first used a `spawned-by-<parent pid>`
+  marker as `mutter_display` does; review rounds showed an unreadable parent could respawn without bound (20aedc79) and a matching
+  inherited marker could skip isolation, so f8518928 dropped the marker.)
   Checked from macOS: `cargo check --locked --target x86_64-pc-windows-msvc -p platform-windows --all-targets` passes; cross clippy has
   nothing in client_tests.rs. NOT RUN on Windows: `desktop-c795oh4` has no Rust toolchain and its GOAT runs in Session 0 without a desktop
   (probe task `cu-win-uia-isolation-s24`), `parkjs-win` is unreachable; goat-ci on the pushed head is the Windows run.
@@ -482,3 +487,5 @@ Round 2 PASS at 51ade830, no findings: the browser step leads the result in all 
 structured payload are unchanged, and the records are accurate. Every code commit on the r3 branch has a PASS of its final form.
 PR #301's Windows CI failure added 404071fa: its fresh final review FAILED on the lone-child recursion (fixed in 20aedc79, see "CI after
 the receipt"); round 2 with the same reviewer reviews 20aedc79.
+Round 2 NEAR-PASS at dd05718c: respawn fixed; P3 a suite that inherited a marker equal to its own parent's pid would time the call in
+the shared process → f8518928 (ignored body test, no marker). Round 3 reviews f8518928.
