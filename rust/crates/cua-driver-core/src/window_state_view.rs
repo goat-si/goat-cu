@@ -928,6 +928,32 @@ fn store() -> &'static Mutex<VecDeque<StoredSnapshot>> {
     STORE.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
+/// Every test in the binary shares the store, which keeps one entry per
+/// snapshot id, so a test that stores another test's id for its own window
+/// replaces that test's read. A test build remembers the window that first
+/// stored each id for the whole run, evicted or not, and refuses the id for any
+/// other window, so a shared id fails every run instead of an unlucky one.
+#[cfg(test)]
+fn refuse_snapshot_id_of_another_window(snapshot_id: &str, ctx: &ViewContext<'_>) {
+    static FIRST_WINDOW: OnceLock<Mutex<std::collections::HashMap<String, (i64, u64)>>> =
+        OnceLock::new();
+    let mut first = FIRST_WINDOW
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (pid, window_id) = *first
+        .entry(snapshot_id.to_owned())
+        .or_insert((ctx.pid, ctx.window_id));
+    drop(first);
+    assert!(
+        (pid, window_id) == (ctx.pid, ctx.window_id),
+        "snapshot id {snapshot_id} was stored for pid {pid} window {window_id} and again for pid {} \
+         window {}: two tests share it in the process-wide store",
+        ctx.pid,
+        ctx.window_id
+    );
+}
+
 /// The key a read is remembered under: a window-basis id names the same
 /// read as its plain snapshot id (goat-si/cua-driver#130). Any other text is
 /// kept as given.
@@ -940,28 +966,13 @@ fn stored_snapshot_key(snapshot_id: &str) -> std::borrow::Cow<'_, str> {
 
 fn remember(snapshot_id: &str, ctx: &ViewContext<'_>, md: &str, structured: &Value) {
     let snapshot_id = &*stored_snapshot_key(snapshot_id);
+    #[cfg(test)]
+    refuse_snapshot_id_of_another_window(snapshot_id, ctx);
     let mut guard = store().lock().unwrap_or_else(|e| e.into_inner());
     // A screenshot-only read keeps its snapshot id and returns no tree. It
     // must not erase the rows that snapshot's tokens were read from.
     if md.trim().is_empty() && guard.iter().any(|s| s.snapshot_id == snapshot_id) {
         return;
-    }
-    // Every test in the binary shares this store, which keeps one entry per
-    // snapshot id: a test that stores another test's id for its own window
-    // would replace that test's baseline, so a test build refuses it loudly
-    // whatever the thread timing.
-    #[cfg(test)]
-    if let Some(other) = guard
-        .iter()
-        .find(|s| s.snapshot_id == snapshot_id && (s.pid, s.window_id) != (ctx.pid, ctx.window_id))
-    {
-        let (pid, window_id) = (other.pid, other.window_id);
-        drop(guard);
-        panic!(
-            "snapshot id {snapshot_id} is stored for pid {pid} window {window_id} and again for \
-             pid {} window {}: two tests share it in the process-wide store",
-            ctx.pid, ctx.window_id
-        );
     }
     guard.retain(|s| s.snapshot_id != snapshot_id);
     guard.push_back(StoredSnapshot {
@@ -2253,6 +2264,33 @@ mod tests {
         );
         assert_eq!(second["since_status"], "diff");
         assert!(second["tree_diff"].as_str().unwrap().contains("~ [1]"));
+    }
+
+    /// A test build refuses a snapshot id stored for a second window even
+    /// after the per-window cap evicted the first entry: every test shares
+    /// the store, so the id must belong to one test.
+    #[test]
+    #[should_panic(expected = "two tests share it")]
+    fn a_snapshot_id_reused_for_another_window_after_eviction_panics() {
+        remember_for_test("s0000c201", 420101, 99101, "- [1] AXButton \"A\"\n");
+        for n in 2..=(STORE_PER_WINDOW as u32 + 1) {
+            let id = format!("s0000c2{n:02x}");
+            remember_for_test(&id, 420101, 99101, "- [1] AXButton \"A\"\n");
+        }
+        assert!(
+            snapshot_row("s0000c201", 1).is_none(),
+            "the per-window cap evicted the first read"
+        );
+        remember_for_test("s0000c201", 420101, 99102, "- [1] AXButton \"B\"\n");
+    }
+
+    /// A screenshot-only read keeps an existing entry, and it is refused too
+    /// when it names another window's snapshot id.
+    #[test]
+    #[should_panic(expected = "two tests share it")]
+    fn a_screenshot_only_read_under_another_windows_snapshot_id_panics() {
+        remember_for_test("s0000c211", 420102, 99103, "- [1] AXButton \"A\"\n");
+        remember_for_test("s0000c211", 420102, 99104, "");
     }
 
     #[test]
