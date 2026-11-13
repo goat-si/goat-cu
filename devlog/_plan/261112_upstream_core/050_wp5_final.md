@@ -143,6 +143,7 @@ ecc91d48` is empty, so every receipt and review of those commits holds for their
 | 20aedc79 | final review of 37c0d627 | the lone-child check has three outcomes: a child whose parent is missing from the process list fails instead of spawning another child |
 | dd05718c | docs | PR #301 fix review FAIL, 20aedc79, overlap stated as an estimate |
 | f8518928 | final review round 2 | the timed UIA body is its own ignored test, which the suite test always runs in a child process (`--exact <name> --ignored`); no marker, no parent-pid lookup |
+| 0c726647 | docs | PR #301 fix round 2, f8518928 ignored-child form |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -489,3 +490,5 @@ PR #301's Windows CI failure added 404071fa: its fresh final review FAILED on th
 the receipt"); round 2 with the same reviewer reviews 20aedc79.
 Round 2 NEAR-PASS at dd05718c: respawn fixed; P3 a suite that inherited a marker equal to its own parent's pid would time the call in
 the shared process → f8518928 (ignored body test, no marker). Round 3 reviews f8518928.
+Round 3 PASS at 0c726647, no findings: one child always, no recursion, a renamed body fails the parent, the body and bound unchanged; an
+explicit `--ignored`/`--include-ignored` run of the suite would time the body in that process, and no goat-ci step uses either.

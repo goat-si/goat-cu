@@ -269,3 +269,4 @@ desktop-c795oh4 stopped at the toolchain gate (no cargo/rustc; GOAT in Session 0
 FAIL at 37c0d627: P2 unbounded respawn when the child cannot read its parent → 20aedc79; P3 record wording → 050. Round 2 dispatched.
 Round 2 (`cu-final-review-terra-pr301-win-r2-s24`) NEAR-PASS: P3 a matching inherited marker skipped isolation → f8518928 (the body is an
 ignored test the suite test runs in a child with `--exact --ignored`; no marker). Round 3 dispatched.
+Round 3 (`cu-final-review-terra-pr301-win-r3-s24`) PASS at 0c726647, no findings.
