@@ -258,3 +258,6 @@ L2 the check saw only retained entries → 519c4751 (a whole-run history of each
 d24195a8); L1 missing receipt rows → 050. Bound wp7 receipt at 519c4751 failures=0. Round 3 (`continueFrom`) dispatched.
 Round 3 (`cu-final-review-terra-519c4751-r3-s24`) NEAR-PASS: history sound, rows fixed; L1 `should_panic` over the whole test → 4c740b16
 (catch only the final store's panic; red with a scratch setup collision). Bound wp7 receipt again at 4c740b16 failures=0. Round 4 dispatched.
+Round 4 (`cu-final-review-terra-4c740b16-r4-s24`) PASS, no findings. PR #300 squash-merged (c93f8dbb); commits after 34f79cb5 replayed
+as `cu/261112-upstream-core-r3` (tree equal), wp7 closed with a receipt at ecc91d48; wp1q (019i) on top. Fresh final review
+`cu-final-review-terra-r3-s24` (gpt-6.1-terra, high) dispatched for the r3 branch.

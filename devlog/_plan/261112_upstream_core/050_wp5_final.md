@@ -113,6 +113,26 @@
 | 519c4751 | final review round 2 | the test-build check remembers the first window of every snapshot id for the whole run (evicted or not, and before the screenshot-only return), with two tests that panic on reuse after eviction and on a screenshot-only read |
 | 0caeded3 | docs | wp7 receipt at 519c4751, review-fix receipts, round-2 outcome |
 | 4c740b16 | final review round 3 | the two shared-id tests catch the panic of only their final, conflicting store, so a collision during setup fails them instead of satisfying `should_panic` |
+| 18fdf61b | docs | round-3 outcome, 4c740b16 and its receipt |
+
+### PR #300 merged; follow-up branch cu/261112-upstream-core-r3 (base origin/main c93f8dbb)
+
+PR #300 was squash-merged on 2026-11-12 22:11 UTC as `c93f8dbb`, whose tree equals `34f79cb5`. The eleven commits after `34f79cb5`
+were replayed onto it with `git cherry-pick 34f79cb5..18fdf61b` as the local branch `cu/261112-upstream-core-r3`; `git diff 18fdf61b
+ecc91d48` is empty, so every receipt and review of those commits holds for their replays.
+
+| r2 commit | r3 commit | | r2 commit | r3 commit |
+|---|---|---|---|---|
+| 52f2b794 (wp1p) | d590786b | | d24195a8 | a32beed3 |
+| 902b6e30 | f92761d7 | | d21d40b2 | c1f2dddc |
+| 0e2064fe | c2834601 | | 519c4751 | 33d44ae2 |
+| a0bc8020 | d52c942e | | 0caeded3 | 26a62280 |
+| 8ef0f280 | 9a1a9f86 | | 4c740b16 | 18c30d1a |
+| | | | 18fdf61b | ecc91d48 |
+
+| Commit | Unit | Content |
+|---|---|---|
+| 4bd80f01 | wp1q | sync 2319d456 → ed9fd9a5 (019i): installer pin 0.47.24 (upstream's published version); vendored cua-telemetry 0.27.1 (version only) |
 
 ### Re-fetch before the last D (2026-11-12)
 
@@ -150,6 +170,9 @@ Re-fetch after abc581b7 (~20:50 UTC): trycua/cua main `2fc7f3c7` (release 0.47.2
 Last re-fetch (2026-11-12 21:40 UTC, after 902b6e30): trycua/cua main `2319d456` (no commit after wp1p), origin/main `40c6f6eb`,
 agent-desktop `54855b62` — no new in-scope delta. The remote lane branch reads `34f79cb5` (pushed by the coordinator), an ancestor of
 the local head.
+Re-fetch after the final review closed (2026-11-13 01:36 UTC): origin/main `c93f8dbb` (PR #300, squash), trycua/cua main `ed9fd9a5`
+(10 commits after 2319d456; installer 0.47.24 and cua-sdk 0.27.1 → unit wp1q, 019i), agent-desktop `947b051f` (release 1.3.0 and a
+`rustix` bump; no core gap, 019i).
 
 ### Follow-ups recorded, not done in this lane
 
@@ -258,6 +281,9 @@ the local head.
   repos/trycua/cua/contents/libs/cua-driver/<path>?ref=2319d456` returns), so they are left for upstream.
 - `platform-macos/src/tools/set_value.rs` is not rustfmt-clean (on origin/main too; e0851769 adds one more hunk at `:131`), so the
   wp7 receipt checks rustfmt only on the files it changed that were clean.
+- goat-cu's lock has `rustix` 1.1.4 (through `async-io`/`zbus` for platform-linux, among others), inside RUSTSEC-2026-0486's range for
+  rustix's xattr functions (informational, unsound with a zero-length buffer; patched in 1.1.6, which agent-desktop 947b051f takes).
+  No goat-cu code calls an xattr function and `cargo deny` passes in CI; `cargo update -p rustix` would move it when wanted.
 - Final review rounds 2-3 (informational): an embedded web view after pixel focus reads "do not repeat it" next to the mark's "type
   again only if the text is missing" (the px rung is terminal); the non-web branch says "read the field" where the field could not be
   read; with a field title over ~27 characters the browser-tab step's px clause falls past run_steps' 300-character cut (the read and
@@ -414,3 +440,5 @@ Round 2 NEAR-PASS at d21d40b2: L2 the check saw only retained entries (an id reu
 unseen) → 519c4751; L1 the receipt rows for 0e2064fe and d24195a8 were missing → added above. Round 3 reviews 519c4751 and the rows.
 Round 3 NEAR-PASS at 0caeded3: the history is sound for its rule and the rows resolve round 2's finding; L1 `should_panic` over the whole
 test could be satisfied by a setup collision → 4c740b16. Round 4 reviews 4c740b16.
+Round 4 PASS at 18fdf61b, no findings. After PR #300's squash merge, a fresh final review covers the r3 branch (the replay, wp1q and these
+records).
