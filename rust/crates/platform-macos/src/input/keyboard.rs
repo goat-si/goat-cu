@@ -2066,6 +2066,7 @@ mod tests {
     /// its first event. Removing one of those checks fails here. Keys are
     /// named by keycode-free names ("return") so the layout is not consulted.
     #[test]
+    #[ignore = "live: reads SkyLight, NSRunningApplication; runs alone in the macOS live lane"]
     fn hid_key_primitives_send_nothing_to_a_security_prompt() {
         use crate::security_prompt::{fixture::PromptShown, PromptProtected};
         type Primitive = fn(PromptInput) -> anyhow::Result<()>;

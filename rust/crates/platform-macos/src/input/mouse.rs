@@ -3440,6 +3440,7 @@ mod tests {
     /// Every global-HID pointer primitive checks for a security prompt before
     /// its first warp or event. Removing one of those checks fails here.
     #[test]
+    #[ignore = "live: calls CGAssociateMouseAndMouseCursorPosition; runs alone in the macOS live lane"]
     fn hid_pointer_primitives_send_nothing_onto_a_security_prompt() {
         use crate::security_prompt::{fixture::PromptShown, PromptProtected};
         type Primitive = fn(PromptInput) -> anyhow::Result<()>;
@@ -3535,6 +3536,7 @@ mod tests {
     /// A HID drag presses at its start and releases at its end: either one
     /// on a prompt answers it, so each endpoint is checked on its own.
     #[test]
+    #[ignore = "live: calls CGAssociateMouseAndMouseCursorPosition; runs alone in the macOS live lane"]
     fn a_hid_drag_is_refused_when_either_end_is_on_a_prompt() {
         use crate::security_prompt::{fixture::PromptShown, PromptProtected};
         // The prompt covers (100..200, 100..200); the other end is off it.

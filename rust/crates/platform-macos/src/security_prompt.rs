@@ -542,6 +542,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "live: reads NSRunningApplication; runs alone in the macOS live lane"]
     fn this_process_is_not_a_prompt() {
         let pid = std::process::id() as i32;
         assert!(refuse_pid(PromptInput::Refuse, pid).is_ok());

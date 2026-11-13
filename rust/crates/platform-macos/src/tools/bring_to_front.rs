@@ -662,6 +662,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "live: reads NSRunningApplication; runs alone in the macOS live lane"]
     fn a_reaped_pid_is_reported_as_exited() {
         let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
         let pid = child.id() as i32;

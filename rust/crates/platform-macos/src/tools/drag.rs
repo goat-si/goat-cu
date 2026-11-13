@@ -1529,6 +1529,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "live: the prompt guard reads NSRunningApplication; runs alone in the macOS live lane"]
     async fn window_drag_without_window_id_is_refused_in_both_modes() {
         let tool = DragTool::new(Arc::new(ToolState::new(false, false, None)));
         for delivery_mode in [None, Some("background"), Some("foreground")] {

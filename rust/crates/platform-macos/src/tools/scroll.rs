@@ -2226,6 +2226,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "live: the prompt guard reads NSRunningApplication; runs alone in the macOS live lane"]
     async fn missing_window_id_is_refused_before_a_pixel_scroll() {
         let tool = ScrollTool::new(Arc::new(ToolState::new(false, false, None)));
         let result = tool
