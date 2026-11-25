@@ -384,14 +384,6 @@ impl SessionManifest {
                         self.authorize_desktop_window(resource)
                     }
                 }
-                // `escalate_session` always expands a browser-scoped session
-                // to desktop scope; it has no caller-selectable capture_scope
-                // argument. Require the immutable manifest's display grant
-                // directly instead of keying enforcement on a field the tool
-                // can never send.
-                "session_capture_scope" => self.desktop_display.then_some(()).ok_or_else(|| {
-                    "desktop capture escalation is outside the capability manifest".to_owned()
-                }),
                 "session_trajectory_recording" => Ok(()),
                 _ => refused(),
             },
@@ -1118,7 +1110,7 @@ fn parse_manifest_bytes(path: &Path, bytes: &[u8]) -> Result<SessionManifest, St
                 other => {
                     return Err(format!(
                         "unsupported browser profile kind '{other}'; expected isolated or existing_profile"
-                    ))
+                    ));
                 }
             }
         }
@@ -1332,7 +1324,7 @@ fn validate_applications(
             other => {
                 return Err(format!(
                     "unsupported application windows scope '{other}'; expected all"
-                ))
+                ));
             }
         };
         let terminate = match raw.terminate.as_deref().unwrap_or("deny") {
@@ -1342,7 +1334,7 @@ fn validate_applications(
             other => {
                 return Err(format!(
                     "unsupported application terminate scope '{other}'; expected deny, driver_launched, or any"
-                ))
+                ));
             }
         };
         if validated.iter().any(|application: &ApplicationGrant| {
@@ -1584,12 +1576,12 @@ fn canonical_manifest_path(path: &Path) -> Result<String, String> {
     while !existing.exists() {
         match std::fs::symlink_metadata(existing) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err("path contains a broken symbolic link".to_owned())
+                return Err("path contains a broken symbolic link".to_owned());
             }
             Ok(_) => return Err("path contains an unavailable filesystem entry".to_owned()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
-                return Err("an ancestor of the path is not a directory".to_owned())
+                return Err("an ancestor of the path is not a directory".to_owned());
             }
             Err(error) => return Err(error.to_string()),
         }
@@ -1664,7 +1656,7 @@ fn parse_duration(raw: &str) -> Result<Duration, String> {
         _ => {
             return Err(format!(
                 "invalid duration unit in '{raw}'; expected s, m, or h"
-            ))
+            ));
         }
     };
     Ok(Duration::from_secs(seconds))
@@ -1723,15 +1715,21 @@ ask:
         assert_eq!(loaded.version(), 3);
         assert_eq!(loaded.expires_unix_ms(), None);
         assert_eq!(loaded.idle_timeout(), None);
-        assert!(loaded
-            .validate_for_mode(crate::authorization::PermissionMode::Standard)
-            .is_ok());
-        assert!(loaded
-            .validate_for_mode(crate::authorization::PermissionMode::Unrestricted)
-            .is_ok());
-        assert!(loaded
-            .validate_for_mode(crate::authorization::PermissionMode::Bounded)
-            .is_err());
+        assert!(
+            loaded
+                .validate_for_mode(crate::authorization::PermissionMode::Standard)
+                .is_ok()
+        );
+        assert!(
+            loaded
+                .validate_for_mode(crate::authorization::PermissionMode::Unrestricted)
+                .is_ok()
+        );
+        assert!(
+            loaded
+                .validate_for_mode(crate::authorization::PermissionMode::Bounded)
+                .is_err()
+        );
 
         assert!(
             manifest("version: 3\nmode: bounded\nallow:\n  tools: [get_config]\n")
@@ -1841,9 +1839,11 @@ resources:
         .unwrap();
         assert!(loaded.expires_unix_ms().is_some());
         assert_eq!(loaded.idle_timeout(), Some(Duration::from_secs(5 * 60)));
-        assert!(loaded
-            .validate_for_mode(crate::authorization::PermissionMode::Bounded)
-            .is_ok());
+        assert!(
+            loaded
+                .validate_for_mode(crate::authorization::PermissionMode::Bounded)
+                .is_ok()
+        );
     }
 
     #[cfg(feature = "yaml")]
@@ -1945,20 +1945,22 @@ allow:
                 }),
             )
             .unwrap();
-        assert!(loaded
-            .authorize_protected_resource(
-                "process_control",
-                &serde_json::json!({
-                    "kind": "process_instance",
-                    "driver_owned": false,
-                    "fingerprint": {
-                        "pid": 42,
-                        "start_time": 1,
-                        "executable": executable
-                    }
-                }),
-            )
-            .is_err());
+        assert!(
+            loaded
+                .authorize_protected_resource(
+                    "process_control",
+                    &serde_json::json!({
+                        "kind": "process_instance",
+                        "driver_owned": false,
+                        "fingerprint": {
+                            "pid": 42,
+                            "start_time": 1,
+                            "executable": executable
+                        }
+                    }),
+                )
+                .is_err()
+        );
         loaded
             .authorize_protected_resource(
                 "file_transfer_and_output",
@@ -1977,15 +1979,17 @@ allow:
                 }),
             )
             .unwrap();
-        assert!(loaded
-            .authorize_protected_resource(
-                "file_transfer_and_output",
-                &serde_json::json!({
-                    "kind": "screenshot_output",
-                    "canonical_output_path": output.join("nested").join("capture.png")
-                }),
-            )
-            .is_err());
+        assert!(
+            loaded
+                .authorize_protected_resource(
+                    "file_transfer_and_output",
+                    &serde_json::json!({
+                        "kind": "screenshot_output",
+                        "canonical_output_path": output.join("nested").join("capture.png")
+                    }),
+                )
+                .is_err()
+        );
     }
 
     #[cfg(feature = "yaml")]
@@ -2020,36 +2024,44 @@ allow:
                 }),
             )
             .unwrap();
-        assert!(manifest
-            .authorize_call(
-                "browser_prepare",
-                &serde_json::json!({
-                    "pid": 42,
-                    "window_id": 8,
-                    "strategy": {"kind": "existing_profile"}
-                }),
-            )
-            .is_err());
+        assert!(
+            manifest
+                .authorize_call(
+                    "browser_prepare",
+                    &serde_json::json!({
+                        "pid": 42,
+                        "window_id": 8,
+                        "strategy": {"kind": "existing_profile"}
+                    }),
+                )
+                .is_err()
+        );
         manifest
             .authorize_browser_url("https://app.example.com/work?q=1")
             .unwrap();
         // An existing-profile browser is reachable only through the browser
         // tools: listing it grants no desktop access to its windows.
-        assert!(manifest
-            .authorize_protected_resource(
-                "private_observation",
-                &serde_json::json!({"kind": "window", "pid": 42, "window_id": 7}),
-            )
-            .is_err());
-        assert!(manifest
-            .authorize_protected_resource(
-                "desktop_input",
-                &serde_json::json!({"kind": "application_input", "pid": 42}),
-            )
-            .is_err());
-        assert!(manifest
-            .authorize_browser_url("https://evil.example/redirect")
-            .is_err());
+        assert!(
+            manifest
+                .authorize_protected_resource(
+                    "private_observation",
+                    &serde_json::json!({"kind": "window", "pid": 42, "window_id": 7}),
+                )
+                .is_err()
+        );
+        assert!(
+            manifest
+                .authorize_protected_resource(
+                    "desktop_input",
+                    &serde_json::json!({"kind": "application_input", "pid": 42}),
+                )
+                .is_err()
+        );
+        assert!(
+            manifest
+                .authorize_browser_url("https://evil.example/redirect")
+                .is_err()
+        );
     }
 
     #[cfg(feature = "yaml")]
@@ -2077,56 +2089,6 @@ allow:
                 &serde_json::json!({
                     "kind": "authenticated_browser_tab",
                     "live_origin": "about:blank"
-                }),
-            )
-            .unwrap();
-    }
-
-    #[cfg(feature = "yaml")]
-    #[test]
-    fn desktop_escalation_requires_the_manifest_display_grant() {
-        let without_display = manifest(
-            r#"
-version: 1
-mode: bounded
-expires_after: 8h
-idle_timeout: 30m
-resources: {}
-allow:
-  tools: [escalate_session]
-"#,
-        )
-        .unwrap();
-        assert!(without_display
-            .authorize_protected_resource(
-                "private_observation",
-                &serde_json::json!({
-                    "kind": "session_capture_scope",
-                    "capture_scope": "desktop"
-                }),
-            )
-            .is_err());
-
-        let with_display = manifest(
-            r#"
-version: 1
-mode: bounded
-expires_after: 8h
-idle_timeout: 30m
-resources:
-  desktop:
-    display: true
-allow:
-  tools: [escalate_session]
-"#,
-        )
-        .unwrap();
-        with_display
-            .authorize_protected_resource(
-                "private_observation",
-                &serde_json::json!({
-                    "kind": "session_capture_scope",
-                    "capture_scope": "desktop"
                 }),
             )
             .unwrap();
@@ -2209,18 +2171,22 @@ allow:
                 &serde_json::json!({"kind": "window", "pid": 42, "window_id": 7}),
             )
             .unwrap();
-        assert!(loaded
-            .authorize_protected_resource(
-                "private_observation",
-                &serde_json::json!({"kind": "window", "pid": 42, "window_id": 8}),
-            )
-            .is_err());
-        assert!(loaded
-            .authorize_protected_resource(
-                "private_observation",
-                &serde_json::json!({"kind": "display"}),
-            )
-            .is_err());
+        assert!(
+            loaded
+                .authorize_protected_resource(
+                    "private_observation",
+                    &serde_json::json!({"kind": "window", "pid": 42, "window_id": 8}),
+                )
+                .is_err()
+        );
+        assert!(
+            loaded
+                .authorize_protected_resource(
+                    "private_observation",
+                    &serde_json::json!({"kind": "display"}),
+                )
+                .is_err()
+        );
 
         loaded
             .authorize_protected_resource(
@@ -2231,15 +2197,17 @@ allow:
                 }),
             )
             .unwrap();
-        assert!(loaded
-            .authorize_protected_resource(
-                "browser_bound_input",
-                &serde_json::json!({
-                    "kind": "authenticated_browser_tab",
-                    "live_origin": "https://other.example.com"
-                }),
-            )
-            .is_err());
+        assert!(
+            loaded
+                .authorize_protected_resource(
+                    "browser_bound_input",
+                    &serde_json::json!({
+                        "kind": "authenticated_browser_tab",
+                        "live_origin": "https://other.example.com"
+                    }),
+                )
+                .is_err()
+        );
 
         loaded
             .authorize_protected_resource(
@@ -2250,15 +2218,17 @@ allow:
                 }),
             )
             .unwrap();
-        assert!(loaded
-            .authorize_protected_resource(
-                "file_transfer_and_output",
-                &serde_json::json!({
-                    "kind": "screenshot_output",
-                    "canonical_output_path": canonical_outside
-                }),
-            )
-            .is_err());
+        assert!(
+            loaded
+                .authorize_protected_resource(
+                    "file_transfer_and_output",
+                    &serde_json::json!({
+                        "kind": "screenshot_output",
+                        "canonical_output_path": canonical_outside
+                    }),
+                )
+                .is_err()
+        );
 
         loaded
             .authorize_protected_resource(
@@ -2269,15 +2239,17 @@ allow:
                 }),
             )
             .unwrap();
-        assert!(loaded
-            .authorize_protected_resource(
-                "process_control",
-                &serde_json::json!({
-                    "kind": "process_instance",
-                    "fingerprint": {"pid": 43}
-                }),
-            )
-            .is_err());
+        assert!(
+            loaded
+                .authorize_protected_resource(
+                    "process_control",
+                    &serde_json::json!({
+                        "kind": "process_instance",
+                        "fingerprint": {"pid": 43}
+                    }),
+                )
+                .is_err()
+        );
 
         loaded
             .authorize_protected_resource(
@@ -2288,15 +2260,17 @@ allow:
                 }),
             )
             .unwrap();
-        assert!(loaded
-            .authorize_protected_resource(
-                "driver_configuration",
-                &serde_json::json!({
-                    "kind": "driver_configuration",
-                    "exact_changes": {"max_image_dimension": 800}
-                }),
-            )
-            .is_err());
+        assert!(
+            loaded
+                .authorize_protected_resource(
+                    "driver_configuration",
+                    &serde_json::json!({
+                        "kind": "driver_configuration",
+                        "exact_changes": {"max_image_dimension": 800}
+                    }),
+                )
+                .is_err()
+        );
     }
 
     #[cfg(feature = "yaml")]
@@ -2320,18 +2294,22 @@ allow:
                 &serde_json::json!({"kind": "computer_history", "operation": "status"}),
             )
             .unwrap();
-        assert!(loaded
-            .authorize_protected_resource(
-                "computer_history",
-                &serde_json::json!({"kind": "computer_history", "operation": "query"}),
-            )
-            .is_err());
-        assert!(loaded
-            .authorize_protected_resource(
-                "computer_history",
-                &serde_json::json!({"kind": "display", "operation": "status"}),
-            )
-            .is_err());
+        assert!(
+            loaded
+                .authorize_protected_resource(
+                    "computer_history",
+                    &serde_json::json!({"kind": "computer_history", "operation": "query"}),
+                )
+                .is_err()
+        );
+        assert!(
+            loaded
+                .authorize_protected_resource(
+                    "computer_history",
+                    &serde_json::json!({"kind": "display", "operation": "status"}),
+                )
+                .is_err()
+        );
     }
 
     #[cfg(feature = "yaml")]
@@ -2666,24 +2644,29 @@ allow:
             any.authorize_protected_resource("process_control", &process(executable, false))
                 .unwrap();
         }
-        assert!(any
-            .authorize_protected_resource(
+        assert!(
+            any.authorize_protected_resource(
                 "process_control",
                 &process(r"C:\Users\victim\chrome.exe", false)
             )
-            .is_err());
+            .is_err()
+        );
 
         let launched = load("driver_launched");
         launched
             .authorize_protected_resource("process_control", &process(&granted, true))
             .unwrap();
-        assert!(launched
-            .authorize_protected_resource("process_control", &process(&granted, false))
-            .is_err());
+        assert!(
+            launched
+                .authorize_protected_resource("process_control", &process(&granted, false))
+                .is_err()
+        );
 
-        assert!(load("deny")
-            .authorize_protected_resource("process_control", &process(&granted, true))
-            .is_err());
+        assert!(
+            load("deny")
+                .authorize_protected_resource("process_control", &process(&granted, true))
+                .is_err()
+        );
     }
 
     #[test]

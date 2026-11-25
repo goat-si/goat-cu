@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Cua AI, Inc.
 
-use crate::{schema_settings, ActionHit, ActionPoint, CaptureScope, EscalationReason, Platform};
+use crate::{ActionHit, ActionPoint, CaptureScope, Platform, schema_settings};
 use schemars::JsonSchema;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
@@ -106,10 +106,12 @@ mod disposition_tests {
                 assert_eq!(disposition.is_valid(), valid, "{disposition:?}");
             }
         }
-        assert!(serde_json::from_value::<ErrorDisposition>(
-            json!({"delivery":"future", "retry":"safe"})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<ErrorDisposition>(
+                json!({"delivery":"future", "retry":"safe"})
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -327,7 +329,7 @@ impl EffectiveScope {
     }
 }
 
-/// Successful structured result shared by session state and escalation tools.
+/// Capture-scope state carried by the `start_session` result.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Record)]
 pub struct SessionStateOutput {
     pub session: String,
@@ -339,10 +341,6 @@ pub struct SessionStateOutput {
     /// Compatibility field: this reports whether this session has unlocked
     /// desktop capture scope. It is not an operating-system lock-screen probe.
     pub desktop_unlocked: bool,
-    #[schemars(required, schema_with = "nullable_escalation_reason_schema")]
-    pub escalation_reason: Option<EscalationReason>,
-    #[schemars(required, schema_with = "nullable_string_schema")]
-    pub escalation_detail: Option<String>,
 }
 
 impl ToolOutput for SessionStateOutput {}
@@ -978,7 +976,11 @@ pub struct ActionResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_call: Option<ActionNextCall>,
     /// Fast-path diagnostics, present only when the fast-path configuration is on.
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_json_object_text")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_json_object_text"
+    )]
     #[schemars(schema_with = "object_schema")]
     pub fast_path: Option<String>,
     /// Producer confirmation retained for the macOS drag/right-click readbacks.
@@ -1043,7 +1045,7 @@ pub struct ActionNextCall {
 /// Serde adapter: a JSON object on the wire, JSON text in the record.
 mod json_object_text {
     use serde::{
-        de::Error as _, ser::Error as _, Deserialize, Deserializer, Serialize, Serializer,
+        Deserialize, Deserializer, Serialize, Serializer, de::Error as _, ser::Error as _,
     };
     use serde_json::Value;
 
@@ -1150,13 +1152,13 @@ pub fn validate_opened_surfaces(
     use OpenedSurfacesStatus as Status;
     match status {
         Some(Status::Observed) if surfaces.is_none() => {
-            return Err(Error::OpenedSurfacesRequireList)
+            return Err(Error::OpenedSurfacesRequireList);
         }
         Some(Status::Partial) if surfaces.is_none_or(|s| s.is_empty()) => {
-            return Err(Error::OpenedSurfacesRequireList)
+            return Err(Error::OpenedSurfacesRequireList);
         }
         None | Some(Status::Unavailable | Status::NotChecked) if surfaces.is_some() => {
-            return Err(Error::OpenedSurfacesForbidden)
+            return Err(Error::OpenedSurfacesForbidden);
         }
         _ => {}
     }
@@ -1302,24 +1304,6 @@ fn nullable_cursor_point_schema(generator: &mut schemars::SchemaGenerator) -> sc
     schemars::json_schema!({ "anyOf": [point, { "type": "null" }] })
 }
 
-fn nullable_escalation_reason_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({
-        "anyOf": [
-            {
-                "type": "string",
-                "enum": [
-                    "ax_tree_pixel_mismatch",
-                    "background_delivery_failed",
-                    "foreground_ineffective",
-                    "no_window_target",
-                    "other"
-                ]
-            },
-            { "type": "null" }
-        ]
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1417,10 +1401,10 @@ mod tests {
             );
         }
         assert!(serde_json::from_value::<OpenedSurface>(json!({"kind":"dialog"})).is_err());
-        assert!(serde_json::from_value::<OpenedSurface>(
-            json!({"kind":"menu", "target":{"pid":7}})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<OpenedSurface>(json!({"kind":"menu", "target":{"pid":7}}))
+                .is_err()
+        );
     }
 
     #[test]
@@ -1451,36 +1435,46 @@ mod tests {
         refused["effect"] = json!("refused");
         refused.as_object_mut().unwrap().remove("delivery");
         refused.as_object_mut().unwrap().remove("evidence");
-        assert!(serde_json::from_value::<ActionResult>(refused.clone())
-            .unwrap()
-            .validate_invariants()
-            .is_err());
+        assert!(
+            serde_json::from_value::<ActionResult>(refused.clone())
+                .unwrap()
+                .validate_invariants()
+                .is_err()
+        );
         refused["opened_surfaces_status"] = json!("observed");
         refused["opened_surfaces"] = json!([]);
-        assert!(serde_json::from_value::<ActionResult>(refused.clone())
-            .unwrap()
-            .validate_invariants()
-            .is_err());
+        assert!(
+            serde_json::from_value::<ActionResult>(refused.clone())
+                .unwrap()
+                .validate_invariants()
+                .is_err()
+        );
         refused["opened_surfaces_status"] = json!("not_checked");
         refused.as_object_mut().unwrap().remove("opened_surfaces");
-        assert!(serde_json::from_value::<ActionResult>(refused.clone())
-            .unwrap()
-            .validate_invariants()
-            .is_ok());
+        assert!(
+            serde_json::from_value::<ActionResult>(refused.clone())
+                .unwrap()
+                .validate_invariants()
+                .is_ok()
+        );
         refused
             .as_object_mut()
             .unwrap()
             .remove("opened_surfaces_status");
-        assert!(serde_json::from_value::<ActionResult>(refused)
-            .unwrap()
-            .validate_invariants()
-            .is_ok());
+        assert!(
+            serde_json::from_value::<ActionResult>(refused)
+                .unwrap()
+                .validate_invariants()
+                .is_ok()
+        );
         let mut noop = value;
         noop["effect"] = json!("suspected_noop");
-        assert!(serde_json::from_value::<ActionResult>(noop)
-            .unwrap()
-            .validate_invariants()
-            .is_err());
+        assert!(
+            serde_json::from_value::<ActionResult>(noop)
+                .unwrap()
+                .validate_invariants()
+                .is_err()
+        );
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             for coordinate in 0..4 {
                 let mut result: ActionResult = serde_json::from_value(base.clone()).unwrap();
@@ -1854,9 +1848,10 @@ mod tests {
         assert_eq!(point["properties"]["x"]["type"], "number");
         let hit = object_variant(&schema["properties"]["hit"]);
         assert_eq!(hit["additionalProperties"], false);
-        assert!(hit
-            .get("required")
-            .is_none_or(|required| required == &json!([])));
+        assert!(
+            hit.get("required")
+                .is_none_or(|required| required == &json!([]))
+        );
         for name in ["click", "drag", "scroll"] {
             let advertised = crate::advertised_tool_output_schema(name).expect("action schema");
             // The success arm a proxy compares against its daemon's schema.

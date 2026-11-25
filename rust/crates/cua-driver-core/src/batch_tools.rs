@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::{
     protocol::{Content, ToolResult},
@@ -216,7 +216,7 @@ impl Tool for RunStepsTool {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": MAX_STEPS,
-                        "description": "Ordered actions. Execution stops at the first failing step. Each step is {tool, args} or {<tool>: args}, plus optional wait_for / expect / timeout_ms; a step may also be only a wait_for or expect check.",
+                        "description": "Ordered actions. Execution stops at the first failing step. Each step is {tool, args}, {tool, <argument fields beside tool>} or {<tool>: args}, plus optional wait_for / expect / timeout_ms; a step may also be only a wait_for or expect check.",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -287,7 +287,7 @@ impl Tool for RunStepsTool {
                 return ToolResult::error(
                     "run_steps is not available: registry not initialised yet.",
                 )
-                .with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED)
+                .with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED);
             }
         };
         let dispatch_context = match crate::tool::capture_dispatch_context() {
@@ -316,7 +316,10 @@ impl Tool for RunStepsTool {
                             _ => crate::tool::renamed_tool(tool).unwrap_or(tool),
                         };
                         if let Err(error) = crate::authorization::preflight_tool(tool, &context) {
-                            let message = format!("run_steps refused before running anything: step {} ({tool}): {error}", index + 1);
+                            let message = format!(
+                                "run_steps refused before running anything: step {} ({tool}): {error}",
+                                index + 1
+                            );
                             let mut structured = json!({
                                 "status": "refused", "refusal": {"code": "permission_denied", "message": message},
                                 "ok": false, "code": "permission_denied", "executed": 0,
@@ -343,6 +346,8 @@ impl Tool for RunStepsTool {
 
 /// One action of a step.
 struct Action {
+    /// Runtime-owned snapshot session, never taken from a step's public arguments.
+    snapshot_session: Option<String>,
     tool: &'static str,
     /// The tool's own arguments, without the selector keys.
     args: Value,
@@ -723,7 +728,7 @@ impl Plan {
             Some(_) => {
                 return Err(PlanError::batch(
                     "`delivery_mode` must be \"background\" or \"foreground\"",
-                ))
+                ));
             }
         };
         let foreground_fallback = match object.get("foreground_fallback") {
@@ -732,7 +737,7 @@ impl Plan {
             Some(_) => {
                 return Err(PlanError::batch(
                     "`foreground_fallback` must be true or false",
-                ))
+                ));
             }
         };
 
@@ -743,7 +748,7 @@ impl Plan {
             Some(_) => {
                 return Err(PlanError::batch(
                     "`verify` must be \"each\" or \"checkpoint\"",
-                ))
+                ));
             }
         };
 
@@ -817,6 +822,12 @@ impl Plan {
                 continue;
             }
             let mut step = parse_step(registry, index, raw, session.as_deref(), has_window)?;
+            if let Some(action) = step.action.as_mut() {
+                action.snapshot_session = object
+                    .get("_session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
             // `verify:"checkpoint"`: every step but the last returns once its
             // input is delivered. The last keeps its report of what the batch
             // left open; a step that sets its own post_action_wait keeps it.
@@ -839,15 +850,17 @@ impl Plan {
                     }
                 }
             }
-            let names_window = step
-                .action
-                .as_ref()
-                .is_some_and(|action| !action.window.is_empty())
-                || step
-                    .wait_for
-                    .iter()
-                    .chain(step.expect.iter())
-                    .any(|check| !check.window.is_empty());
+            // An `element_token` names its snapshot, and so its window; a
+            // token the runtime no longer holds names nothing (fail closed).
+            let names_window = step.action.as_ref().is_some_and(|action| {
+                !action.window.is_empty()
+                    || token_window(registry, &action.args, action.snapshot_session.as_deref())
+                        .is_some()
+            }) || step
+                .wait_for
+                .iter()
+                .chain(step.expect.iter())
+                .any(|check| !check.window.is_empty());
             let needs_window = step
                 .action
                 .as_ref()
@@ -1636,6 +1649,7 @@ async fn run_step(
     if let Some(action) = step.action {
         gate.invalidate_window();
         let Action {
+            snapshot_session,
             tool,
             mut args,
             window,
@@ -1708,7 +1722,7 @@ async fn run_step(
                     }
                 }
                 Err(miss) => {
-                    return failure(index, label, Phase::Find, miss.code, miss.message, report)
+                    return failure(index, label, Phase::Find, miss.code, miss.message, report);
                 }
             }
         } else if let (Some(pid), Some(window_id)) = (
@@ -1722,6 +1736,18 @@ async fn run_step(
                 title: None,
                 on_screen: true,
             };
+            *last_window = Some(window.clone());
+            gate.confirm_window(window);
+        } else if let Some(window) = token_window(registry, &args, snapshot_session.as_deref()) {
+            // A token-only step: its snapshot names the window later steps
+            // and the end `observe` inherit.
+            if context.is_empty() {
+                *context = WindowSpec {
+                    pid: Some(window.pid),
+                    window_id: Some(window.window_id),
+                    ..Default::default()
+                };
+            }
             *last_window = Some(window.clone());
             gate.confirm_window(window);
         }
@@ -2012,6 +2038,24 @@ fn accepts(registry: &ToolRegistry, tool: &str, field: &str) -> bool {
         .and_then(|def| def.input_schema.get("properties"))
         .and_then(|properties| properties.get(field))
         .is_some()
+}
+
+/// The window a step's live `element_token` was taken of, when it names one.
+fn token_window(registry: &ToolRegistry, args: &Value, session: Option<&str>) -> Option<Window> {
+    let mut scoped = args.clone();
+    if let Some(session) = session {
+        scoped
+            .as_object_mut()?
+            .insert("_session_id".into(), json!(session));
+    }
+    let (pid, window_id) = registry.window_for_token(&scoped)?;
+    Some(Window {
+        pid: i64::from(pid),
+        window_id,
+        app: None,
+        title: None,
+        on_screen: true,
+    })
 }
 
 /// Fill the observation's window from the last window the batch used.
@@ -2449,12 +2493,34 @@ fn parse_step(
         })
         .map(|(key, _)| key)
         .collect();
+    // A flat step `{"tool": "hotkey", "keys": [...]}` carries the arguments
+    // beside `tool`. With no `args`, those fields are the arguments; mixing
+    // them with `args` stays an error.
+    let args_absent = matches!(object.get("args"), None | Some(Value::Null));
+    let flat_args: Option<Value> =
+        (object.get("tool").is_some() && !shorthand.is_empty() && args_absent).then(|| {
+            Value::Object(
+                shorthand
+                    .iter()
+                    .map(|key| ((*key).clone(), object[key.as_str()].clone()))
+                    .collect(),
+            )
+        });
     let (name, raw_args) = match (object.get("tool"), shorthand.as_slice()) {
+        (Some(tool), [_, ..]) if flat_args.is_some() => (
+            Some(
+                tool.as_str()
+                    .ok_or_else(|| PlanError::step(index, "`tool` must be a string"))?,
+            ),
+            flat_args.as_ref(),
+        ),
         (Some(_), [extra, ..]) => {
             return Err(PlanError::step(
                 index,
-                format!("unknown field `{extra}`; a step has `tool` and `args`, or one `{{<tool>: args}}` key, plus optional wait_for/expect/timeout_ms"),
-            ))
+                format!(
+                    "unknown field `{extra}` beside `args`; put every argument inside `args` (or drop `args` and write them beside `tool`), plus optional wait_for/expect/timeout_ms"
+                ),
+            ));
         }
         (Some(tool), []) => (
             Some(
@@ -2488,7 +2554,7 @@ fn parse_step(
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-            ))
+            ));
         }
     };
 
@@ -2520,7 +2586,7 @@ fn parse_step(
             return Err(PlanError::step(
                 index,
                 format!("`expect` must hold 1 to {MAX_EXPECTS} checks"),
-            ))
+            ));
         }
         Some(Value::Array(items)) => items
             .iter()
@@ -2531,8 +2597,10 @@ fn parse_step(
                 })
             })
             .collect::<Result<_, _>>()?,
-        Some(raw) => vec![Check::parse(raw, locate::DEFAULT_EXPECT_TIMEOUT_MS)
-            .map_err(|message| PlanError::step(index, format!("expect: {message}")))?],
+        Some(raw) => vec![
+            Check::parse(raw, locate::DEFAULT_EXPECT_TIMEOUT_MS)
+                .map_err(|message| PlanError::step(index, format!("expect: {message}")))?,
+        ],
     };
 
     let action = match name {
@@ -2665,6 +2733,7 @@ fn parse_action(
     validate_against_schema(registry, tool, &probe)
         .map_err(|message| PlanError::step(index, format!("{tool}: {message}")))?;
     Ok(Action {
+        snapshot_session: None,
         tool,
         args,
         window,
@@ -2685,7 +2754,7 @@ fn parse_observe(
         _ => {
             return Err(PlanError::batch(
                 "`observe` must be true or an object of get_window_state arguments",
-            ))
+            ));
         }
     };
     if let Some(def) = registry.get_def(OBSERVE_TOOL) {
@@ -3288,11 +3357,13 @@ mod timeout_tests {
                 .with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED);
             assert_eq!(result.proves_no_input(), expected, "{effect:?}");
         }
-        assert!(!ToolResult::error("untyped")
-            .with_structured(json!({
-                "disposition":{"delivery":"not_delivered", "retry":"safe"}
-            }))
-            .proves_no_input());
+        assert!(
+            !ToolResult::error("untyped")
+                .with_structured(json!({
+                    "disposition":{"delivery":"not_delivered", "retry":"safe"}
+                }))
+                .proves_no_input()
+        );
     }
 
     #[test]
@@ -3475,9 +3546,11 @@ mod timeout_tests {
         gate.timeout();
         let registry = ToolRegistry::new();
         for tool in ["invoke_menu", "click", "type_text"] {
-            assert!(dispatch_action(&registry, &gate, tool, json!({}))
-                .await
-                .is_none());
+            assert!(
+                dispatch_action(&registry, &gate, tool, json!({}))
+                    .await
+                    .is_none()
+            );
         }
     }
 

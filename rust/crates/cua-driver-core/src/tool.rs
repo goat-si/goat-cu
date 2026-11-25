@@ -17,14 +17,12 @@ thread_local! {
 }
 
 use crate::{
-    pip_hook,
     protocol::{Content, ToolResult},
-    recording::{now_ms, screenshot_for, RecordingSession},
+    recording::{RecordingSession, now_ms},
     recording_tools::{
         GetRecordingStateTool, ReplayRegistrySlot, ReplayTrajectoryTool, StartRecordingTool,
         StopRecordingTool,
     },
-    tool_args::ArgsExt,
 };
 
 tokio::task_local! {
@@ -63,8 +61,8 @@ impl std::fmt::Display for DispatchContextError {
 
 impl std::error::Error for DispatchContextError {}
 
-pub(crate) fn capture_dispatch_context(
-) -> Result<Option<CapturedDispatchContext>, DispatchContextError> {
+pub(crate) fn capture_dispatch_context()
+-> Result<Option<CapturedDispatchContext>, DispatchContextError> {
     let authorization = DISPATCH_AUTHORIZATION_CONTEXT.try_with(Arc::clone).ok();
     let evidence = DISPATCH_TRUSTED_INVOCATION_EVIDENCE
         .try_with(Clone::clone)
@@ -104,8 +102,8 @@ impl CapturedDispatchContext {
 /// Resource adapters use this instead of consulting process-global
 /// compatibility configuration. The value exists only while the canonical
 /// registry chokepoint is executing a tool, including nested dispatch.
-pub(crate) fn current_dispatch_authorization_context(
-) -> Option<Arc<crate::session_authorization::EffectiveAuthorizationContext>> {
+pub(crate) fn current_dispatch_authorization_context()
+-> Option<Arc<crate::session_authorization::EffectiveAuthorizationContext>> {
     DISPATCH_AUTHORIZATION_CONTEXT.try_with(Arc::clone).ok()
 }
 
@@ -290,7 +288,7 @@ impl DesktopCall {
 
 impl Drop for DesktopCall {
     fn drop(&mut self) {
-        let held = &self.0 .0;
+        let held = &self.0.0;
         // Checked under the holder lock that the last clone's drop takes,
         // so a worker stopping now cannot leave its mark behind.
         let mut holder = lock_holder(&held.holder);
@@ -770,7 +768,7 @@ fn normalize_scroll_args(tool_name: &str, args: &mut Value) -> Result<(), String
             return Err(format!(
                 "scroll moves along one axis per call, got dx={dx} and dy={dy}. Pass only dx or \
                  dy (or direction and amount), or use two scroll steps in run_steps."
-            ))
+            ));
         }
         (false, false) => {
             return Err(
@@ -778,7 +776,7 @@ fn normalize_scroll_args(tool_name: &str, args: &mut Value) -> Result<(), String
                  (up, down, left or right) and amount (wheel notches). To hover without \
                  scrolling, use move_cursor."
                     .to_owned(),
-            )
+            );
         }
         (false, true) => (if dy > 0.0 { "down" } else { "up" }, dy),
         (true, false) => (if dx > 0.0 { "right" } else { "left" }, dx),
@@ -899,7 +897,9 @@ pub fn renamed_tool(name: &str) -> Option<&'static str> {
 }
 
 fn deprecated_name_note(old: &str, new: &str) -> String {
-    format!("Note: `{old}` is deprecated and will be removed in a future release; call `{new}` instead.")
+    format!(
+        "Note: `{old}` is deprecated and will be removed in a future release; call `{new}` instead."
+    )
 }
 
 /// Centralised tool name → capability tokens map. Lookup is by name so
@@ -1452,7 +1452,14 @@ pub struct ToolRegistry {
     /// Browser engines whose tools this registry serves: their read fences
     /// apply to this registry's desktop observation tools.
     browser_engines: Vec<std::sync::Weak<crate::browser::BrowserEngine>>,
+    /// How a batch learns which window an `element_token` belongs to; set by
+    /// the platform that owns the snapshot store.
+    token_window_resolver: Option<TokenWindowResolver>,
 }
+
+/// Call arguments (carrying an `element_token`) -> the `(pid, window_id)` of
+/// the live snapshot that token names, or `None` when it is stale or unknown.
+pub type TokenWindowResolver = Arc<dyn Fn(&Value) -> Option<(i32, u64)> + Send + Sync + 'static>;
 
 impl ToolRegistry {
     pub fn new() -> Self {
@@ -1566,7 +1573,19 @@ impl ToolRegistry {
             protected_resource_ownership,
             application_identities,
             browser_engines: Vec::new(),
+            token_window_resolver: None,
         }
+    }
+
+    /// Install the resolver that maps an `element_token` to its snapshot's
+    /// window, so `run_steps` can take the window to observe from a token.
+    pub fn set_token_window_resolver(&mut self, resolver: TokenWindowResolver) {
+        self.token_window_resolver = Some(resolver);
+    }
+
+    /// The `(pid, window_id)` a live `element_token` in `args` names.
+    pub fn window_for_token(&self, args: &Value) -> Option<(i32, u64)> {
+        (self.token_window_resolver.as_ref()?)(args)
     }
 
     /// Return the runtime-owned broker for adapter construction.
@@ -1762,14 +1781,11 @@ impl ToolRegistry {
     /// `register_recording_tools` from each platform's `register_all`.
     pub fn register_session_tools(&mut self) {
         use crate::session_tools::{
-            EndSessionTool, EscalateSessionTool, GetSessionStateTool, GetSessionTool,
-            ListSessionsTool, StartSessionTool,
+            EndSessionTool, GetSessionTool, ListSessionsTool, StartSessionTool,
         };
         self.register(Box::new(StartSessionTool));
-        self.register(Box::new(EscalateSessionTool));
         self.register(Box::new(GetSessionTool));
         self.register(Box::new(ListSessionsTool));
-        self.register(Box::new(GetSessionStateTool));
         self.register(Box::new(EndSessionTool));
         self.register(Box::new(crate::guide::GetGuideTool));
         self.register_batch_tools();
@@ -1981,7 +1997,7 @@ impl ToolRegistry {
             Err(error) => {
                 return permission_denied_result(format!(
                     "authorization configuration is invalid: {error}"
-                ))
+                ));
             }
         };
         let evidence = TrustedInvocationEvidence {
@@ -2028,7 +2044,7 @@ impl ToolRegistry {
             Err(error) => {
                 return permission_denied_result(format!(
                     "authorization configuration is invalid: {error}"
-                ))
+                ));
             }
         };
         self.invoke_with_context_and_evidence(name, args, context, evidence)
@@ -2251,7 +2267,9 @@ impl ToolRegistry {
         // never appears in tools/list.
         let resolved_name: &str = match name {
             "type_text_chars" => {
-                eprintln!("[cua-driver-rs] deprecated tool name 'type_text_chars' — use 'type_text' instead.");
+                eprintln!(
+                    "[cua-driver-rs] deprecated tool name 'type_text_chars' — use 'type_text' instead."
+                );
                 "type_text"
             }
             other => renamed_tool(other).unwrap_or(other),
@@ -3038,7 +3056,7 @@ impl ToolRegistry {
         crate::cursor_events::end_tool(cursor_event);
         // Coordinate the physical action itself, not post-action evidence
         // capture or result shaping. Keeping the global desktop lock through
-        // recording/PiP screenshots would unnecessarily block an unrelated
+        // recording screenshots would unnecessarily block an unrelated
         // runtime after the input side effect has already completed. A
         // platform worker still running keeps its own clone of the lane lease
         // (or a GOAT worker hold on the file lease).
@@ -3135,22 +3153,6 @@ impl ToolRegistry {
             );
         }
 
-        // Experimental PiP push — only when --experimental-pip is on argv
-        // (otherwise `pip_enabled()` is false and we skip the screenshot
-        // entirely to avoid wasted capture work). We push for the same set
-        // of action tools the recording pipeline cares about (non-read-only,
-        // not the recording-control meta-tools) so the live view matches
-        // what the recorder would have captured for the turn. The frame is
-        // only a preview, so it is captured off the request path: capturing
-        // and encoding a large window held the result back for up to 2 s.
-        if pip_hook::pip_enabled() && should_record && !private_consent_turn {
-            push_pip_frame_in_background(
-                args.opt_u64("window_id"),
-                args.opt_i64("pid"),
-                synthesize_action_label(name, &public_args),
-            );
-        }
-
         if renamed_tool(original_name).is_some() {
             result.content.push(Content::text(deprecated_name_note(
                 original_name,
@@ -3224,14 +3226,6 @@ impl ToolRegistry {
             return Err(crate::consent::ConsentError::Provider(
                 "browser observation did not attest a live top-level origin".to_owned(),
             ));
-        } else if tool_name == "escalate_session" {
-            (
-                serde_json::json!({
-                    "kind": "session_capture_scope",
-                    "capture_scope": "desktop",
-                }),
-                "Allow Cua to expand this session's observation scope".to_owned(),
-            )
         } else if let Some(window_id) = args.get("window_id").and_then(Value::as_u64) {
             let pid = args.get("pid").and_then(Value::as_i64);
             (
@@ -3368,21 +3362,21 @@ impl ToolRegistry {
         {
             let pid = args.get("pid").and_then(Value::as_i64);
             (
-                    serde_json::json!({
-                        "kind": "window_input",
-                        "pid": pid,
-                        "window_id": window_id,
-                        "delivery_mode_ceiling": delivery_mode,
-                    }),
-                    match pid {
-                        Some(pid) => format!(
-                            "Allow Cua to control window {window_id} of process {pid} in {delivery_mode} mode"
-                        ),
-                        None => format!(
-                            "Allow Cua to control window {window_id} in {delivery_mode} mode"
-                        ),
-                    },
-                )
+                serde_json::json!({
+                    "kind": "window_input",
+                    "pid": pid,
+                    "window_id": window_id,
+                    "delivery_mode_ceiling": delivery_mode,
+                }),
+                match pid {
+                    Some(pid) => format!(
+                        "Allow Cua to control window {window_id} of process {pid} in {delivery_mode} mode"
+                    ),
+                    None => {
+                        format!("Allow Cua to control window {window_id} in {delivery_mode} mode")
+                    }
+                },
+            )
         } else if let Some(pid) = args.get("pid").and_then(Value::as_i64) {
             (
                 serde_json::json!({
@@ -3651,7 +3645,7 @@ impl ToolRegistry {
             _ => {
                 return Err(protected_scope_refusal(
                     "the file-transfer operation has no reviewed exact scope",
-                ))
+                ));
             }
         };
 
@@ -3996,23 +3990,23 @@ fn canonical_proposed_path(raw: &str) -> Result<String, ToolResult> {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(protected_scope_refusal(
                     "the output path contains a broken symbolic link",
-                ))
+                ));
             }
             Ok(_) => {
                 return Err(protected_scope_refusal(
                     "the output path contains an unavailable filesystem entry",
-                ))
+                ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
                 return Err(protected_scope_refusal(
                     "an ancestor of the output path is not a directory",
-                ))
+                ));
             }
             Err(_) => {
                 return Err(protected_scope_refusal(
                     "the output path could not be inspected safely",
-                ))
+                ));
             }
         }
         let name = existing
@@ -4246,17 +4240,13 @@ fn session_requiring_tool(tool_name: &str) -> bool {
             | "get_guide"
             | "get_session"
             | "list_sessions"
-            | "get_session_state"
             | "end_session"
     )
 }
 
 fn session_selecting_tool(tool_name: &str) -> bool {
     session_requiring_tool(tool_name)
-        || matches!(
-            tool_name,
-            "get_session" | "list_sessions" | "get_session_state" | "end_session"
-        )
+        || matches!(tool_name, "get_session" | "list_sessions" | "end_session")
 }
 
 fn optional_bool_field(value: &Value, key: &str) -> Result<Option<bool>, String> {
@@ -4487,10 +4477,12 @@ fn preserve_linux_mpx_popups(
     let values = match producer.get("popups") {
         Some(Value::Array(values)) if !values.is_empty() => values.clone(),
         Some(_) => return Err("popups must be a non-empty array".into()),
-        None => vec![producer
-            .get("popup")
-            .cloned()
-            .ok_or("popup evidence omitted its entries")?],
+        None => vec![
+            producer
+                .get("popup")
+                .cloned()
+                .ok_or("popup evidence omitted its entries")?,
+        ],
     };
     if count.is_some_and(|count| count != values.len() as u64) {
         return Err("popup count does not match entries".into());
@@ -4653,10 +4645,10 @@ fn restore_public_runtime_value(value: &mut Value, runtime_prefix: &str) -> bool
 #[cfg(test)]
 mod runtime_isolation_tests {
     use super::{
-        canonical_proposed_path, namespace_runtime_args, publish_action_result,
-        restore_public_runtime_result, try_admit_text_input, DesktopCall, DesktopLane,
-        DesktopLease, TrustedInvocationEvidence, DISPATCH_AUTHORIZATION_CONTEXT,
-        DISPATCH_RUNTIME_SCOPE, DISPATCH_TRUSTED_INVOCATION_EVIDENCE,
+        DISPATCH_AUTHORIZATION_CONTEXT, DISPATCH_RUNTIME_SCOPE,
+        DISPATCH_TRUSTED_INVOCATION_EVIDENCE, DesktopCall, DesktopLane, DesktopLease,
+        TrustedInvocationEvidence, canonical_proposed_path, namespace_runtime_args,
+        publish_action_result, restore_public_runtime_result, try_admit_text_input,
     };
     use crate::{
         authorization::PermissionMode,
@@ -4667,8 +4659,8 @@ mod runtime_isolation_tests {
     #[cfg(feature = "yaml")]
     use std::io::Write;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     };
     use std::time::Duration;
 
@@ -4840,12 +4832,16 @@ mod runtime_isolation_tests {
             wire["structuredContent"]["opened_surfaces_status"],
             "partial"
         );
-        assert!(wire["structuredContent"]["opened_surfaces"][0]
-            .get("target")
-            .is_none());
-        assert!(wire["structuredContent"]["opened_surfaces"][0]
-            .get("owner_pid")
-            .is_none());
+        assert!(
+            wire["structuredContent"]["opened_surfaces"][0]
+                .get("target")
+                .is_none()
+        );
+        assert!(
+            wire["structuredContent"]["opened_surfaces"][0]
+                .get("owner_pid")
+                .is_none()
+        );
         let empty = json!({"path":"mpx_pointer", "effect":"unverifiable", "delivery_mode":"background", "popups_appeared":0});
         let wire = crate::mcp_result::conforming_tool_result(
             "click",
@@ -4856,9 +4852,11 @@ mod runtime_isolation_tests {
             )
             .unwrap(),
         );
-        assert!(wire["structuredContent"]
-            .get("opened_surfaces_status")
-            .is_none());
+        assert!(
+            wire["structuredContent"]
+                .get("opened_surfaces_status")
+                .is_none()
+        );
         let malformed = json!({"path":"mpx_pointer", "effect":"unverifiable", "delivery_mode":"background", "popups_appeared":1});
         let result = registry
             .invoke_with_context("click", malformed, unrestricted_context())
@@ -5379,8 +5377,7 @@ mod runtime_isolation_tests {
                 "properties": {
                     "key": {"type": "string"},
                     "value": {},
-                    "max_image_dimension": {"type": "integer"},
-                    "experimental_pip": {"type": "boolean"}
+                    "max_image_dimension": {"type": "integer"}
                 },
                 "additionalProperties": false
             })
@@ -6595,7 +6592,7 @@ allow:
     /// platform. A public caller cannot claim that origin.
     #[tokio::test]
     async fn trusted_human_origin_suppresses_the_agent_cursor_and_is_not_forgeable() {
-        use crate::agent_cursor::{input_origin, overlay_suppressed, InputOrigin};
+        use crate::agent_cursor::{InputOrigin, input_origin, overlay_suppressed};
         let hits = Arc::new(AtomicUsize::new(0));
         let last_args = Arc::new(Mutex::new(None));
         let mut registry = super::ToolRegistry::new();
@@ -6725,9 +6722,11 @@ allow:
 
     #[tokio::test]
     async fn dispatch_context_capture_supports_legacy_absence_and_rejects_partial_state() {
-        assert!(super::capture_dispatch_context()
-            .expect("legacy absence")
-            .is_none());
+        assert!(
+            super::capture_dispatch_context()
+                .expect("legacy absence")
+                .is_none()
+        );
         DISPATCH_RUNTIME_SCOPE
             .scope("partial-runtime".to_owned(), async {
                 assert!(super::capture_dispatch_context().is_err());
@@ -6794,10 +6793,12 @@ allow:
             .await;
         let received = last_args.lock().unwrap().clone();
         assert!(marked(&received));
-        assert!(received.unwrap()["_session_id"]
-            .as_str()
-            .unwrap()
-            .ends_with("native-pixels-viewer"));
+        assert!(
+            received.unwrap()["_session_id"]
+                .as_str()
+                .unwrap()
+                .ends_with("native-pixels-viewer")
+        );
 
         // A nested call (replay) does not inherit the outer call's claim.
         // (The outer probe's result is not a list_windows payload; only the
@@ -7013,10 +7014,12 @@ allow:
             let listed = registry.tools_list();
             let listed = &listed["tools"][0];
             assert_eq!(listed["deprecated"]["removal_after"], "2026-11-26");
-            assert!(listed["description"]
-                .as_str()
-                .unwrap()
-                .starts_with("DEPRECATED, removed in the first release after 26 Nov 2026"));
+            assert!(
+                listed["description"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("DEPRECATED, removed in the first release after 26 Nov 2026")
+            );
         }
 
         let hits = Arc::new(AtomicUsize::new(0));
@@ -7046,9 +7049,11 @@ allow:
             Content::Text { text, .. } => !text.starts_with("Deprecated: "),
             _ => true,
         }));
-        assert!(registry.tools_list()["tools"][0]
-            .get("deprecated")
-            .is_none());
+        assert!(
+            registry.tools_list()["tools"][0]
+                .get("deprecated")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -7098,7 +7103,7 @@ allow:
     #[tokio::test]
     async fn dispatch_runs_the_action_under_its_post_action_wait() {
         use crate::post_action_wait::{
-            current, PostActionWait, POST_ACTION_WAIT_ARG, POST_ACTION_WAIT_TOOLS, SKIP_SUPPORTED,
+            POST_ACTION_WAIT_ARG, POST_ACTION_WAIT_TOOLS, PostActionWait, SKIP_SUPPORTED, current,
         };
         use serde_json::json;
         let schema = json!({"type": "object", "properties": {}, "additionalProperties": false});
@@ -7243,9 +7248,10 @@ allow:
                 .as_object_mut()
                 .and_then(|object| object.remove("hint"))
                 .expect("a desktop background refusal carries a hint");
-            assert!(hint
-                .as_str()
-                .is_some_and(|hint| hint.contains("target {kind:\"window\"")));
+            assert!(
+                hint.as_str()
+                    .is_some_and(|hint| hint.contains("target {kind:\"window\""))
+            );
             assert_eq!(
                 structured,
                 serde_json::json!({
@@ -7375,7 +7381,7 @@ allow:
     /// stamps it, and a caller cannot forge the stamp.
     #[tokio::test]
     async fn only_unrestricted_dispatch_lets_input_reach_an_os_security_prompt() {
-        use crate::security_prompt::{PromptInput, ALLOW_ARG};
+        use crate::security_prompt::{ALLOW_ARG, PromptInput};
         let hits = Arc::new(AtomicUsize::new(0));
         let last_args = Arc::new(Mutex::new(None));
         let mut registry = super::ToolRegistry::new();
@@ -7699,7 +7705,9 @@ allow:
             replacement: serde_json::json!({"pid": 424242, "start_time": 8, "executable": host_protected_path()}),
             def: tool_def("kill_app"),
         }));
-        let context = bounded_context("version: 3\nexpires_after: 1h\nidle_timeout: 30m\nallow:\n  tools: [kill_app]\nresources:\n  processes:\n    terminate: [424242]\n");
+        let context = bounded_context(
+            "version: 3\nexpires_after: 1h\nidle_timeout: 30m\nallow:\n  tools: [kill_app]\nresources:\n  processes:\n    terminate: [424242]\n",
+        );
         let result = registry
             .invoke_with_context("kill_app", serde_json::json!({"pid": 424242}), context)
             .await;
@@ -8183,9 +8191,11 @@ resources:
             );
         }
         assert_eq!(hits.load(Ordering::SeqCst), 0);
-        assert!(refusal_codes
-            .iter()
-            .all(|code| code.as_deref() == Some("foreign_process_termination_denied")));
+        assert!(
+            refusal_codes
+                .iter()
+                .all(|code| code.as_deref() == Some("foreign_process_termination_denied"))
+        );
         assert_eq!(
             crate::session::list_session_snapshots_with_prefix(
                 &runtime_prefix,
@@ -8339,10 +8349,12 @@ resources:
         assert_eq!(result.is_error, Some(true));
         assert_eq!(hits.load(Ordering::SeqCst), 0);
         assert_eq!(provider.requests.load(Ordering::SeqCst), 0);
-        assert!(result
-            .content
-            .iter()
-            .any(|item| format!("{item:?}").contains("live top-level origin")));
+        assert!(
+            result
+                .content
+                .iter()
+                .any(|item| format!("{item:?}").contains("live top-level origin"))
+        );
     }
 
     #[tokio::test]
@@ -8382,11 +8394,12 @@ resources:
             "files": ["/does/not/matter"]
         });
         let evidence = TrustedInvocationEvidence::extract_from_adapter_args(&mut args);
-        assert!(args
-            .as_object()
-            .unwrap()
-            .keys()
-            .all(|key| !key.starts_with('_')));
+        assert!(
+            args.as_object()
+                .unwrap()
+                .keys()
+                .all(|key| !key.starts_with('_'))
+        );
 
         let result = registry
             .invoke_with_context_and_evidence(
@@ -8399,14 +8412,18 @@ resources:
         assert_ne!(result.is_error, Some(true));
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         let received = last_args.lock().unwrap().clone().unwrap();
-        assert!(received
-            .get("_session_id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|value| value.ends_with(":trusted-owner")));
-        assert!(received
-            .get("_transport_session_id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|value| value.ends_with(":transport-a")));
+        assert!(
+            received
+                .get("_session_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| value.ends_with(":trusted-owner"))
+        );
+        assert!(
+            received
+                .get("_transport_session_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| value.ends_with(":transport-a"))
+        );
         assert_eq!(
             received["_cua_browser_download_mcp_host_approved"],
             serde_json::Value::Bool(true)
@@ -8561,10 +8578,12 @@ resources:
             action.effect,
             crate::action_record::ActionEffect::Unverifiable
         );
-        assert!(action
-            .debug_json()
-            .get("requested_delivery")
-            .is_some_and(|value| value == "background"));
+        assert!(
+            action
+                .debug_json()
+                .get("requested_delivery")
+                .is_some_and(|value| value == "background")
+        );
         assert_eq!(hits.load(Ordering::SeqCst), 1);
 
         crate::session::fire_session_end(&runtime_session);
@@ -9295,7 +9314,7 @@ resources:
         retain: bool,
         hits: Arc<AtomicUsize>,
     ) -> super::ToolRegistry {
-        use crate::desktop_lease::{test_support::TestClock, LeaseManager};
+        use crate::desktop_lease::{LeaseManager, test_support::TestClock};
         let mut registry = super::ToolRegistry::new();
         registry.desktop_lease = LeaseManager::new(backend, Arc::new(TestClock::default()));
         registry.desktop_coordinator = Box::leak(Box::new(tokio::sync::Mutex::new(())));
@@ -9408,10 +9427,12 @@ resources:
         let body = result.structured_content.unwrap();
         assert_eq!(body["effect"], "refused");
         assert_eq!(body["code"], "desktop_lease_unavailable");
-        assert!(body["refusal"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("synthetic failure"));
+        assert!(
+            body["refusal"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("synthetic failure")
+        );
         assert_eq!(hits.load(Ordering::SeqCst), 0);
     }
 
@@ -9476,8 +9497,8 @@ resources:
     #[tokio::test]
     async fn desktop_busy_after_deadline() {
         use crate::desktop_lease::{
-            test_support::{TestBackend, TestClock},
             LeaseManager,
+            test_support::{TestBackend, TestClock},
         };
         let backend = Arc::new(TestBackend::default());
         backend.hold();
@@ -9516,8 +9537,8 @@ resources:
     #[tokio::test]
     async fn admission_scope_menu_mutations_and_reads() {
         use crate::desktop_lease::{
-            test_support::{TestBackend, TestClock},
             LeaseManager,
+            test_support::{TestBackend, TestClock},
         };
         let backend = Arc::new(TestBackend::default());
         backend.hold();
@@ -9612,8 +9633,8 @@ resources:
     #[tokio::test]
     async fn composite_dispatch_acquires_the_lease_only_for_nested_mutations() {
         use crate::desktop_lease::{
-            test_support::{TestBackend, TestClock},
             LeaseManager,
+            test_support::{TestBackend, TestClock},
         };
         let backend = Arc::new(TestBackend::default());
         let hits = Arc::new(AtomicUsize::new(0));
@@ -9652,11 +9673,13 @@ resources:
         .expect("busy nested action must finish");
         assert_eq!(hits.load(Ordering::SeqCst), 1, "{result:?}");
         assert_eq!(backend.attempts.load(Ordering::SeqCst), 502, "{result:?}");
-        assert!(result
-            .structured_content
-            .unwrap()
-            .to_string()
-            .contains("desktop_busy"));
+        assert!(
+            result
+                .structured_content
+                .unwrap()
+                .to_string()
+                .contains("desktop_busy")
+        );
     }
 
     #[test]
@@ -10312,91 +10335,6 @@ impl Default for ToolRegistry {
     }
 }
 
-/// A PiP frame capture is running; a newer request waits for the next action
-/// instead of queueing behind it.
-static PIP_CAPTURE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Capture the action's window for the PiP preview on its own thread, so the
-/// tool result does not wait for it. At most one capture runs at a time.
-fn push_pip_frame_in_background(window_id: Option<u64>, pid: Option<i64>, label: String) {
-    use std::sync::atomic::Ordering;
-    struct Busy;
-    impl Drop for Busy {
-        fn drop(&mut self) {
-            PIP_CAPTURE_BUSY.store(false, Ordering::Release);
-        }
-    }
-    if PIP_CAPTURE_BUSY.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let spawned = std::thread::Builder::new()
-        .name("pip-frame".into())
-        .spawn(move || {
-            let _busy = Busy;
-            if let Some(png_bytes) = screenshot_for(window_id, pid) {
-                pip_hook::push_pip_frame(pip_hook::PipHookFrame {
-                    png_bytes,
-                    action_label: label,
-                    timestamp_ms: now_ms(),
-                });
-            }
-        });
-    if spawned.is_err() {
-        PIP_CAPTURE_BUSY.store(false, Ordering::Release);
-    }
-}
-
-/// Build a short, human-friendly label for the PiP overlay from the
-/// tool name + raw args. Kept under ~60 chars so the macOS NSTextField
-/// has room without truncation at default geometry.
-fn synthesize_action_label(tool_name: &str, args: &Value) -> String {
-    let arg = |k: &str| -> Option<String> {
-        args.get(k).map(|v| match v {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        })
-    };
-    let summary = match tool_name {
-        "click" | "double_click" | "right_click" => {
-            if let Some((_, idx)) = args
-                .opt_str("element_token")
-                .as_deref()
-                .and_then(crate::element_token::parse_token)
-            {
-                format!("element_index={idx}")
-            } else if let (Some(x), Some(y)) = (args.opt_f64("x"), args.opt_f64("y")) {
-                format!("({x:.0}, {y:.0})")
-            } else {
-                "".into()
-            }
-        }
-        "type_text" => {
-            let text = arg("text").unwrap_or_default();
-            let trimmed: String = text.chars().take(40).collect();
-            if text.chars().count() > 40 {
-                format!("\"{trimmed}…\"")
-            } else {
-                format!("\"{trimmed}\"")
-            }
-        }
-        "press_key" | "hotkey" => arg("key").or_else(|| arg("keys")).unwrap_or_default(),
-        "scroll" => format!(
-            "dx={} dy={}",
-            arg("dx").unwrap_or_else(|| "0".into()),
-            arg("dy").unwrap_or_else(|| "0".into())
-        ),
-        "drag" => "drag".into(),
-        "set_value" => arg("value").unwrap_or_default(),
-        "launch_app" => arg("bundle_id").or_else(|| arg("name")).unwrap_or_default(),
-        _ => String::new(),
-    };
-    if summary.is_empty() {
-        tool_name.to_owned()
-    } else {
-        format!("{tool_name}: {summary}")
-    }
-}
-
 #[cfg(test)]
 mod capability_tests {
     //! Unit tests for the per-tool `capabilities` array and the
@@ -10483,9 +10421,11 @@ mod capability_tests {
             }),
         );
         assert_eq!(download["destination_root"], "[redacted]");
-        assert!(download
-            .get("_cua_browser_download_mcp_host_approved")
-            .is_none());
+        assert!(
+            download
+                .get("_cua_browser_download_mcp_host_approved")
+                .is_none()
+        );
 
         let serialized = serde_json::json!([dialog, upload, download]).to_string();
         for forbidden in [
@@ -10594,8 +10534,6 @@ mod capability_tests {
         "start_session",
         "get_session",
         "list_sessions",
-        "escalate_session",
-        "get_session_state",
         "end_session",
         // agent cursor
         "set_agent_cursor_enabled",
@@ -10919,18 +10857,22 @@ mod capability_tests {
             }
         });
         let accepting_entry = accepting.to_list_entry();
-        assert!(accepting_entry["capabilities"]
-            .as_array()
-            .expect("capabilities array")
-            .iter()
-            .any(|capability| capability == "input.delivery_mode"));
+        assert!(
+            accepting_entry["capabilities"]
+                .as_array()
+                .expect("capabilities array")
+                .iter()
+                .any(|capability| capability == "input.delivery_mode")
+        );
 
         let rejecting_entry = dummy_def("press_key").to_list_entry();
-        assert!(!rejecting_entry["capabilities"]
-            .as_array()
-            .expect("capabilities array")
-            .iter()
-            .any(|capability| capability == "input.delivery_mode"));
+        assert!(
+            !rejecting_entry["capabilities"]
+                .as_array()
+                .expect("capabilities array")
+                .iter()
+                .any(|capability| capability == "input.delivery_mode")
+        );
     }
 
     #[test]
@@ -11163,13 +11105,15 @@ mod capability_tests {
         }
         .to_list_entry();
         // anyOf[0] is the success variant; anyOf[1] is the refusal envelope.
-        let z_index = &entry["outputSchema"]["anyOf"][0]["properties"]["windows"]["items"]
-            ["properties"]["z_index"];
+        let z_index = &entry["outputSchema"]["anyOf"][0]["properties"]["windows"]["items"]["properties"]
+            ["z_index"];
         assert_eq!(z_index["type"], serde_json::json!(["integer", "null"]));
-        assert!(z_index["description"]
-            .as_str()
-            .expect("description")
-            .contains("Higher values are closer to the front"));
+        assert!(
+            z_index["description"]
+                .as_str()
+                .expect("description")
+                .contains("Higher values are closer to the front")
+        );
     }
 
     #[test]
@@ -11221,21 +11165,24 @@ mod capability_tests {
             v["enforcement_adapters"].is_array(),
             "permission enforcement inventory must be available before tools register"
         );
-        assert!(v["enforcement_adapters"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|adapter| {
-                adapter["id"] == "browser_prepare.existing_profile" && adapter["state"] == "active"
-            }));
+        assert!(
+            v["enforcement_adapters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|adapter| {
+                    adapter["id"] == "browser_prepare.existing_profile"
+                        && adapter["state"] == "active"
+                })
+        );
     }
 }
 
 #[cfg(test)]
 mod argument_shape_tests {
     use super::{
-        coerce_string_scalars, normalize_argument_aliases, normalize_zoom_args, unknown_argument,
-        ToolDef,
+        ToolDef, coerce_string_scalars, normalize_argument_aliases, normalize_zoom_args,
+        unknown_argument,
     };
     use serde_json::json;
 
@@ -11474,8 +11421,6 @@ mod argument_shape_tests {
         for key in [
             "capture_mode",
             "max_image_dimension",
-            "experimental_pip",
-            "experimental_pip_geometry",
             "cursor.motion",
             "cursor.motion.style",
             "cursor.motion.timing",

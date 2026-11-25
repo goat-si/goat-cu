@@ -242,7 +242,6 @@ const PRIVATE_OBSERVATION_OPERATIONS: &[&str] = &[
     "get_browser_state",
     "browser_dialog[action=inspect]",
     "page[action=get_text|query_dom]",
-    "escalate_session",
     "zoom",
     "start_recording",
     "menu_bar_extras[operation=list]",
@@ -788,7 +787,6 @@ pub fn enforcement_adapters_for_call(
             | "list_windows"
             | "debug_window_info"
             | "get_browser_state"
-            | "escalate_session"
             | "zoom"
             | "start_recording"
     ) || (tool == "page"
@@ -929,7 +927,6 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "get_config"
         | "get_session"
         | "list_sessions"
-        | "get_session_state"
         | "get_agent_cursor_state"
         | "get_recording_state"
         | "check_for_update"
@@ -981,7 +978,6 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "get_accessibility_tree"
         | "verify_state"
         | "set_config"
-        | "escalate_session"
         | "start_recording"
         | "get_browser_state"
         | "browser_prepare"
@@ -1122,7 +1118,6 @@ pub fn classify_tool_call(tool: &str, args: &Value) -> RiskAssessment {
         | "list_windows"
         | "debug_window_info"
         | "get_browser_state"
-        | "escalate_session"
         | "zoom"
         | "clipboard_read" => RiskAssessment {
             class: RiskClass::R2,
@@ -2132,10 +2127,6 @@ mod tests {
         assert_eq!(
             ids("start_recording", serde_json::json!({})),
             vec!["private_observation", "file_transfer_and_output"]
-        );
-        assert_eq!(
-            ids("escalate_session", serde_json::json!({})),
-            vec!["private_observation"]
         );
         assert_eq!(
             ids("type_text_chars", serde_json::json!({})),

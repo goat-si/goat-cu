@@ -3189,100 +3189,6 @@ const FfiConverterTypeEndSessionOutput = (() => {
     return new FFIConverter();
 })();
 
-export enum EscalationReason {
-    AxTreePixelMismatch,
-    BackgroundDeliveryFailed,
-    ForegroundIneffective,
-    NoWindowTarget,
-    Other
-}
-
-const FfiConverterTypeEscalationReason = (() => {
-    const ordinalConverter = FfiConverterInt32;
-    type TypeName = EscalationReason;
-    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
-        read(from: RustBuffer): TypeName {
-            switch (ordinalConverter.read(from)) {
-                case 1: return EscalationReason.AxTreePixelMismatch;
-                case 2: return EscalationReason.BackgroundDeliveryFailed;
-                case 3: return EscalationReason.ForegroundIneffective;
-                case 4: return EscalationReason.NoWindowTarget;
-                case 5: return EscalationReason.Other;
-                default: throw new UniffiInternalError.UnexpectedEnumCase();
-            }
-        }
-        write(value: TypeName, into: RustBuffer): void {
-            switch (value) {
-                case EscalationReason.AxTreePixelMismatch: return ordinalConverter.write(1, into);
-                case EscalationReason.BackgroundDeliveryFailed: return ordinalConverter.write(2, into);
-                case EscalationReason.ForegroundIneffective: return ordinalConverter.write(3, into);
-                case EscalationReason.NoWindowTarget: return ordinalConverter.write(4, into);
-                case EscalationReason.Other: return ordinalConverter.write(5, into);
-            }
-        }
-        allocationSize(value: TypeName): number {
-            return ordinalConverter.allocationSize(0);
-        }
-    }
-    return new FFIConverter();
-})();
-
-export type EscalateSessionInput = {
-    /**
-     * Public label of the legacy capture-scope session to escalate.
-     */
-    session: string,
-    /**
-     * Why the window-scoped attempt failed and desktop capture is needed.
-     */
-    reason: EscalationReason,
-    /**
-     * Optional bounded diagnostic detail. Never use secrets or page content.
-     */
-    detail?: string
-}
-
-/**
- * Generated factory for {@link EscalateSessionInput} record objects.
- */
-export const EscalateSessionInput = (() => {
-    const defaults = () => ({
-    });
-    const create = (() => {
-        return uniffiCreateRecord<EscalateSessionInput, ReturnType<typeof defaults>>(defaults);
-    })();
-    return Object.freeze({
-        create,
-        new: create,
-        defaults: () => Object.freeze(defaults()) as Partial<EscalateSessionInput>,
-    });
-})();
-
-const FfiConverterTypeEscalateSessionInput = (() => {
-    type TypeName = EscalateSessionInput;
-    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
-        read(from: RustBuffer): TypeName {
-            return {
-                session: FfiConverterString.read(from),
-                reason: FfiConverterTypeEscalationReason.read(from),
-                detail: FfiConverterOptionalString.read(from)
-            };
-        }
-        write(value: TypeName, into: RustBuffer): void {
-            FfiConverterString.write(value.session, into);
-            FfiConverterTypeEscalationReason.write(value.reason, into);
-            FfiConverterOptionalString.write(value.detail, into);
-        }
-        allocationSize(value: TypeName): number {
-            return FfiConverterString.allocationSize(value.session) +
-             FfiConverterTypeEscalationReason.allocationSize(value.reason) +
-             FfiConverterOptionalString.allocationSize(value.detail);
-
-        }
-    };
-    return new FFIConverter();
-})();
-
 export type GetAgentCursorStateInput = {
     /**
      * Public label of the session whose cursor to inspect.
@@ -3556,49 +3462,6 @@ export const GetSessionInput = (() => {
 
 const FfiConverterTypeGetSessionInput = (() => {
     type TypeName = GetSessionInput;
-    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
-        read(from: RustBuffer): TypeName {
-            return {
-                session: FfiConverterOptionalString.read(from)
-            };
-        }
-        write(value: TypeName, into: RustBuffer): void {
-            FfiConverterOptionalString.write(value.session, into);
-        }
-        allocationSize(value: TypeName): number {
-            return FfiConverterOptionalString.allocationSize(value.session);
-
-        }
-    };
-    return new FFIConverter();
-})();
-
-export type GetSessionStateInput = {
-    /**
-     * Optional public label. When omitted, inspect the caller's attached
-     * implicit session.
-     */
-    session?: string
-}
-
-/**
- * Generated factory for {@link GetSessionStateInput} record objects.
- */
-export const GetSessionStateInput = (() => {
-    const defaults = () => ({
-    });
-    const create = (() => {
-        return uniffiCreateRecord<GetSessionStateInput, ReturnType<typeof defaults>>(defaults);
-    })();
-    return Object.freeze({
-        create,
-        new: create,
-        defaults: () => Object.freeze(defaults()) as Partial<GetSessionStateInput>,
-    });
-})();
-
-const FfiConverterTypeGetSessionStateInput = (() => {
-    type TypeName = GetSessionStateInput;
     class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
         read(from: RustBuffer): TypeName {
             return {
@@ -6294,7 +6157,7 @@ const FfiConverterTypeEffectiveScope = (() => {
 })();
 
 /**
- * Successful structured result shared by session state and escalation tools.
+ * Capture-scope state carried by the `start_session` result.
  */
 export type SessionStateOutput = {
     session: string,
@@ -6309,9 +6172,7 @@ export type SessionStateOutput = {
      * Compatibility field: this reports whether this session has unlocked
      * desktop capture scope. It is not an operating-system lock-screen probe.
      */
-    desktopUnlocked: boolean,
-    escalationReason?: EscalationReason,
-    escalationDetail?: string
+    desktopUnlocked: boolean
 }
 
 /**
@@ -6339,9 +6200,7 @@ const FfiConverterTypeSessionStateOutput = (() => {
                 captureScope: FfiConverterTypeCaptureScope.read(from),
                 effectiveScope: FfiConverterTypeEffectiveScope.read(from),
                 desktopCaptureAuthorized: FfiConverterBool.read(from),
-                desktopUnlocked: FfiConverterBool.read(from),
-                escalationReason: FfiConverterOptionalTypeEscalationReason.read(from),
-                escalationDetail: FfiConverterOptionalString.read(from)
+                desktopUnlocked: FfiConverterBool.read(from)
             };
         }
         write(value: TypeName, into: RustBuffer): void {
@@ -6350,17 +6209,13 @@ const FfiConverterTypeSessionStateOutput = (() => {
             FfiConverterTypeEffectiveScope.write(value.effectiveScope, into);
             FfiConverterBool.write(value.desktopCaptureAuthorized, into);
             FfiConverterBool.write(value.desktopUnlocked, into);
-            FfiConverterOptionalTypeEscalationReason.write(value.escalationReason, into);
-            FfiConverterOptionalString.write(value.escalationDetail, into);
         }
         allocationSize(value: TypeName): number {
             return FfiConverterString.allocationSize(value.session) +
              FfiConverterTypeCaptureScope.allocationSize(value.captureScope) +
              FfiConverterTypeEffectiveScope.allocationSize(value.effectiveScope) +
              FfiConverterBool.allocationSize(value.desktopCaptureAuthorized) +
-             FfiConverterBool.allocationSize(value.desktopUnlocked) +
-             FfiConverterOptionalTypeEscalationReason.allocationSize(value.escalationReason) +
-             FfiConverterOptionalString.allocationSize(value.escalationDetail);
+             FfiConverterBool.allocationSize(value.desktopUnlocked);
 
         }
     };
@@ -8343,9 +8198,6 @@ const FfiConverterOptionalTypeUnknownReason = new FfiConverterOptional(FfiConver
 // FfiConverter for ScrollBy | undefined
 const FfiConverterOptionalTypeScrollBy = new FfiConverterOptional(FfiConverterTypeScrollBy);
 
-// FfiConverter for EscalationReason | undefined
-const FfiConverterOptionalTypeEscalationReason = new FfiConverterOptional(FfiConverterTypeEscalationReason);
-
 // FfiConverter for CaptureScope | undefined
 const FfiConverterOptionalTypeCaptureScope = new FfiConverterOptional(FfiConverterTypeCaptureScope);
 
@@ -8493,15 +8345,12 @@ export default Object.freeze({
     FfiConverterTypeElementSelector,
     FfiConverterTypeEndSessionInput,
     FfiConverterTypeEndSessionOutput,
-    FfiConverterTypeEscalateSessionInput,
-    FfiConverterTypeEscalationReason,
     FfiConverterTypeGetAgentCursorStateInput,
     FfiConverterTypeGetAgentCursorStateOutput,
     FfiConverterTypeGetCursorPositionInput,
     FfiConverterTypeGetDesktopStateInput,
     FfiConverterTypeGetScreenSizeInput,
     FfiConverterTypeGetSessionInput,
-    FfiConverterTypeGetSessionStateInput,
     FfiConverterTypeGetWindowStateInput,
     FfiConverterTypeHotkeyInput,
     FfiConverterTypeIncompleteReason,

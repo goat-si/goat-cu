@@ -6,7 +6,7 @@
 #![cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 
 use cua_driver_testkit::RawDriver;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn call(driver: &mut RawDriver, id: u64, name: &str, arguments: Value) -> Value {
     driver.send(&json!({
@@ -58,7 +58,7 @@ fn policies_are_isolated_immutable_and_enforced_over_mcp() {
         "get_desktop_state",
         json!({"session": "scope-auto"}),
     );
-    assert_eq!(code(&auto_desktop), Some("desktop_escalation_required"));
+    assert_eq!(code(&auto_desktop), Some("desktop_scope_disabled"));
 
     let window_desktop = call(
         &mut driver,
@@ -86,10 +86,7 @@ fn policies_are_isolated_immutable_and_enforced_over_mcp() {
     // unrelated environment reason (a runner with no display, say). Assert
     // what this test is actually about: the scope policy did not refuse it.
     assert!(
-        !matches!(
-            code(&desktop_screen_size),
-            Some("desktop_scope_disabled" | "desktop_escalation_required")
-        ),
+        !matches!(code(&desktop_screen_size), Some("desktop_scope_disabled")),
         "desktop scope should permit global screen geometry: {desktop_screen_size}"
     );
 
@@ -101,45 +98,21 @@ fn policies_are_isolated_immutable_and_enforced_over_mcp() {
     );
     assert_eq!(code(&desktop_window), Some("window_scope_disabled"));
 
-    let escalated = call(
-        &mut driver,
-        8,
-        "escalate_session",
-        json!({
-            "session": "scope-auto",
-            "reason": "foreground_ineffective",
-            "detail": "window ladder exhausted"
-        }),
-    );
-    assert_eq!(
-        escalated["result"]["structuredContent"]["effective_scope"],
-        "desktop"
-    );
+    // `escalate_session` was removed: an auto session stays window-scoped.
     let auto_window = call(
         &mut driver,
         9,
         "get_window_state",
         json!({"session": "scope-auto"}),
     );
-    assert_eq!(code(&auto_window), Some("window_scope_disabled"));
-    assert_eq!(
-        auto_window["result"]["structuredContent"],
-        json!({
-            "session": "scope-auto",
-            "capture_scope": "auto",
-            "effective_scope": "desktop",
-            "desktop_capture_authorized": true,
-            "desktop_unlocked": true,
-            "escalation_reason": "foreground_ineffective",
-            "escalation_detail": "window ladder exhausted",
-            "code": "window_scope_disabled",
-            "disposition": {"delivery": "not_delivered", "retry": "safe"}
-        })
+    assert_ne!(code(&auto_window), Some("window_scope_disabled"));
+    let removed = call(
+        &mut driver,
+        8,
+        "escalate_session",
+        json!({"session": "scope-auto", "reason": "other"}),
     );
-    assert_eq!(
-        auto_window["result"]["content"][0]["text"],
-        "window-scope tool 'get_window_state' is disabled because escalation to desktop scope is permanent for session 'scope-auto'; to recover, call end_session for session 'scope-auto', then call start_session with a new session id"
-    );
+    assert_eq!(removed["result"]["isError"], true, "{removed}");
 
     let conflict = call(
         &mut driver,

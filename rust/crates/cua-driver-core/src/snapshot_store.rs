@@ -5,13 +5,14 @@ mod basis;
 mod scoped;
 use crate::browser::types::ProcessFingerprint;
 use crate::element_token::{
+    CurrentSnapshot, LRU_CAP_PER_PID, ResolvedElement, STALE_TOKEN_ERROR, TokenOwner,
     current_snapshots_json, current_snapshots_phrase, format_snapshot_id, parse_token, refusal,
-    token_for, CurrentSnapshot, ResolvedElement, TokenOwner, LRU_CAP_PER_PID, STALE_TOKEN_ERROR,
+    token_for,
 };
 use crate::protocol::ToolResult;
 pub use basis::CaptureTicket;
 pub use scoped::{
-    RootValidationError, ScopedCapture, ScopedWalk, ValidatedScopedCapture, SCOPED_CAP_PER_PARENT,
+    RootValidationError, SCOPED_CAP_PER_PARENT, ScopedCapture, ScopedWalk, ValidatedScopedCapture,
 };
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
@@ -1160,7 +1161,11 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
                     .into_iter()
                     .partition(|snapshot| snapshot.screenshot_owner.as_deref() == Some(session));
                 *lane = kept;
-                retired_ids.extend(owned.iter().map(|snapshot: &Snapshot<S>| (pid, snapshot.id)));
+                retired_ids.extend(
+                    owned
+                        .iter()
+                        .map(|snapshot: &Snapshot<S>| (pid, snapshot.id)),
+                );
                 retired_keys.extend(
                     owned
                         .iter()
@@ -1269,6 +1274,23 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
             .pid_of_current(snapshot_id, session)
     }
 
+    /// The `(pid, window_id)` a live `element_token` was minted for. `None`
+    /// when the token is absent, malformed, or no longer current.
+    pub fn window_for_token(&self, args: &serde_json::Value) -> Option<(i32, u64)> {
+        let token = args.get("element_token")?.as_str()?;
+        let (snapshot_id, _) = parse_token(token)?;
+        let inner = self.inner.lock().unwrap();
+        let session = args.get("_session_id").and_then(serde_json::Value::as_str);
+        let pid = inner.pid_of_current(snapshot_id, session)?;
+        let window_id = inner
+            .lanes
+            .get(&pid)?
+            .iter()
+            .find(|entry| entry.id == snapshot_id)?
+            .window_id;
+        Some((pid, window_id))
+    }
+
     /// Who a call's `element_token` belonged to, and that process's current
     /// snapshots, for the refusal [`crate::element_token::fill_pid_from_token`]
     /// reports when the token is gone.
@@ -1372,7 +1394,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
                                 != args.get("_session_id").and_then(serde_json::Value::as_str)
                         }) =>
                     {
-                        return Err(another_session_refusal())
+                        return Err(another_session_refusal());
                     }
                     Err(miss) => {
                         return Err(row_refusal(
@@ -1381,7 +1403,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
                             lane,
                             miss,
                             args.get("_session_id").and_then(serde_json::Value::as_str),
-                        ))
+                        ));
                     }
                 },
                 Err(_) => return Err(invalid_token_refusal(token, lane)),
@@ -1592,13 +1614,15 @@ mod tests {
             .unwrap()
             .0;
         let args = serde_json::json!({"element_token": token_for(id, 0), "_session_id": "owner"});
-        assert!(cache
-            .resolve_for_instance(
-                42,
-                &args,
-                InstanceEvidence::Live(fingerprint(Some(1), Some("/app")))
-            )
-            .is_ok());
+        assert!(
+            cache
+                .resolve_for_instance(
+                    42,
+                    &args,
+                    InstanceEvidence::Live(fingerprint(Some(1), Some("/app")))
+                )
+                .is_ok()
+        );
         let err = cache
             .resolve_for_instance(
                 42,
@@ -1672,8 +1696,10 @@ mod tests {
                 err.structured_content.as_ref().unwrap()["refusal"]["code"],
                 "process_instance_unverified"
             );
-            assert!(crate::snapshot_test_support::text(&err)
-                .contains("process identity could not be captured"));
+            assert!(
+                crate::snapshot_test_support::text(&err)
+                    .contains("process identity could not be captured")
+            );
         }
         let mut wrong_pid = fp.clone();
         wrong_pid.pid = 43;
@@ -1682,13 +1708,17 @@ mod tests {
         let err = cache
             .resolve_for_instance(42, &args, InstanceEvidence::Live(fp.clone()))
             .unwrap_err();
-        assert!(crate::snapshot_test_support::text(&err)
-            .contains("process identity could not be captured"));
+        assert!(
+            crate::snapshot_test_support::text(&err)
+                .contains("process identity could not be captured")
+        );
         let id = publish(InstanceCapture::Captured(fp.clone()));
         let args = serde_json::json!({"element_token": token_for(id, 0), "_session_id": "owner"});
-        assert!(cache
-            .resolve_for_instance(42, &args, InstanceEvidence::Live(fp))
-            .is_ok());
+        assert!(
+            cache
+                .resolve_for_instance(42, &args, InstanceEvidence::Live(fp))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1711,8 +1741,10 @@ mod tests {
         let err = cache
             .resolve_for_instance(42, &foreign, InstanceEvidence::NotChecked)
             .unwrap_err();
-        assert!(crate::snapshot_test_support::text(&err)
-            .contains("snapshot belongs to another session"));
+        assert!(
+            crate::snapshot_test_support::text(&err)
+                .contains("snapshot belongs to another session")
+        );
         let conflict =
             serde_json::json!({"element_token": token, "_session_id": "other", "window_id": 8});
         assert_eq!(
@@ -1748,9 +1780,11 @@ mod tests {
             Some(id)
         );
         assert!(cache.resolve(42, &owner).is_err());
-        assert!(cache
-            .resolve_for_instance(42, &owner, InstanceEvidence::Live(fp))
-            .is_ok());
+        assert!(
+            cache
+                .resolve_for_instance(42, &owner, InstanceEvidence::Live(fp))
+                .is_ok()
+        );
         let id = cache
             .publish_for_session(42, 7, Payload(vec![10]), Some("owner"), None)
             .unwrap()
@@ -1805,8 +1839,10 @@ mod tests {
             Err(err) => err,
             Ok(_) => panic!("missing identity evidence accepted"),
         };
-        assert!(crate::snapshot_test_support::text(&err)
-            .contains("process identity could not be verified"));
+        assert!(
+            crate::snapshot_test_support::text(&err)
+                .contains("process identity could not be verified")
+        );
         assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
@@ -1832,9 +1868,11 @@ mod tests {
         let (id, _, _) = cache
             .publish_basis_for_session(42, 7, Payload(vec![2]), None, None, None, &new)
             .unwrap();
-        assert!(cache
-            .publish_basis_for_session(42, 7, Payload(vec![1]), None, None, None, &old)
-            .is_none());
+        assert!(
+            cache
+                .publish_basis_for_session(42, 7, Payload(vec![1]), None, None, None, &old)
+                .is_none()
+        );
         assert_eq!(
             cache.with_latest(42, 7, |seen, p| (seen, p.0[0])),
             Some((id, 2))
@@ -1968,23 +2006,29 @@ mod tests {
             .refresh_screenshot_for_session(42, 7, Some("runtime:b"), 1.0, None)
             .unwrap();
         assert!(cache.resolve(42, &owner).is_ok());
-        assert!(cache
-            .resolve(
-                42,
-                &serde_json::json!({"element_token": token, "_session_id": "runtime:b"})
-            )
-            .is_err());
+        assert!(
+            cache
+                .resolve(
+                    42,
+                    &serde_json::json!({"element_token": token, "_session_id": "runtime:b"})
+                )
+                .is_err()
+        );
         let anonymous = cache.publish(43, 8, Payload(vec![1]));
         let anon_token = token_for(anonymous, 0);
-        assert!(cache
-            .resolve(43, &serde_json::json!({"element_token": anon_token}))
-            .is_ok());
-        assert!(cache
-            .resolve(
-                43,
-                &serde_json::json!({"element_token": anon_token, "_session_id": "runtime:a"})
-            )
-            .is_err());
+        assert!(
+            cache
+                .resolve(43, &serde_json::json!({"element_token": anon_token}))
+                .is_ok()
+        );
+        assert!(
+            cache
+                .resolve(
+                    43,
+                    &serde_json::json!({"element_token": anon_token, "_session_id": "runtime:a"})
+                )
+                .is_err()
+        );
     }
 
     /// A token built on a window-basis id addresses the same snapshot (#130).
@@ -2027,9 +2071,11 @@ mod tests {
     #[test]
     fn miss_returns_refusal() {
         let cache = SnapshotStore::<Payload>::new();
-        assert!(cache
-            .resolve(1, &serde_json::json!({ "element_token": token_for(0, 0) }))
-            .is_err());
+        assert!(
+            cache
+                .resolve(1, &serde_json::json!({ "element_token": token_for(0, 0) }))
+                .is_err()
+        );
     }
 
     #[test]
@@ -2059,16 +2105,20 @@ mod tests {
         let cache = SnapshotStore::new();
         let id = cache.publish(9, 99, Payload(vec![1, 2, 3, 4, 5]));
         for index in 0..5 {
-            assert!(cache
-                .resolve(
-                    9,
-                    &serde_json::json!({ "element_token": token_for(id, index) })
-                )
-                .is_ok());
+            assert!(
+                cache
+                    .resolve(
+                        9,
+                        &serde_json::json!({ "element_token": token_for(id, index) })
+                    )
+                    .is_ok()
+            );
         }
-        assert!(cache
-            .resolve(9, &serde_json::json!({ "element_token": token_for(id, 5) }))
-            .is_err());
+        assert!(
+            cache
+                .resolve(9, &serde_json::json!({ "element_token": token_for(id, 5) }))
+                .is_err()
+        );
     }
 
     #[test]
@@ -2272,12 +2322,14 @@ mod tests {
             "stale_element_token"
         );
         let second = cache.publish(1, 1, Payload(vec![0]));
-        assert!(cache
-            .resolve(
-                1,
-                &serde_json::json!({ "element_token": token_for(second, 0) })
-            )
-            .is_ok());
+        assert!(
+            cache
+                .resolve(
+                    1,
+                    &serde_json::json!({ "element_token": token_for(second, 0) })
+                )
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2768,9 +2820,11 @@ mod tests {
     #[test]
     fn window_less_screenshot_context_requires_one_agreed_transform() {
         let cache = SnapshotStore::new();
-        assert!(cache
-            .screenshot_context(10, None, Some("client-a"))
-            .is_err());
+        assert!(
+            cache
+                .screenshot_context(10, None, Some("client-a"))
+                .is_err()
+        );
         cache.publish_for_session(10, 20, Payload(vec![]), Some("client-a"), Some(2.0));
         cache.publish_for_session(10, 21, Payload(vec![]), Some("client-a"), Some(2.0));
         assert_eq!(
@@ -2781,9 +2835,11 @@ mod tests {
             2.0
         );
         cache.publish_for_session(10, 22, Payload(vec![]), Some("client-a"), Some(3.0));
-        assert!(cache
-            .screenshot_context(10, None, Some("client-a"))
-            .is_err());
+        assert!(
+            cache
+                .screenshot_context(10, None, Some("client-a"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -2819,8 +2875,8 @@ mod tests {
     #[test]
     fn recreating_an_idle_reclaimed_implicit_session_keeps_its_old_tokens_stale() {
         use crate::session::{
-            begin_session_dispatch, evict_idle_with_prefix, register_scoped_session_end_hook,
-            SessionClientKind, SessionTransport,
+            SessionClientKind, SessionTransport, begin_session_dispatch, evict_idle_with_prefix,
+            register_scoped_session_end_hook,
         };
         let session = format!("snapshot-idle-implicit-{}", std::process::id());
         let cache = Arc::new(SnapshotStore::<Payload>::new());
@@ -2934,14 +2990,18 @@ mod tests {
                 .0,
             10
         );
-        assert!(cache
-            .screenshot_context_for_zoom(None, 20, Some("client-b"))
-            .is_err());
+        assert!(
+            cache
+                .screenshot_context_for_zoom(None, 20, Some("client-b"))
+                .is_err()
+        );
 
         cache.publish_for_session(11, 20, Payload(vec![]), Some("client-a"), Some(1.0));
-        assert!(cache
-            .screenshot_context_for_zoom(None, 20, Some("client-a"))
-            .is_err());
+        assert!(
+            cache
+                .screenshot_context_for_zoom(None, 20, Some("client-a"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -2957,9 +3017,11 @@ mod tests {
             .0;
         let valid_b = zoom_on(snapshot_b, 1.0);
         cache.set_zoom(10, Some("client-a"), valid_b).unwrap();
-        assert!(cache
-            .set_zoom(10, Some("client-a"), zoom_on(snapshot_a, 2.0))
-            .is_err());
+        assert!(
+            cache
+                .set_zoom(10, Some("client-a"), zoom_on(snapshot_a, 2.0))
+                .is_err()
+        );
         assert_eq!(cache.zoom(10, Some(20), Some("client-a")).unwrap(), valid_b);
     }
 
@@ -3087,12 +3149,14 @@ mod tests {
             register_runtime_store(&second);
             let first_id = first.publish(42, 7, Payload(vec![10]));
             let second_id = second.publish(42, 7, Payload(vec![20]));
-            assert!(second
-                .resolve(
-                    42,
-                    &serde_json::json!({ "element_token": token_for(first_id, 0) })
-                )
-                .is_err());
+            assert!(
+                second
+                    .resolve(
+                        42,
+                        &serde_json::json!({ "element_token": token_for(first_id, 0) })
+                    )
+                    .is_err()
+            );
             drop(first);
             let resolved = second
                 .resolve(

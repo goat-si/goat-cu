@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{
     authorization::PermissionMode,
@@ -101,6 +101,13 @@ impl Harness {
     }
 
     fn build(isolate_desktop: bool) -> Self {
+        Self::build_with_resolver(isolate_desktop, None)
+    }
+
+    fn build_with_resolver(
+        isolate_desktop: bool,
+        resolver: Option<crate::tool::TokenWindowResolver>,
+    ) -> Self {
         let mut registry = ToolRegistry::new();
         let mut calls = std::collections::HashMap::new();
         let pacings: Arc<Mutex<Vec<(String, crate::step_pacing::StepPacing)>>> = Arc::default();
@@ -167,6 +174,16 @@ impl Harness {
                 events: events.clone(),
             }));
         }
+        // Snapshot 1 is live and was taken of window 9 of pid 42; any other
+        // token is stale.
+        registry.set_token_window_resolver(resolver.unwrap_or_else(|| {
+            Arc::new(|args| {
+                args["element_token"]
+                    .as_str()
+                    .filter(|token| token.starts_with("s00000001:"))
+                    .map(|_| (42, 9))
+            })
+        }));
         registry.register_session_tools();
         if isolate_desktop {
             registry.isolate_desktop();
@@ -286,10 +303,12 @@ async fn incomplete_observation_never_proves_gone_and_preserves_result_shape() {
         result["steps"][0]["code"], "incomplete_observation",
         "{result}"
     );
-    assert!(result["steps"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("node_budget"));
+    assert!(
+        result["steps"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("node_budget")
+    );
     for key in ["total", "executed", "failed_step", "steps"] {
         assert!(result.get(key).is_some(), "{result}");
     }
@@ -406,10 +425,12 @@ async fn excluded_menu_scope_never_proves_absence() {
         result["steps"][0]["code"], "incomplete_observation",
         "{result}"
     );
-    assert!(result["steps"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("closed_menus_not_expanded"));
+    assert!(
+        result["steps"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("closed_menus_not_expanded")
+    );
 }
 
 #[tokio::test]
@@ -969,10 +990,12 @@ async fn gone_is_not_satisfied_by_a_read_error_on_a_listed_window() {
     let result = harness.run(json!({"steps": [{"expect": {"pid": 42, "window_id": 7, "name": "Save", "gone": true, "timeout_ms": 0}}]})).await;
     let result = result.structured_content.unwrap();
     assert_eq!(result["steps"][0]["code"], "gone_unconfirmed", "{result}");
-    assert!(result["steps"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("accessibility unavailable"));
+    assert!(
+        result["steps"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("accessibility unavailable")
+    );
     assert_eq!(harness.hits("get_window_state"), 1);
     assert_eq!(harness.hits("list_windows"), 1);
     let args = harness.last("list_windows");
@@ -1134,10 +1157,12 @@ async fn list_apps_error_never_proves_gone() {
     let result = harness.run(json!({"steps": [{"expect": {"app": "Demo", "name": "Save", "gone": true, "timeout_ms": 0}}]})).await;
     let result = result.structured_content.unwrap();
     assert_eq!(result["steps"][0]["code"], "lookup_failed", "{result}");
-    assert!(result["steps"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("app enumeration failed"));
+    assert!(
+        result["steps"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("app enumeration failed")
+    );
     assert_eq!(harness.hits("list_windows"), 0);
     assert_eq!(harness.hits("list_apps"), 1);
     assert_eq!(harness.hits("get_window_state"), 0);
@@ -1154,10 +1179,12 @@ async fn gone_listing_error_does_not_prove_absence() {
     let result = harness.run(json!({"steps": [{"expect": {"pid": 42, "window_id": 7, "name": "Save", "gone": true, "timeout_ms": 0}}]})).await;
     let result = result.structured_content.unwrap();
     assert_eq!(result["steps"][0]["code"], "lookup_failed", "{result}");
-    assert!(result["steps"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("window enumeration failed"));
+    assert!(
+        result["steps"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("window enumeration failed")
+    );
     assert_eq!(harness.hits("get_window_state"), 1);
     assert_eq!(harness.hits("list_windows"), 1);
 }
@@ -1271,10 +1298,12 @@ async fn stops_at_the_first_failure_and_still_observes() {
     assert_eq!(structured["failed_step"], 1);
     assert_eq!(structured["executed"], 2);
     assert_eq!(structured["steps"][1]["ok"], false);
-    assert!(structured["steps"][1]["message"]
-        .as_str()
-        .unwrap()
-        .contains("probe asked to fail"));
+    assert!(
+        structured["steps"][1]["message"]
+            .as_str()
+            .unwrap()
+            .contains("probe asked to fail")
+    );
     assert_eq!(
         harness.hits("press_key"),
         0,
@@ -1309,7 +1338,7 @@ async fn validates_every_step_before_running_any() {
             json!({"tool": "click", "args": {"session": "other"}}),
             "differs from the batch",
         ),
-        (json!({"tool": "click", "extra": 1}), "unknown field"),
+        (json!({"tool": "click", "extra": 1}), "invalid arguments"),
         (json!({"tool": "click", "args": 5}), "must be an object"),
     ];
     for (bad, expected) in cases {
@@ -1518,7 +1547,9 @@ async fn later_denied_action_refuses_before_any_step_runs() {
 }
 
 fn batch_manifest(extra: &str) -> String {
-    format!("version: 1\nmode: bounded\nexpires_after: 1h\nidle_timeout: 30m\nresources:\n  desktop:\n    applications: [42]\nallow:\n  tools: [run_steps, click]\n{extra}")
+    format!(
+        "version: 1\nmode: bounded\nexpires_after: 1h\nidle_timeout: 30m\nresources:\n  desktop:\n    applications: [42]\nallow:\n  tools: [run_steps, click]\n{extra}"
+    )
 }
 
 #[tokio::test]
@@ -1640,10 +1671,12 @@ async fn preflight_uses_the_parsed_action_after_rewrites() {
             json!({"step": 0, "tool": expected}),
             "{result}"
         );
-        assert!(harness
-            .calls
-            .values()
-            .all(|calls| calls.lock().unwrap().is_empty()));
+        assert!(
+            harness
+                .calls
+                .values()
+                .all(|calls| calls.lock().unwrap().is_empty())
+        );
     }
 }
 
@@ -1712,13 +1745,13 @@ async fn the_batch_is_advertised_with_its_schema() {
         .get_def(super::RUN_STEPS_TOOL)
         .expect("registered");
     assert_eq!(def.input_schema["required"], json!(["steps"]));
-    let listed: Vec<_> = def.input_schema["properties"]["steps"]["items"]["properties"]["tool"]
-        ["enum"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_str().unwrap())
-        .collect();
+    let listed: Vec<_> =
+        def.input_schema["properties"]["steps"]["items"]["properties"]["tool"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
     assert_eq!(listed, super::BATCHABLE_TOOLS);
 }
 
@@ -1726,10 +1759,12 @@ async fn the_batch_is_advertised_with_its_schema() {
 async fn the_old_name_run_actions_still_runs_but_is_not_listed() {
     let harness = Harness::new();
     assert!(harness.registry.get_def("run_actions").is_none());
-    assert!(!harness
-        .registry
-        .tool_names()
-        .any(|name| name == "run_actions"));
+    assert!(
+        !harness
+            .registry
+            .tool_names()
+            .any(|name| name == "run_actions")
+    );
 
     let result = harness
         .registry
@@ -1854,9 +1889,11 @@ async fn scroll_steps_accept_dx_dy_like_a_direct_call() {
         (calls[1]["direction"].clone(), calls[1]["amount"].clone()),
         (json!("left"), json!(4))
     );
-    assert!(calls
-        .iter()
-        .all(|c| c.get("dy").is_none() && c.get("dx").is_none()));
+    assert!(
+        calls
+            .iter()
+            .all(|c| c.get("dy").is_none() && c.get("dx").is_none())
+    );
 
     let refused = harness
         .run(json!({"steps": [{"tool": "scroll", "args": {"pid": 1, "dx": 1, "dy": 1}}]}))
@@ -2027,10 +2064,12 @@ async fn non_scalar_set_value_is_rejected_before_any_batch_action() {
         assert_eq!(structured["code"], "invalid_batch");
         assert_eq!(structured["executed"], 0);
         assert_eq!(structured["failed_step"], 1);
-        assert!(structured["detail"]
-            .as_str()
-            .unwrap()
-            .starts_with("set_value: invalid arguments at /value:"));
+        assert!(
+            structured["detail"]
+                .as_str()
+                .unwrap()
+                .starts_with("set_value: invalid arguments at /value:")
+        );
         assert_eq!(harness.hits("set_value"), 0);
     }
 }
@@ -2085,4 +2124,130 @@ async fn a_refused_step_after_a_sent_action_makes_the_batch_partial() {
         structured["effect"], "refused",
         "nothing was sent: {structured}"
     );
+}
+
+#[tokio::test]
+async fn a_token_only_batch_observes_the_tokens_window() {
+    let harness = Harness::new();
+    for observe in [json!({}), json!(true)] {
+        let result = harness
+            .run(json!({"steps": [
+                {"tool": "click", "args": {"element_token": "s00000001:38"}},
+                {"tool": "press_key", "args": {"key": "return"}},
+            ], "observe": observe}))
+            .await;
+        assert_ne!(result.is_error, Some(true), "{}", text(&result));
+        let read = harness.last("get_window_state");
+        assert_eq!(read["pid"], 42);
+        assert_eq!(read["window_id"], 9);
+    }
+    // The next step inherits the token's window as well.
+    assert_eq!(harness.last("press_key")["pid"], 42);
+}
+
+#[tokio::test]
+async fn run_steps_token_window_is_owned_by_the_calling_session() {
+    struct Payload;
+    impl crate::snapshot_store::SnapshotPayload for Payload {
+        type Element = ();
+        fn len(&self) -> usize {
+            1
+        }
+        fn retain(&self, index: usize) -> Option<()> {
+            (index == 0).then_some(())
+        }
+    }
+    let auth = context(None);
+    let owner = format!("__cua_runtime_{}:session-a", auth.runtime_scope_key());
+    let store = Arc::new(crate::snapshot_store::SnapshotStore::new());
+    let (id, _) = store
+        .publish_for_session(42, 9, Payload, Some(&owner), None)
+        .unwrap();
+    let token = format!("{}:0", crate::element_token::format_snapshot_id(id));
+    let harness = Harness::build_with_resolver(
+        false,
+        Some(Arc::new(move |args| store.window_for_token(args))),
+    );
+    for (session, succeeds) in [("session-a", true), ("session-b", false)] {
+        let result = harness.registry.invoke_with_context(super::RUN_STEPS_TOOL,
+            json!({"session":session, "steps":[{"tool":"click", "args":{"element_token":token}}], "observe":{}}), auth.clone()).await;
+        assert_eq!(
+            result.is_error != Some(true),
+            succeeds,
+            "session {session}: {}",
+            text(&result)
+        );
+    }
+    assert_eq!(harness.hits("click"), 1);
+}
+
+#[tokio::test]
+async fn a_stale_token_still_gives_observe_no_window() {
+    let harness = Harness::new();
+    let result = harness
+        .run(json!({"steps": [
+            {"tool": "click", "args": {"element_token": "s000000ff:3"}},
+        ], "observe": {}}))
+        .await;
+    assert_eq!(result.is_error, Some(true));
+    assert!(
+        text(&result).contains("`pid` and `window_id` are required"),
+        "{}",
+        text(&result)
+    );
+    assert_eq!(
+        harness.hits("click"),
+        0,
+        "a rejected batch executes nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_flat_step_means_the_same_as_the_nested_form() {
+    let nested = Harness::new();
+    let flat = Harness::new();
+    let nested_result = nested
+        .run(json!({"steps": [
+            {"tool": "hotkey", "args": {"pid": 42, "keys": ["cmd", "s"]}},
+            {"tool": "press_key", "args": {"pid": 42, "key": "return"}, "timeout_ms": 500},
+        ]}))
+        .await;
+    let flat_result = flat
+        .run(json!({"steps": [
+            {"tool": "hotkey", "pid": 42, "keys": ["cmd", "s"]},
+            {"tool": "press_key", "pid": 42, "key": "return", "timeout_ms": 500},
+        ]}))
+        .await;
+    assert_ne!(
+        nested_result.is_error,
+        Some(true),
+        "{}",
+        text(&nested_result)
+    );
+    assert_ne!(flat_result.is_error, Some(true), "{}", text(&flat_result));
+    let args_of = |harness: &Harness, tool: &str| {
+        let mut args = harness.last(tool);
+        let object = args.as_object_mut().unwrap();
+        object.retain(|key, _| !key.starts_with('_'));
+        args
+    };
+    assert_eq!(args_of(&flat, "hotkey"), args_of(&nested, "hotkey"));
+    assert_eq!(args_of(&flat, "press_key"), args_of(&nested, "press_key"));
+}
+
+#[tokio::test]
+async fn args_mixed_with_a_stray_field_is_still_refused() {
+    let harness = Harness::new();
+    let result = harness
+        .run(json!({"steps": [
+            {"tool": "press_key", "args": {"pid": 42}, "key": "return"},
+        ]}))
+        .await;
+    assert_eq!(result.is_error, Some(true));
+    assert!(
+        text(&result).contains("unknown field `key`"),
+        "{}",
+        text(&result)
+    );
+    assert_eq!(harness.hits("press_key"), 0);
 }
