@@ -269,6 +269,38 @@ fn shutdown_deadline_includes_blocking_pool_queue_and_never_sends_late() {
 }
 
 #[test]
+fn cancelled_shutdown_still_cleans_up_when_blocking_pool_is_saturated() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("requests");
+    let client = fixture_client("graceful", &path);
+    let rt = runtime();
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel::<()>(1);
+    let blocker = rt.spawn_blocking(move || {
+        entered_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let start = Instant::now();
+    rt.block_on(async {
+        let mut shutdown = Box::pin(client.shutdown());
+        poll_fn(|cx| {
+            assert!(shutdown.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(shutdown);
+    });
+    assert_reaped_by(&client, start + LIMIT);
+    release_tx.send(()).unwrap();
+    rt.block_on(blocker).unwrap();
+    rt.block_on(rt.spawn_blocking(|| ())).unwrap();
+    assert!(!path.exists(), "cancelled queued shutdown was transmitted");
+}
+
+#[test]
 fn timerless_shutdown_deadline_includes_blocking_pool_queue_and_never_sends_late() {
     shutdown_deadline_includes_blocking_pool_queue_and_never_sends_late_on(runtime_with_time(
         false,

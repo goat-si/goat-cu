@@ -148,6 +148,25 @@ struct ShutdownDeadline {
     expired: tokio::sync::oneshot::Receiver<()>,
 }
 
+// Cancellation must retire queued work and clean up even if the caller drops
+// the future before the deadline branch can run.
+struct ShutdownCancellation {
+    client: Arc<PrivateWorkerClient>,
+    transmission: Arc<AtomicU8>,
+    task: tokio::task::AbortHandle,
+    armed: bool,
+}
+
+impl Drop for ShutdownCancellation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.transmission.swap(2, Ordering::AcqRel);
+            self.task.abort();
+            let _ = self.client.schedule_cleanup();
+        }
+    }
+}
+
 impl ShutdownDeadline {
     fn new(deadline: Instant) -> std::io::Result<Self> {
         let (cancel, cancelled) = std::sync::mpsc::channel();
@@ -353,7 +372,13 @@ impl PrivateWorkerClient {
         let progress = Arc::clone(&transmission);
         let mut task =
             tokio::task::spawn_blocking(move || client.shutdown_sync_until(deadline, &progress));
-        tokio::select! {
+        let mut cancellation = ShutdownCancellation {
+            client: Arc::clone(self),
+            transmission: Arc::clone(&transmission),
+            task: task.abort_handle(),
+            armed: true,
+        };
+        let result = tokio::select! {
             // Preserve timeout_at's preference for a completed task; the task
             // itself only reports success after observing exit by the deadline.
             biased;
@@ -374,7 +399,9 @@ impl PrivateWorkerClient {
                 self.schedule_cleanup()?;
                 Err(Self::shutdown_deadline_error(started))
             }
-        }
+        };
+        cancellation.armed = false;
+        result
     }
 
     fn shutdown_deadline_error(started: bool) -> DriverError {

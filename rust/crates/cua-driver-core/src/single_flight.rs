@@ -13,7 +13,7 @@
 //! The gate owns only admission. Each adapter keeps its own worker spawning,
 //! deadline, and error type.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -34,6 +34,7 @@ enum Gate {
 pub struct SingleFlight {
     gate: Mutex<Gate>,
     cooldown: Duration,
+    generation: AtomicU64,
 }
 
 impl SingleFlight {
@@ -43,6 +44,7 @@ impl SingleFlight {
         Self {
             gate: Mutex::new(Gate::Open),
             cooldown,
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -56,10 +58,16 @@ impl SingleFlight {
             Gate::Cooling { until } if Instant::now() < until => return None,
             Gate::Open | Gate::Cooling { .. } => {}
         }
+        let generation = self
+            .generation
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .ok()?
+            + 1;
         *gate = Gate::Busy { timed_out: false };
         Some(SingleFlightPermit {
             gate: Arc::clone(self),
             timed_out: Arc::new(AtomicBool::new(false)),
+            generation,
         })
     }
 
@@ -92,6 +100,7 @@ impl SingleFlight {
 pub struct SingleFlightPermit {
     gate: Arc<SingleFlight>,
     timed_out: Arc<AtomicBool>,
+    generation: u64,
 }
 
 impl SingleFlightPermit {
@@ -112,6 +121,7 @@ impl SingleFlightPermit {
         SingleFlightDeadline {
             gate: Arc::clone(&self.gate),
             timed_out: Arc::clone(&self.timed_out),
+            generation: self.generation,
         }
     }
 }
@@ -132,6 +142,7 @@ impl Drop for SingleFlightPermit {
 pub struct SingleFlightDeadline {
     gate: Arc<SingleFlight>,
     timed_out: Arc<AtomicBool>,
+    generation: u64,
 }
 
 impl SingleFlightDeadline {
@@ -142,6 +153,9 @@ impl SingleFlightDeadline {
     pub fn expire(&self) {
         self.timed_out.store(true, Ordering::Release);
         let mut gate = self.gate.lock();
+        if self.gate.generation.load(Ordering::Relaxed) != self.generation {
+            return;
+        }
         *gate = match *gate {
             Gate::Busy { .. } => Gate::Busy { timed_out: true },
             Gate::Open | Gate::Cooling { .. } => self.gate.after_timeout(),
@@ -209,6 +223,22 @@ mod tests {
         deadline.expire();
         assert!(matches!(state(&gate), Gate::Cooling { .. }));
         assert!(gate.try_acquire().is_none());
+    }
+
+    #[test]
+    fn stale_deadline_does_not_mark_a_new_worker() {
+        let gate = Arc::new(SingleFlight::new(Duration::from_secs(60)));
+        let first = gate.try_acquire().unwrap();
+        let stale = first.deadline();
+        drop(first);
+        let second = gate.try_acquire().unwrap();
+        stale.expire();
+        assert!(!second.timed_out());
+        drop(second);
+        assert!(
+            gate.try_acquire().is_some(),
+            "stale deadline must not cause cooldown"
+        );
     }
 
     #[test]

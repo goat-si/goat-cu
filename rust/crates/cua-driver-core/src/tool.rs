@@ -5955,9 +5955,8 @@ resources:
                 )
                 .await;
 
-            assert_eq!(
-                result.is_error != Some(true),
-                false,
+            assert!(
+                result.is_error == Some(true),
                 "unverified hosted frame {frame}: {result:?}"
             );
             assert_eq!(hits.load(Ordering::SeqCst), 0);
