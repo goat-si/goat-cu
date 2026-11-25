@@ -337,6 +337,12 @@ where
         Ok(value) => Ok((Ok(value), None, false)),
         Err(initial_error) if accepted_consent => {
             let (result, displayed_consent_prompt) = retry.await?;
+            if result.is_ok() && !displayed_consent_prompt {
+                return Err(BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserConsentRequired,
+                    "the fresh browser connection did not obtain fresh consent",
+                ));
+            }
             Ok((result, Some(initial_error), displayed_consent_prompt))
         }
         Err(error) => Ok((Err(error), None, false)),
@@ -2642,17 +2648,14 @@ mod tests {
             },
             Duration::ZERO,
         );
-        let (result, initial_error, fresh_displayed) = retry_claim_after_accepted_consent(
+        let refusal = retry_claim_after_accepted_consent(
             Err(anyhow::anyhow!("first handshake rejected")),
             true,
             retry,
         )
         .await
-        .expect("the immediate fresh claim should win before consent");
-
-        assert_eq!(result.unwrap(), 17);
-        assert!(initial_error.is_some());
-        assert!(!fresh_displayed);
+        .expect_err("fresh connection must obtain fresh consent");
+        assert_eq!(refusal.code, BrowserRefusalCode::BrowserConsentRequired);
         assert!(!consent_polled.load(std::sync::atomic::Ordering::SeqCst));
     }
 
@@ -2687,20 +2690,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepted_consent_retries_one_failed_claim_with_a_fresh_dial() {
-        let (result, initial_error, fresh_displayed) = retry_claim_after_accepted_consent(
+    async fn accepted_consent_cannot_authorize_a_fresh_dial_without_new_consent() {
+        let refusal = retry_claim_after_accepted_consent(
             Err(anyhow::anyhow!("pre-consent handshake rejected")),
             true,
             async { Ok((Ok::<_, anyhow::Error>(11_u8), false)) },
         )
         .await
-        .expect("the fresh claim should succeed");
-        assert_eq!(result.unwrap(), 11);
-        assert_eq!(
-            initial_error.expect("initial error").to_string(),
-            "pre-consent handshake rejected"
-        );
-        assert!(!fresh_displayed);
+        .expect_err("a fresh connection must have fresh consent");
+        assert_eq!(refusal.code, BrowserRefusalCode::BrowserConsentRequired);
     }
 
     #[tokio::test]
