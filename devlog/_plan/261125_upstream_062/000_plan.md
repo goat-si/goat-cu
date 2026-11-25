@@ -36,7 +36,7 @@ The upstream clone `/private/tmp/trycua-cua` is read-only reference (`git -C /pr
 ## Resolution policy (every conflict hunk, and every clean merge in a safety-critical file)
 
 Read first: GOAT.md ("What differs from upstream", "macOS click and focus refusals", "Embedded process lifetime",
-"Windows executable grants"), the bodies of goat-cu PR #300 and #301 (`gh pr view 300 -R goat-si/goat-cu`), and
+"Windows executable grants"), the bodies of goat-cu PR #300 and #301 (saved locally: `/private/tmp/goat-cu-sync62/pr300.md`, `pr301.md`; no GitHub access needed, read-only gh is allowed), and
 `devlog/_plan/261112_upstream_core/010_wp1_upstream_sync.md` §B2 and its preservation tables (the last sync's per-file rules).
 
 | Group | Rule |
@@ -67,8 +67,7 @@ flows are listed per step for the PR's security/behavior review.
    `cargo check --locked --target x86_64-unknown-linux-gnu -p platform-linux -p cua-driver-core --all-targets` and
    `cargo check --locked --target x86_64-pc-windows-msvc -p platform-windows --lib` when the step touches those crates (if a C
    build script cannot build for the target on this host, say so: NOT RUN, CI covers); `cargo test --locked -p <crate> --lib <module>`
-   for every module the step changed in core and platform-macos; rustfmt `--check` on changed .rs files
-   (`rustfmt --edition 2024 --check <files>`); `rg -n '^(<<<<<<<|=======|>>>>>>>)( |$)'` over changed files is empty;
+   for every module the step changed in core and platform-macos; rustfmt on changed .rs files with `/private/tmp/goat-cu-sync62/fmtcheck.sh HEAD` style per-file stdin check (`fmtcheck.sh <base> <head>` after committing, or `git show :<f> | rustfmt --edition 2024 --check` for staged files; plain `rustfmt --check <file>` also walks submodules and reports files the step did not change); `rg -n '^(<<<<<<<|=======|>>>>>>>)( |$)'` over changed files is empty;
    `git diff --cached --check`. If the protocol changed, `(cd goat/compat && python3 -m unittest test_check_protocol)`.
    Use `TMPDIR=/private/tmp` for cua-driver tests (Unix socket path length).
 6. Write `devlog/_plan/261125_upstream_062/0NN_sN.md` (NN = 10+N): upstream commits/PRs in range (one line each, disposition
