@@ -469,6 +469,7 @@ mod tests {
             max_value: None,
             enabled: None,
             selected: None,
+            url: None,
             in_web_content: false,
         }
     }
@@ -922,6 +923,7 @@ mod tests {
             markdown(&lines)
         };
         let ctx = ViewContext {
+            session: None,
             pid: 260026,
             window_id: 260026,
             key: ViewKey {

@@ -1090,27 +1090,6 @@ impl Tool for GetWindowStateTool {
                 if display_only {
                     cua_driver_core::window_state_view::mark_display_only(&mut structured);
                 }
-                if !observation_only {
-                    cua_driver_core::window_state_view::apply(
-                        &view,
-                        &cua_driver_core::window_state_view::ViewContext {
-                            pid: i64::from(pid),
-                            window_id: hwnd,
-                            key: cua_driver_core::window_state_view::ViewKey {
-                                query: query.clone(),
-                                max_elements,
-                                max_depth: args
-                                    .get("max_depth")
-                                    .and_then(|v| v.as_u64())
-                                    .map(|v| v as usize),
-                            },
-                            focus_probe: None,
-                        },
-                        &mut content,
-                        &mut structured,
-                    );
-                }
-
                 // #299: name the process instance this answer describes, but
                 // only when the read before and the read after it agree and the
                 // answer published the rows it describes.
@@ -1126,6 +1105,28 @@ impl Tool for GetWindowStateTool {
                     refreshed.is_some(),
                 ) {
                     structured["process_instance"] = json!(label);
+                }
+
+                if !observation_only {
+                    cua_driver_core::window_state_view::apply(
+                        &view,
+                        &cua_driver_core::window_state_view::ViewContext {
+                            session: session_id.as_deref(),
+                            pid: i64::from(pid),
+                            window_id: hwnd,
+                            key: cua_driver_core::window_state_view::ViewKey {
+                                query: query.clone(),
+                                max_elements,
+                                max_depth: args
+                                    .get("max_depth")
+                                    .and_then(|v| v.as_u64())
+                                    .map(|v| v as usize),
+                            },
+                            focus_probe: None,
+                        },
+                        &mut content,
+                        &mut structured,
+                    );
                 }
 
                 ToolResult {

@@ -89,7 +89,8 @@ fn def() -> &'static ToolDef {
         description: "Snapshot a window: the accessibility tree plus a screenshot. The tree is one compact Markdown \
             rendering by default (`tree_format:\"markdown\"`): row `[N]` is `element_token` \
             `<snapshot_id>:N`, with `snapshot_id` in the header and structuredContent; \
-            `tree_format:\"elements\"` returns the structured `elements` array instead, `\"both\"` both. A \
+            `tree_format:\"elements\"` returns the structured `elements` array instead, `\"both\"` both. \
+            Actionable links may include their destination `url`, which can contain tokens. A \
             read walks at most 250 nodes by default and says `truncated:true` when cut; raise \
             `max_elements`, or narrow with `query` and `max_depth`. Query accepts `a|b` for either \
             alternative and reports zero matches. Long lists and tables are read last, \
@@ -1348,6 +1349,7 @@ impl Tool for GetWindowStateTool {
             cua_driver_core::window_state_view::apply(
                 &view,
                 &cua_driver_core::window_state_view::ViewContext {
+                    session: session_id.as_deref(),
                     pid: i64::from(pid),
                     window_id: u64::from(window_id),
                     key: cua_driver_core::window_state_view::ViewKey {
@@ -2016,6 +2018,12 @@ pub(crate) fn element_entry(
     }
     if node.in_web_content {
         entry["in_web_content"] = serde_json::Value::Bool(true);
+    }
+    // A link's navigation target (AXURL). Without it a caller reading
+    // web content could see a link's text but not where it leads, and
+    // would have to press it to find out.
+    if let Some(url) = node.url.clone() {
+        entry["url"] = serde_json::Value::String(url);
     }
     if let Some(frame) = frame {
         entry["frame"] = frame;
@@ -2742,6 +2750,7 @@ mod tests {
             max_value: None,
             enabled: None,
             selected: None,
+            url: None,
             in_web_content: false,
         }
     }
@@ -3082,6 +3091,22 @@ mod tests {
     }
 
     #[test]
+    fn elements_surface_link_url() {
+        let mut nodes = vec![node(
+            Some(0),
+            "AXLink",
+            Some("Background mode"),
+            2,
+            None,
+            None,
+            vec!["AXPress".into()],
+        )];
+        nodes[0].url = Some("https://example.com/docs/guides/background".into());
+        let entry = &build_elements_array_with_token(&nodes, None)[0];
+        assert_eq!(entry["url"], "https://example.com/docs/guides/background");
+    }
+
+    #[test]
     fn checkbox_value_state_normalizes_to_selected() {
         let mut nodes = vec![node(
             Some(0),
@@ -3102,7 +3127,14 @@ mod tests {
         // Stock behaviour is unchanged for elements without control state.
         let nodes = vec![node(Some(0), "AXButton", Some("OK"), 0, None, None, vec![])];
         let entry = &build_elements_array_with_token(&nodes, None)[0];
-        for key in ["value_description", "min", "max", "enabled", "selected"] {
+        for key in [
+            "value_description",
+            "min",
+            "max",
+            "enabled",
+            "selected",
+            "url",
+        ] {
             assert!(entry.get(key).is_none(), "{key} must be omitted");
         }
     }
@@ -3631,6 +3663,7 @@ mod completeness_output_tests {
             None,
         );
         let context = cua_driver_core::window_state_view::ViewContext {
+            session: None,
             pid: 42,
             window_id: 91001,
             key: cua_driver_core::window_state_view::ViewKey {
@@ -3692,6 +3725,7 @@ mod completeness_output_tests {
     fn since_pair(window: u64, first_meta: Value, next_meta: Value) -> Value {
         use cua_driver_core::window_state_view::{self, ViewContext, ViewKey, ViewOptions};
         let context = ViewContext {
+            session: None,
             pid: 42,
             window_id: window,
             key: ViewKey {
@@ -3847,6 +3881,7 @@ mod completeness_output_tests {
                 window_state_view::mark_display_only(&mut payload);
             }
             let context = ViewContext {
+                session: None,
                 pid: 42,
                 window_id: 99,
                 key: ViewKey {
@@ -4050,6 +4085,7 @@ mod completeness_output_tests {
             let options =
                 cua_driver_core::window_state_view::ViewOptions::from_args(&args).unwrap();
             let context = cua_driver_core::window_state_view::ViewContext {
+                session: None,
                 pid: 42,
                 window_id: 99,
                 key: cua_driver_core::window_state_view::ViewKey {
@@ -4222,6 +4258,7 @@ mod canonical_output_tests {
         use cua_driver_core::window_state_view::{apply, ViewContext, ViewKey, ViewOptions};
         let md = "- [0] AXButton \"Example\"\n";
         let ctx = ViewContext {
+            session: None,
             pid: 91811,
             window_id: 81811,
             key: ViewKey {

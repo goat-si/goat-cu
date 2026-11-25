@@ -7,6 +7,20 @@ use core_foundation::{
     string::CFString,
 };
 
+/// Decode only CFURL slots; malformed values must not become URLs.
+pub(crate) unsafe fn url_from_cf(value: CFTypeRef) -> Option<String> {
+    use core_foundation::url::CFURL;
+    if value.is_null() || CFGetTypeID(value) != CFURL::type_id() {
+        return None;
+    }
+    Some(
+        CFURL::wrap_under_get_rule(value as _)
+            .absolute()
+            .get_string()
+            .to_string(),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BatchFailure {
     WholeCall(AXError),
@@ -273,6 +287,19 @@ mod tests {
         assert_eq!(slots.stringish(2).unwrap().state_value, "1");
         assert_eq!(slots.string(1), None);
         assert_eq!(slots.string(2), None);
+    }
+
+    #[test]
+    fn url_decoder_rejects_non_url_values() {
+        use core_foundation::url::CFURL;
+        let url = CFURL::from_path("/docs/", true).unwrap();
+        let text = CFString::new("https://example.com/");
+        assert_eq!(
+            unsafe { url_from_cf(url.as_CFTypeRef()) }.as_deref(),
+            Some("file:///docs/")
+        );
+        assert_eq!(unsafe { url_from_cf(text.as_CFTypeRef()) }, None);
+        assert_eq!(unsafe { url_from_cf(std::ptr::null()) }, None);
     }
 
     #[test]

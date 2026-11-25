@@ -228,6 +228,15 @@ fn window_label(hwnd: HWND) -> String {
     format!("{title} ({exe})")
 }
 
+/// Stall diagnostics avoid titles: an app can put field contents there.
+fn window_process_label(hwnd: HWND) -> String {
+    if hwnd.0.is_null() {
+        return "no foreground window".to_owned();
+    }
+    let exe = owning_exe_basename(hwnd).unwrap_or_else(|| "unknown process".to_owned());
+    format!("HWND {:?} ({exe})", hwnd.0)
+}
+
 fn foreign_foreground_error(actual: HWND, detail: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "foreign window holds the foreground: {label}; {detail} Nothing was retried; the \
@@ -1166,11 +1175,18 @@ fn with_confirmed_foreground<T>(
             Some(attachment) if attachment.wait_for_drain(Duration::from_secs(2)) => {
                 TypingTurn::Drained
             }
-            Some(_) => {
+            Some(attachment) => {
+                // Same evidence as a stalled text unit: whether the target
+                // thread still answers messages (busy in its own handler vs.
+                // waiting on input it never gets) and where its focus is.
+                let actual = unsafe { GetForegroundWindow() };
                 result = Err(anyhow::anyhow!(
                     "input_delivery_stalled: Windows did not confirm that the target read the \
                      {operation} input within 2000 ms. It was inserted and may still appear in \
-                     the target. Nothing was retried; inspect the target before repeating it."
+                     the target. Nothing was retried; inspect the target before repeating it. \
+                     Foreground window now: {fg}. {detail}",
+                    fg = window_process_label(actual),
+                    detail = attachment.stall_detail(actual),
                 ));
                 TypingTurn::Undrained
             }

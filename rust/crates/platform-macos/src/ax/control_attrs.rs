@@ -10,7 +10,7 @@ use super::bindings::*;
 use super::tree_source::{AxTreeSource, Read, TreeBatch};
 use cua_driver_core::walk_budget::WalkBudget;
 
-const CONTROL_ATTRIBUTES: [&str; 7] = [
+const CONTROL_ATTRIBUTES: [&str; 8] = [
     "AXEnabled",
     "AXPosition",
     "AXSize",
@@ -18,6 +18,7 @@ const CONTROL_ATTRIBUTES: [&str; 7] = [
     "AXMinValue",
     "AXMaxValue",
     "AXSelected",
+    "AXURL",
 ];
 
 const FRAME_ATTRIBUTES: [&str; 2] = ["AXPosition", "AXSize"];
@@ -30,6 +31,7 @@ pub(crate) struct ControlAttrs {
     pub min_value: Option<f64>,
     pub max_value: Option<f64>,
     pub selected: Option<bool>,
+    pub url: Option<String>,
 }
 
 fn known<T>(read: Read<T>) -> Option<T> {
@@ -55,6 +57,7 @@ impl ControlAttrs {
             min_value: known(slots.number(4)),
             max_value: known(slots.number(5)),
             selected: known(slots.boolean(6)),
+            url: known(slots.url(7)),
         }
     }
 
@@ -71,6 +74,7 @@ impl ControlAttrs {
             min_value: step.read(|| known(source.number(element, "AXMinValue")))?,
             max_value: step.read(|| known(source.number(element, "AXMaxValue")))?,
             selected: step.read(|| known(source.boolean(element, "AXSelected")))?,
+            url: step.read(|| known(source.url(element)))?,
         })
     }
 }
@@ -399,6 +403,7 @@ mod tests {
             CFNumber::from(0.0).as_CFType(),
             CFNumber::from(10.5).as_CFType(),
             null,
+            unsafe { CFType::wrap_under_get_rule(kCFNull) },
         ]));
         assert_eq!(
             read,
@@ -409,6 +414,7 @@ mod tests {
                 min_value: Some(0.0),
                 max_value: Some(10.5),
                 selected: None,
+                url: None,
             }
         );
     }
@@ -425,6 +431,7 @@ mod tests {
             CFString::new("7").as_CFType(),
             CFBoolean::true_value().as_CFType(),
             CFNumber::from(0.0).as_CFType(),
+            unsafe { CFType::wrap_under_get_rule(kCFNull) },
         ]));
         assert_eq!(read.enabled, Some(true));
         assert_eq!(read.frame, None);
@@ -474,6 +481,9 @@ mod source_adapter_tests {
         fn text(&self, _: &(), name: &str) -> Read<String> {
             self.trace.borrow_mut().push(name.into());
             Read::Absent
+        }
+        fn url(&self, _: &()) -> Read<String> {
+            Read::Known("https://example.test/link".into())
         }
         fn text_status(&self, _: &(), _: &str) -> AttrStatus {
             panic!("unexpected status")
@@ -534,6 +544,18 @@ mod source_adapter_tests {
         fn retain_for_snapshot(&self, _: &()) -> usize {
             panic!("unexpected retain")
         }
+    }
+
+    #[test]
+    fn failed_batch_preserves_the_url_from_single_read() {
+        let source = Source {
+            trace: RefCell::new(Vec::new()),
+            position_present: true,
+        };
+        let mut budget = WalkBudget::nodes_only(10);
+        let _ = budget.admit();
+        let result = read_control_attrs_with(&source, &(), &mut budget, &mut false).unwrap();
+        assert_eq!(result.url.as_deref(), Some("https://example.test/link"));
     }
 
     #[test]

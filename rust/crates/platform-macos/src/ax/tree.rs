@@ -241,6 +241,9 @@ pub struct AXNode {
     pub enabled: Option<bool>,
     /// AXSelected. `None` when the app doesn't report the attribute.
     pub selected: Option<bool>,
+    /// AXURL of a link — the target a press would navigate to. Read only for
+    /// actionable `AXLink` nodes; `None` everywhere else.
+    pub url: Option<String>,
     /// True when this node is an AX web-document root or descends from one.
     /// This trust marker is independent of actionable ancestry because
     /// AXWebArea is commonly non-actionable and therefore has no element index.
@@ -282,6 +285,14 @@ struct ControlState {
     max_value: Option<f64>,
     enabled: Option<bool>,
     selected: Option<bool>,
+    url: Option<String>,
+}
+
+/// Roles whose `AXURL` names a navigation target worth surfacing. `AXWebArea`
+/// also carries `AXURL` (the document URL) but is not actionable, so it never
+/// reaches the structured `elements` array.
+fn role_exposes_link_url(role: &str) -> bool {
+    role == "AXLink"
 }
 
 fn read_control_state_if_actionable<F>(is_actionable: bool, read: F) -> ControlState
@@ -793,6 +804,7 @@ impl AXNode {
             max_value: None,
             enabled: None,
             selected: None,
+            url: None,
             in_web_content: false,
         }
     }
@@ -2822,6 +2834,7 @@ fn walk_element<S: AxTreeSource>(
                 max_value: shown.and_then(|bar| bar.range).map(|(_, max)| max),
                 enabled: None,
                 selected: None,
+                url: None,
                 in_web_content,
             };
             lines.push((depth, format_node_line(&node)));
@@ -3255,6 +3268,14 @@ fn walk_element<S: AxTreeSource>(
             max_value: control.max_value,
             enabled,
             selected: control.selected,
+            url: if role_exposes_link_url(&role) && !secure && !value_unknown {
+                control
+                    .url
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty())
+            } else {
+                None
+            },
         }
     });
     let (redacted_value, redacted_value_state) = if secure {
@@ -3303,6 +3324,7 @@ fn walk_element<S: AxTreeSource>(
             max_value: control_state.max_value,
             enabled: control_state.enabled,
             selected: control_state.selected,
+            url: control_state.url.clone(),
             in_web_content,
         }
     } else {
@@ -3338,6 +3360,7 @@ fn walk_element<S: AxTreeSource>(
             max_value: control_state.max_value,
             enabled: control_state.enabled,
             selected: control_state.selected,
+            url: control_state.url.clone(),
             in_web_content,
         }
     };
@@ -3825,6 +3848,7 @@ mod secure_value_tests {
             .get("value")
             .is_none());
         let ctx = ViewContext {
+            session: None,
             pid: 260105,
             window_id: 260105,
             key: ViewKey {
@@ -3968,6 +3992,7 @@ fn role_only_node(
         max_value: None,
         enabled: None,
         selected: None,
+        url: None,
         in_web_content,
     }
 }
@@ -4815,6 +4840,7 @@ mod tests {
             max_value: None,
             enabled: None,
             selected: None,
+            url: None,
             in_web_content: false,
         };
         assert_eq!(
@@ -4878,6 +4904,7 @@ mod tests {
             max_value: None,
             enabled: Some(true),
             selected: None,
+            url: None,
             in_web_content: false,
         };
         let rendered = format_node_line(&node);
@@ -5160,6 +5187,20 @@ mod tests {
         });
         assert_eq!(live, Some(1));
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn link_url_is_read_only_for_links() {
+        assert!(role_exposes_link_url("AXLink"));
+        for role in [
+            "AXWebArea",
+            "AXButton",
+            "AXStaticText",
+            "AXImage",
+            "AXTextField",
+        ] {
+            assert!(!role_exposes_link_url(role), "{role}");
+        }
     }
 }
 
@@ -5591,6 +5632,7 @@ mod lean_row_tests {
                 max_value: None,
                 enabled: Some(true),
                 selected: None,
+                url: None,
                 in_web_content: false,
             },
             AXNode {
@@ -5617,6 +5659,7 @@ mod lean_row_tests {
                 max_value: None,
                 enabled: None,
                 selected: None,
+                url: None,
                 in_web_content: false,
             },
             AXNode {
@@ -5643,6 +5686,7 @@ mod lean_row_tests {
                 max_value: None,
                 enabled: None,
                 selected: None,
+                url: None,
                 in_web_content: false,
             },
             AXNode {
@@ -5669,6 +5713,7 @@ mod lean_row_tests {
                 max_value: None,
                 enabled: None,
                 selected: None,
+                url: None,
                 in_web_content: false,
             },
             AXNode {
@@ -5695,6 +5740,7 @@ mod lean_row_tests {
                 max_value: None,
                 enabled: Some(true),
                 selected: None,
+                url: None,
                 in_web_content: false,
             },
         ];

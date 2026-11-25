@@ -785,7 +785,8 @@ fn unknown_visibility_falls_back_to_full_walk() {
     use crate::ax::tree_source::ReadFailure;
     let content =
         "AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription";
-    let control = "AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected";
+    let control =
+        "AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL";
     let source = Fake::new(
         &[(1, 1, 1, &[2]), (2, 2, 2, &[])],
         vec![
@@ -1079,7 +1080,7 @@ fn assert_mid_read_timeout(stage: &str) {
     let expire_clock = clock.clone();
     let content = "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription";
     let control =
-        "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected";
+        "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL";
     let frame = "batch 2 AXPosition,AXSize";
     let target = match stage {
         "content" => content,
@@ -1241,7 +1242,7 @@ fn failed_control_attribute_reports_attribute_read_failed() {
             step("batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", Reply::Batch(Ok(Batch(vec![Slot::Text(AttrStatus::Absent); 7])))),
             step("value 1", Reply::Value(Ok(None))),
             step("actions 1", Reply::Actions(Read::Known(vec!["AXPress".into()]))),
-            step("batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", Reply::Batch(Ok(Batch(vec![Slot::Failure(SlotFailure::WrongType), Slot::Point(None), Slot::Size(None), Slot::Text(AttrStatus::Absent), Slot::Number(None), Slot::Number(None), Slot::Bool(None)])))),
+            step("batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", Reply::Batch(Ok(Batch(vec![Slot::Failure(SlotFailure::WrongType), Slot::Point(None), Slot::Size(None), Slot::Text(AttrStatus::Absent), Slot::Number(None), Slot::Number(None), Slot::Bool(None)])))),
             step("snapshot 1", Reply::Unit),
             step("children 1", Reply::Children(Read::Absent)),
         ],

@@ -34,6 +34,24 @@ impl Entry {
 
 pub(super) const ENTRIES: &[Entry] = &[
     Entry {
+        file: "damage_watch.rs",
+        item: "arm_for_window",
+        primitive: ".spawn",
+        fingerprint: 1259210259630052671,
+        occurrence: 1,
+        category: Category::Read,
+        reason: "starts consent-gated ScreenCaptureKit observation; no target input",
+    },
+    Entry {
+        file: "damage_watch.rs",
+        item: "start_watching",
+        primitive: ".spawn",
+        fingerprint: 6833823067677733966,
+        occurrence: 1,
+        category: Category::Read,
+        reason: "reaps idle capture streams; no target input",
+    },
+    Entry {
         file: "tools/mod.rs",
         item: "refuse_point_under_own_popup",
         primitive: "tokio::task::spawn_blocking",

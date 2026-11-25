@@ -340,7 +340,7 @@ fn content_observation_preserves_shadowed_failures() {
 }
 
 const CONTROL: &str =
-    "AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected";
+    "AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL";
 
 fn plain_root(
     role: Read<String>,

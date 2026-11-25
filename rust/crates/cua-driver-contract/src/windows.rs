@@ -552,6 +552,10 @@ pub struct WindowElement {
     pub min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
+    /// macOS only: a link's navigation target, from `AXURL`. Windows and
+    /// Linux omit this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// A readable native row with no action handle: static text, a label, a
@@ -618,6 +622,9 @@ pub struct WindowStateOutput {
     pub drilldown_diagnostics: Option<Vec<IncompleteReason>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
+    /// Revision of this session's verified process-instance tree, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_tree_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -781,6 +788,18 @@ impl ToolOutput for WindowStateOutput {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tree_revision_is_available_to_typed_consumers_and_in_schema() {
+        let output: WindowStateOutput =
+            serde_json::from_value(json!({"pid": 1, "window_id": 2, "ui_tree_revision": 17}))
+                .unwrap();
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["ui_tree_revision"], 17);
+        assert!(WindowStateOutput::output_schema()["properties"]
+            .get("ui_tree_revision")
+            .is_some());
+    }
 
     /// #299: the process-instance label beside each pid is part of the
     /// documented output of every answer that names a pid.

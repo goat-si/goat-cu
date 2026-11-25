@@ -7744,7 +7744,12 @@ export type WindowElement = {
     parentIndex?: bigint,
     frame?: ElementFrame,
     min?: number,
-    max?: number
+    max?: number,
+    /**
+     * macOS only: a link's navigation target, from `AXURL`. Windows and
+     * Linux omit this.
+     */
+    url?: string
 }
 
 /**
@@ -7789,7 +7794,8 @@ const FfiConverterTypeWindowElement = (() => {
                 parentIndex: FfiConverterOptionalUInt64.read(from),
                 frame: FfiConverterOptionalTypeElementFrame.read(from),
                 min: FfiConverterOptionalFloat64.read(from),
-                max: FfiConverterOptionalFloat64.read(from)
+                max: FfiConverterOptionalFloat64.read(from),
+                url: FfiConverterOptionalString.read(from)
             };
         }
         write(value: TypeName, into: RustBuffer): void {
@@ -7815,6 +7821,7 @@ const FfiConverterTypeWindowElement = (() => {
             FfiConverterOptionalTypeElementFrame.write(value.frame, into);
             FfiConverterOptionalFloat64.write(value.min, into);
             FfiConverterOptionalFloat64.write(value.max, into);
+            FfiConverterOptionalString.write(value.url, into);
         }
         allocationSize(value: TypeName): number {
             return FfiConverterUInt64.allocationSize(value.elementIndex) +
@@ -7838,7 +7845,8 @@ const FfiConverterTypeWindowElement = (() => {
              FfiConverterOptionalUInt64.allocationSize(value.parentIndex) +
              FfiConverterOptionalTypeElementFrame.allocationSize(value.frame) +
              FfiConverterOptionalFloat64.allocationSize(value.min) +
-             FfiConverterOptionalFloat64.allocationSize(value.max);
+             FfiConverterOptionalFloat64.allocationSize(value.max) +
+             FfiConverterOptionalString.allocationSize(value.url);
 
         }
     };
@@ -7956,6 +7964,10 @@ export type WindowStateOutput = {
     scope?: DrilldownScope,
     drilldownDiagnostics?: Array<IncompleteReason>,
     snapshotId?: string,
+    /**
+     * Revision of this session's verified process-instance tree, when available.
+     */
+    uiTreeRevision?: bigint,
     appName?: string,
     windowTitle?: string,
     treeMarkdown?: string,
@@ -8051,6 +8063,7 @@ const FfiConverterTypeWindowStateOutput = (() => {
                 scope: FfiConverterOptionalTypeDrilldownScope.read(from),
                 drilldownDiagnostics: FfiConverterOptionalSequenceTypeIncompleteReason.read(from),
                 snapshotId: FfiConverterOptionalString.read(from),
+                uiTreeRevision: FfiConverterOptionalUInt64.read(from),
                 appName: FfiConverterOptionalString.read(from),
                 windowTitle: FfiConverterOptionalString.read(from),
                 treeMarkdown: FfiConverterOptionalString.read(from),
@@ -8091,6 +8104,7 @@ const FfiConverterTypeWindowStateOutput = (() => {
             FfiConverterOptionalTypeDrilldownScope.write(value.scope, into);
             FfiConverterOptionalSequenceTypeIncompleteReason.write(value.drilldownDiagnostics, into);
             FfiConverterOptionalString.write(value.snapshotId, into);
+            FfiConverterOptionalUInt64.write(value.uiTreeRevision, into);
             FfiConverterOptionalString.write(value.appName, into);
             FfiConverterOptionalString.write(value.windowTitle, into);
             FfiConverterOptionalString.write(value.treeMarkdown, into);
@@ -8130,6 +8144,7 @@ const FfiConverterTypeWindowStateOutput = (() => {
              FfiConverterOptionalTypeDrilldownScope.allocationSize(value.scope) +
              FfiConverterOptionalSequenceTypeIncompleteReason.allocationSize(value.drilldownDiagnostics) +
              FfiConverterOptionalString.allocationSize(value.snapshotId) +
+             FfiConverterOptionalUInt64.allocationSize(value.uiTreeRevision) +
              FfiConverterOptionalString.allocationSize(value.appName) +
              FfiConverterOptionalString.allocationSize(value.windowTitle) +
              FfiConverterOptionalString.allocationSize(value.treeMarkdown) +

@@ -2436,6 +2436,12 @@
                   ],
                   "type": "string"
                 },
+                "url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "value": {
                   "type": [
                     "string",
@@ -2765,6 +2771,13 @@
           "truncation_reason": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "ui_tree_revision": {
+            "minimum": 0,
+            "type": [
+              "integer",
               "null"
             ]
           },

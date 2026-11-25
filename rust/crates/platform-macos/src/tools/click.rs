@@ -373,10 +373,17 @@ fn is_toggle_press(ax_action: &str, role: &str, advertised: &[String]) -> bool {
 /// that does not advertise AXPress can still accept it as a no-op: an Excel
 /// toolbar group, a Finder list cell or a LibreOffice Calc cell returns
 /// success and nothing changes, which used to come back as a pressed click
-/// (#7086, #4864). The routed pixel click reaches what is drawn there, or
-/// refuses on a toolkit that cannot take it.
-fn hit_test_acts_on(focus_only: bool, advertised: &[String]) -> bool {
-    focus_only || advertised.iter().any(|action| action == "AXPress")
+/// (#7086, #4864). Web content (`in_web_content`: the element is or sits
+/// inside an `AXWebArea`) is never pressed, advertised or not: an `AXPress`
+/// drops the coordinates, so a canvas, a caret placement or a pointer handler
+/// never sees the click (#5484). The routed pixel click reaches what is drawn
+/// there, or refuses on a toolkit that cannot take it.
+fn hit_test_acts_on(
+    focus_only: bool,
+    in_web_content: impl FnOnce() -> bool,
+    advertised: impl FnOnce() -> Vec<String>,
+) -> bool {
+    focus_only || (!in_web_content() && advertised().iter().any(|action| action == "AXPress"))
 }
 
 /// The window an element is in, its title before the action, and the
@@ -2968,8 +2975,10 @@ impl ClickTool {
 
             // A background PX action can still use an accessibility delivery
             // backend after resolving the requested screen point. This keeps
-            // targeting (PX) orthogonal to delivery (AX) and avoids making a
-            // Chromium/AppKit window key merely to satisfy first-mouse rules.
+            // targeting (PX) orthogonal to delivery (AX) and avoids making an
+            // AppKit window key merely to satisfy first-mouse rules. Web
+            // content takes the routed pixel path instead (see
+            // `hit_test_acts_on`).
             if let Some(hit_test_wid) = window_id.filter(|_| {
                 // Keep simulated presses on the pointer route if AX eligibility expands.
                 !simulated
@@ -3064,7 +3073,13 @@ impl ClickTool {
                     let hit = pointer_hit(element);
                     if !hit_test_acts_on(
                         focus_only,
-                        &crate::ax::bindings::copy_action_names(element),
+                        || {
+                            copy_string_attr(element, "AXRole").as_deref() == Some("AXWebArea")
+                                || ancestor_roles(element)
+                                    .iter()
+                                    .any(|role| role == "AXWebArea")
+                        },
+                        || crate::ax::bindings::copy_action_names(element),
                     ) {
                         CFRelease(element as _);
                         return Ok(PxAxPress::FallThrough);
@@ -9104,15 +9119,34 @@ mod tests {
     /// toolkit, only an advertised press or a focus is taken by the hit-test.
     #[test]
     fn hit_test_acts_only_on_an_advertised_press_or_a_focus() {
-        let press = vec!["AXPress".to_owned()];
-        let no_press = vec!["AXShowMenu".to_owned()];
-        assert!(hit_test_acts_on(false, &press));
-        assert!(hit_test_acts_on(true, &no_press));
+        let press = || vec!["AXPress".to_owned()];
+        let no_press = || vec!["AXShowMenu".to_owned()];
+        let native = || false;
+        assert!(hit_test_acts_on(false, native, press));
+        assert!(hit_test_acts_on(true, native, no_press));
         assert!(
-            !hit_test_acts_on(false, &no_press),
+            !hit_test_acts_on(false, native, no_press),
             "a press the element does not advertise"
         );
-        assert!(!hit_test_acts_on(false, &[]));
+        assert!(!hit_test_acts_on(false, native, Vec::new));
+    }
+
+    /// #5484: an AXPress on web content drops the click's coordinates, so a
+    /// canvas or a caret placement never sees it. The hit-test leaves web
+    /// content to the routed pixel click without reading its actions; a
+    /// focus is still taken.
+    #[test]
+    fn hit_test_leaves_web_content_to_the_pixel_click() {
+        assert!(!hit_test_acts_on(
+            false,
+            || true,
+            || panic!("a web element's actions are not read")
+        ));
+        assert!(hit_test_acts_on(
+            true,
+            || panic!("a focus reads nothing"),
+            Vec::new
+        ));
     }
 
     /// Only errors an app returns after acting qualify; errors that mean the

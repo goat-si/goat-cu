@@ -298,6 +298,117 @@ fn surface_over_in(
         })
 }
 
+/// Bounds of on-screen window `target` when no other visible window in front
+/// of it overlaps them; `None` when one does or the window is not on screen.
+/// Windows of `own_pid` (the driver's overlays) do not count.
+pub(crate) fn uncovered_bounds(target: u32) -> Option<WindowBounds> {
+    let windows = complete_occlusion_descriptions()?;
+    uncovered_if_complete(&windows, target, std::process::id() as i32, true)
+}
+
+/// [`uncovered_bounds`] over a front-to-back on-screen window list.
+fn uncovered_in(windows: &[WindowDescription], target: u32, own_pid: i32) -> Option<WindowBounds> {
+    let at = windows
+        .iter()
+        .position(|window| window.window_id == target)?;
+    let bounds = windows[at].bounds.clone();
+    windows[..at]
+        .iter()
+        .filter(|window| window.pid != own_pid && window.is_on_screen && window.alpha > 0.0)
+        .all(|window| overlap_area(&window.bounds, &bounds) <= 0.0)
+        .then_some(bounds)
+}
+
+fn uncovered_if_complete(
+    windows: &[WindowDescription],
+    target: u32,
+    own_pid: i32,
+    complete: bool,
+) -> Option<WindowBounds> {
+    complete
+        .then(|| uncovered_in(windows, target, own_pid))
+        .flatten()
+}
+
+/// An omitted or malformed WindowServer entry can hide an occluder.
+fn complete_occlusion_descriptions() -> Option<Vec<WindowDescription>> {
+    use core_foundation::{
+        array::CFArray,
+        base::{CFTypeRef, TCFType},
+    };
+    let raw = unsafe {
+        CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID,
+        )
+    };
+    if raw.is_null() {
+        return None;
+    }
+    let raw: CFArray<CFTypeRef> = unsafe { CFArray::wrap_under_create_rule(raw as _) };
+    raw.iter()
+        .map(|item| {
+            let item = *item;
+            if !occlusion_fields_readable(item) {
+                return None;
+            }
+            let description = parse_description(item)?;
+            (description.window_id != 0 && description.pid > 0).then_some(description)
+        })
+        .collect()
+}
+
+fn occlusion_fields_readable(item: core_foundation::base::CFTypeRef) -> bool {
+    use core_foundation::{
+        base::{CFGetTypeID, TCFType},
+        boolean::CFBoolean,
+        dictionary::CFDictionary,
+        number::CFNumber,
+        string::CFString,
+    };
+    use std::os::raw::c_void;
+    type Dict = CFDictionary<*const c_void, *const c_void>;
+    if item.is_null() || unsafe { CFGetTypeID(item) } != Dict::type_id() {
+        return false;
+    }
+    let dict: Dict = unsafe { Dict::wrap_under_get_rule(item as _) };
+    let number = |dict: &Dict, name: &str| -> Option<f64> {
+        let key = CFString::new(name);
+        let value = *dict.find(key.as_concrete_TypeRef() as *const c_void)?;
+        if value.is_null() || unsafe { CFGetTypeID(value) } != CFNumber::type_id() {
+            return None;
+        }
+        let number = unsafe { CFNumber::wrap_under_get_rule(value as _) }.to_f64()?;
+        number.is_finite().then_some(number)
+    };
+    if number(&dict, "kCGWindowNumber").is_none_or(|v| v <= 0.0)
+        || number(&dict, "kCGWindowOwnerPID").is_none_or(|v| v <= 0.0)
+        || number(&dict, "kCGWindowAlpha").is_none_or(|v| !(0.0..=1.0).contains(&v))
+    {
+        return false;
+    }
+    let onscreen = CFString::new("kCGWindowIsOnscreen");
+    if !dict
+        .find(onscreen.as_concrete_TypeRef() as *const c_void)
+        .is_some_and(|v| !(*v).is_null() && unsafe { CFGetTypeID(*v) } == CFBoolean::type_id())
+    {
+        return false;
+    }
+    let key = CFString::new("kCGWindowBounds");
+    let Some(value) = dict.find(key.as_concrete_TypeRef() as *const c_void) else {
+        return false;
+    };
+    let value = *value;
+    if value.is_null() || unsafe { CFGetTypeID(value) } != Dict::type_id() {
+        return false;
+    }
+    let bounds: Dict = unsafe { Dict::wrap_under_get_rule(value as _) };
+    number(&bounds, "X").is_some()
+        && number(&bounds, "Y").is_some()
+        && number(&bounds, "Width").is_some_and(|v| v >= 0.0)
+        && number(&bounds, "Height").is_some_and(|v| v >= 0.0)
+}
+
 pub(crate) fn prefer_layer0(windows: &mut Vec<WindowInfo>) {
     if windows.iter().any(|w| w.layer == 0) {
         windows.retain(|w| w.layer == 0);
@@ -593,7 +704,6 @@ fn enumerate_windows(
         if pid_filter.is_some_and(|wanted| wanted != pid) {
             continue;
         }
-
 
         // Parse bounds dict.
         let bounds = {
@@ -1480,7 +1590,7 @@ mod tests {
         // Without a Space query the row keeps no Space metadata, as before.
         let bare = layer0_window_with_spaces_in(listed, None::<&FakeSpaces>, 2).unwrap();
         assert_eq!(bare.on_current_space, None);
-}
+    }
 
     fn surface(
         window_id: u32,
@@ -1566,6 +1676,102 @@ mod tests {
             None,
             "a target that is not on screen has nothing over it"
         );
+    }
+
+    #[test]
+    fn a_window_in_front_that_overlaps_covers_the_target() {
+        let target = surface(10, 42, "Target", 0, 0., 0.);
+        let apart = surface(20, 99, "Elsewhere", 0, 500., 500.);
+        let over = surface(21, 99, "In front", 0, 100., 50.);
+        let overlay = surface(30, 7, "", 25, 50., 20.);
+        let transparent = WindowDescription {
+            alpha: 0.0,
+            ..surface(22, 99, "", 0, 50., 20.)
+        };
+        assert_eq!(
+            uncovered_in(
+                &[apart.clone(), overlay, transparent, target.clone()],
+                10,
+                7
+            ),
+            Some(target.bounds.clone())
+        );
+        assert_eq!(uncovered_in(&[over.clone(), target.clone()], 10, 7), None);
+        assert_eq!(
+            uncovered_in(&[target.clone(), over], 10, 7),
+            Some(target.bounds.clone()),
+            "a window behind the target does not cover it"
+        );
+        assert_eq!(uncovered_in(&[apart], 10, 7), None, "not on screen");
+    }
+
+    #[test]
+    fn incomplete_window_enumeration_never_proves_uncovered() {
+        let target = surface(10, 42, "Target", 0, 0., 0.);
+        assert_eq!(uncovered_if_complete(&[target], 10, 7, false), None);
+    }
+
+    #[test]
+    fn occlusion_rejects_missing_or_malformed_window_metadata() {
+        use core_foundation::{
+            base::TCFType, boolean::CFBoolean, dictionary::CFDictionary, number::CFNumber,
+            string::CFString,
+        };
+        let bounds = CFDictionary::from_CFType_pairs(&[
+            (
+                CFString::new("X").as_CFType(),
+                CFNumber::from(0).as_CFType(),
+            ),
+            (
+                CFString::new("Y").as_CFType(),
+                CFNumber::from(0).as_CFType(),
+            ),
+            (
+                CFString::new("Width").as_CFType(),
+                CFNumber::from(100).as_CFType(),
+            ),
+            (
+                CFString::new("Height").as_CFType(),
+                CFNumber::from(100).as_CFType(),
+            ),
+        ]);
+        let entries = vec![
+            (
+                CFString::new("kCGWindowNumber").as_CFType(),
+                CFNumber::from(10).as_CFType(),
+            ),
+            (
+                CFString::new("kCGWindowOwnerPID").as_CFType(),
+                CFNumber::from(42).as_CFType(),
+            ),
+            (
+                CFString::new("kCGWindowAlpha").as_CFType(),
+                CFNumber::from(1.0).as_CFType(),
+            ),
+            (
+                CFString::new("kCGWindowIsOnscreen").as_CFType(),
+                CFBoolean::true_value().as_CFType(),
+            ),
+            (
+                CFString::new("kCGWindowBounds").as_CFType(),
+                bounds.as_CFType(),
+            ),
+        ];
+        let valid = CFDictionary::from_CFType_pairs(&entries);
+        assert!(occlusion_fields_readable(valid.as_CFTypeRef()));
+        for omitted in 0..entries.len() {
+            let partial: Vec<_> = entries
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != omitted)
+                .map(|(_, entry)| entry.clone())
+                .collect();
+            let partial = CFDictionary::from_CFType_pairs(&partial);
+            assert!(
+                !occlusion_fields_readable(partial.as_CFTypeRef()),
+                "missing field {omitted}"
+            );
+        }
     }
 
     #[test]

@@ -61,6 +61,16 @@ impl TypeTextTool {
 
 static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 
+fn key_route_requires_exact_focus(has_element: bool, prior: bool) -> bool {
+    has_element || prior
+}
+
+#[cfg(test)]
+#[test]
+fn an_explicit_key_target_requires_focus_even_without_background_focus_support() {
+    assert!(key_route_requires_exact_focus(true, false));
+}
+
 fn def() -> &'static ToolDef {
     DEF.get_or_init(|| ToolDef {
         name: "type_text".into(),
@@ -2226,7 +2236,9 @@ fn cgevent_type_verified(
     }
     if focused_key_route && !web_delivery {
         let (ptr, _) = element_ptr_and_idx.expect("focused key route requires an element");
-        let wid = window_id.expect("focused key route requires a window");
+        let wid = window_id.ok_or_else(|| {
+            anyhow::anyhow!("an addressed key target requires an exact window; no text was sent")
+        })?;
         if !element_has_exact_app_focus(pid, wid, ptr) {
             anyhow::bail!(
                 "the addressed element is not the application's focused element in window {wid}; no text was sent"
@@ -2397,7 +2409,11 @@ fn cgevent_type_verified(
         }
         if focused_key_route || web_delivery {
             let (ptr, _) = element_ptr_and_idx.expect("exact key focus requires an element");
-            let wid = window_id.expect("exact key focus requires a window");
+            let wid = window_id.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "an addressed key target requires an exact window; no text was sent"
+                )
+            })?;
             if !element_has_exact_app_focus(pid, wid, ptr) {
                 anyhow::bail!(
                     "the receiver lost exact application focus during the first-key settle; no text was sent"
@@ -3180,11 +3196,8 @@ fn type_text_in_key_window(
     }
     let chromium_native_submission = chromium_native_field && text.contains(['\n', '\r']);
     let force_key_events = force_key_events || actual_web_delivery || chromium_native_submission;
-    let focused_key_route = (delivery_mode.is_foreground() && element_ptr_and_idx.is_some())
-        || focused_key_route
-        || (!delivery_mode.is_foreground()
-            && element_ptr_and_idx.is_some()
-            && crate::input::skylight::is_focus_without_raise_available());
+    let focused_key_route =
+        key_route_requires_exact_focus(element_ptr_and_idx.is_some(), focused_key_route);
     let late_fg_targeted = element_ptr_and_idx.is_some() && !retained_window_receiver;
 
     // --- Foreground rung: explicit agent request (skip AX/background ladder). ---

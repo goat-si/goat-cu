@@ -184,6 +184,7 @@ impl Tool for FakePlatform {
             Err(error) => return error,
         };
         let ctx = ViewContext {
+            session: None,
             pid: 42,
             window_id: 7,
             key: ViewKey {
