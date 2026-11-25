@@ -426,6 +426,11 @@ impl DragTool {
             {
                 return refusal;
             }
+            if let Err(refusal) =
+                super::refuse_point_under_own_popup(pid, wid, from_sx, from_sy).await
+            {
+                return refusal;
+            }
             // Chromium reads a mouse event's held buttons from the hardware
             // state, which a window-routed press does not change, so an
             // Electron page sees the drag moves with buttons == 0, releases

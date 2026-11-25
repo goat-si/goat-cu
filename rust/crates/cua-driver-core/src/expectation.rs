@@ -684,6 +684,24 @@ fn evaluate_element(
             .copied()
             .filter(|element| element_satisfies_fields(predicate, element))
             .collect();
+        let distinct_matches = field_matches
+            .iter()
+            .enumerate()
+            .filter(|(index, element)| {
+                let identity = element.get("element_index").and_then(Value::as_u64);
+                identity.is_none()
+                    || !field_matches[..*index].iter().any(|earlier| {
+                        earlier.get("element_index").and_then(Value::as_u64) == identity
+                    })
+            })
+            .count();
+        if distinct_matches > 1 {
+            return (
+                VerificationStatus::Unknown,
+                Some(UnknownReason::MultiMatch),
+                Some(json!({"matches": distinct_matches})),
+            );
+        }
         if let Some(element) = field_matches.first() {
             return (
                 VerificationStatus::Satisfied,
@@ -1160,6 +1178,35 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("\"element_index\":1"));
+    }
+
+    #[test]
+    fn display_only_row_satisfies_existence_when_no_control_matches() {
+        let outcomes = evaluate_predicates(
+            &[labelled("Saved", None)],
+            &observed(vec![json!({
+                "role": "AXStaticText",
+                "label": "Saved",
+                "display_only": true
+            })]),
+        );
+        assert_eq!(outcomes[0].status, VerificationStatus::Satisfied);
+    }
+
+    #[test]
+    fn duplicate_display_only_value_is_multi_match() {
+        let caption = json!({
+            "role": "AXStaticText",
+            "label": "Total",
+            "value": "42",
+            "display_only": true
+        });
+        let outcomes = evaluate_predicates(
+            &[labelled("Total", Some("42"))],
+            &observed(vec![caption.clone(), caption]),
+        );
+        assert_eq!(outcomes[0].status, VerificationStatus::Unknown);
+        assert_eq!(outcomes[0].unknown_reason, Some(UnknownReason::MultiMatch));
     }
 
     #[test]

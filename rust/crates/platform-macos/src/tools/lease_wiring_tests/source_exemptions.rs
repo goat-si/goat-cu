@@ -34,6 +34,15 @@ impl Entry {
 
 pub(super) const ENTRIES: &[Entry] = &[
     Entry {
+        file: "tools/mod.rs",
+        item: "refuse_point_under_own_popup",
+        primitive: "tokio::task::spawn_blocking",
+        fingerprint: 5873406302048113399,
+        occurrence: 1,
+        category: Category::Read,
+        reason: "read-only WindowServer popup enumeration; no input",
+    },
+    Entry {
         file: "permissions/gate.rs",
         item: "request_in_helper",
         primitive: ".spawn",

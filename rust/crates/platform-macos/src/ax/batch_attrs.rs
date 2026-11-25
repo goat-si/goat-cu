@@ -57,6 +57,7 @@ pub(crate) enum BatchRead {
 enum Slot {
     Value(CFTypeRef),
     Absent,
+    Missing,
 }
 
 pub(crate) struct BatchSlots {
@@ -66,11 +67,14 @@ pub(crate) struct BatchSlots {
 }
 
 impl BatchSlots {
+    pub(crate) fn answered(&self, index: usize) -> bool {
+        !matches!(self.slots[index], Slot::Missing)
+    }
     #[cfg(test)]
     pub(crate) fn string(&self, index: usize) -> Option<String> {
         match self.slots[index] {
             Slot::Value(value) => unsafe { string_from_cf(value) },
-            Slot::Absent => None,
+            Slot::Absent | Slot::Missing => None,
         }
     }
 
@@ -78,7 +82,7 @@ impl BatchSlots {
     pub(crate) fn stringish(&self, index: usize) -> Option<StringishAttrValue> {
         match self.slots[index] {
             Slot::Value(value) => unsafe { stringish_from_cf(value) },
-            Slot::Absent => None,
+            Slot::Absent | Slot::Missing => None,
         }
     }
 
@@ -86,7 +90,7 @@ impl BatchSlots {
     pub(crate) fn raw(&self, index: usize) -> Option<CFTypeRef> {
         match self.slots[index] {
             Slot::Value(value) => Some(value),
-            Slot::Absent => None,
+            Slot::Absent | Slot::Missing => None,
         }
     }
 }
@@ -128,7 +132,7 @@ unsafe fn decode_slots_with(
                 return None;
             }
             if CFGetTypeID(value) == CFNullGetTypeID() {
-                return Some(Slot::Absent);
+                return Some(Slot::Missing);
             }
             if CFGetTypeID(value) == AXValueGetTypeID()
                 && AXValueGetType(value as AXValueRef) == kAXValueAXErrorType
@@ -200,6 +204,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_an_unanswered_attribute_is_a_failed_read() {
+        assert_eq!(error_slot(Some(kAXErrorNoValue)), Some(Slot::Absent));
+        assert_eq!(
+            error_slot(Some(kAXErrorAttributeUnsupported)),
+            Some(Slot::Absent)
+        );
+        for error in [
+            kAXErrorFailure,
+            kAXErrorCannotComplete,
+            kAXErrorInvalidUIElement,
+            kAXErrorIllegalArgument,
+        ] {
+            assert_eq!(error_slot(Some(error)), None, "{error}");
+        }
+    }
+
     fn finish(values: &[CFType]) -> BatchRead {
         let array = CFArray::from_CFTypes(values);
         let raw = array.as_CFTypeRef();
@@ -236,7 +257,23 @@ mod tests {
         ]) else {
             panic!("absence allowlist must decode");
         };
-        assert_eq!(slots.slots, vec![Slot::Absent, Slot::Absent, Slot::Absent]);
+        assert_eq!(slots.slots, vec![Slot::Missing, Slot::Absent, Slot::Absent]);
+        assert!((0..3).all(|index| slots.raw(index).is_none()));
+    }
+
+    #[test]
+    fn no_value_and_unsupported_are_answered_but_null_is_missing() {
+        let null = unsafe { CFType::wrap_under_get_rule(kCFNull) };
+        let BatchRead::Slots(slots) = finish(&[
+            null,
+            ax_error(kAXErrorNoValue),
+            ax_error(kAXErrorAttributeUnsupported),
+        ]) else {
+            panic!("valid absent slots must decode");
+        };
+        assert!(!slots.answered(0));
+        assert!(slots.answered(1));
+        assert!(slots.answered(2));
     }
 
     #[test]

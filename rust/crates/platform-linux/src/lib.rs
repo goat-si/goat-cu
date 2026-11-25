@@ -27,6 +27,9 @@ use cua_driver_core::tool::ToolRegistry;
 mod desktop_capture_guard;
 
 #[cfg(any(target_os = "linux", test))]
+mod screen_size_resolution;
+
+#[cfg(any(target_os = "linux", test))]
 mod uncertain_ax_result;
 
 pub mod basis_eligibility;

@@ -399,6 +399,16 @@ pub(super) fn double_click_element<P, T: Copy>(
     pixel(target).map(ElementDoubleClick::Pixel)
 }
 
+/// Overlay commands for a pulse on `wid`. Pinning first lets the overlay
+/// resolve the window's Space before the pulse places the cursor, so a target
+/// on another Space paints nothing over the current one (#3801).
+fn pulse_on_window(wid: u32, x: f64, y: f64) -> [cursor_overlay::OverlayCommand; 2] {
+    [
+        cursor_overlay::OverlayCommand::PinAbove(u64::from(wid)),
+        cursor_overlay::OverlayCommand::ClickPulse { x, y },
+    ]
+}
+
 fn ax_double_click(
     pid: i32,
     wid: u32,
@@ -442,13 +452,9 @@ fn pixel_double_click(
     let target = super::element_pointer::target_for(pid, wid, idx, retained);
     pixel_double_click_at(target.as_ref(), idx, foreground, |point| {
         // Drive THIS session's cursor (threaded in via `cursor_key`), not "default".
-        crate::cursor::overlay::send_command(
-            cursor_key.to_owned(),
-            cursor_overlay::OverlayCommand::ClickPulse {
-                x: point.screen.0,
-                y: point.screen.1,
-            },
-        );
+        for cmd in pulse_on_window(wid, point.screen.0, point.screen.1) {
+            crate::cursor::overlay::send_command(cursor_key.to_owned(), cmd);
+        }
         // Use the window-local primitive (not bare click_at_xy): a plain
         // click_at_xy does NOT reliably reach a backgrounded / non-key window —
         // it no-ops on AppKit controls that hit-test the window-local stamp.
@@ -614,6 +620,30 @@ mod tests {
             background_action_for_element(false),
             cua_driver_core::background_input::BackgroundAction::WindowPointer
         );
+    }
+
+    /// The pointer fallback's pulse must leave the cursor pinned to the target
+    /// window, whether the cursor is fresh or was pinned to another window by
+    /// an earlier action; the pin is what carries the window's Space check.
+    #[test]
+    fn pointer_fallback_pulse_pins_the_target_window() {
+        use cursor_overlay::{render_state::RenderStateCore, CursorConfig, OverlayCommand};
+
+        let apply = |core: &mut RenderStateCore| {
+            for cmd in pulse_on_window(42, 300.0, 200.0) {
+                core.apply_command_base(cmd, true, true);
+            }
+        };
+
+        let mut fresh = RenderStateCore::new(CursorConfig::default());
+        apply(&mut fresh);
+        assert_eq!(fresh.pinned_wid, Some(42));
+        assert!(fresh.placed);
+
+        let mut earlier = RenderStateCore::new(CursorConfig::default());
+        earlier.apply_command_base(OverlayCommand::PinAbove(7), true, true);
+        apply(&mut earlier);
+        assert_eq!(earlier.pinned_wid, Some(42));
     }
 }
 

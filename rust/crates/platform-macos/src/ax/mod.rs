@@ -43,6 +43,7 @@ pub mod snapshot;
 pub mod tree;
 mod tree_source;
 pub(crate) mod vocabulary;
+pub(crate) mod web_effect;
 pub mod window_scope;
 pub(crate) mod write_outcome;
 

@@ -58,19 +58,22 @@ impl Tool for GetScreenSizeTool {
                 return Ok((frame.width, frame.height, frame.scale, Some(monitors)));
             }
             if crate::wayland::is_wayland() {
-                // KWin: its logical layout, the frame desktop capture and
-                // input use. The scale is the largest output's, like the frame
-                // get_desktop_state reports.
-                if let Some((frame, monitors)) = crate::wayland::kwin_layout::screen_report()? {
-                    return Ok((frame.width, frame.height, frame.scale, Some(monitors)));
-                }
-            }
-            if crate::wayland::is_wayland() && std::env::var_os("DISPLAY").is_none() {
-                // GNOME publishes its monitor layout on D-Bus; consent needs this content-free
-                // geometry for listing calls, which otherwise fail here (trycua/cua#1922). Other
-                // compositors fall through to the X11 read and its error, as before.
-                if let Ok((w, h, scale, monitors)) = crate::wayland::mutter_display::screen_report()
-                {
+                // KWin and Mutter: the logical layout, the frame desktop
+                // capture and input use. The scale is the largest output's,
+                // like the frame get_desktop_state reports.
+                let logical = crate::wayland::logical_layout::screen_report().map(|report| {
+                    report
+                        .map(|(frame, monitors)| (frame.width, frame.height, frame.scale, monitors))
+                });
+                // The attested Mutter metadata remains available without xdg-output.
+                // Preserve the original error if that independent read also fails.
+                let report = crate::screen_size_resolution::resolve(logical, || {
+                    if std::env::var_os("DISPLAY").is_some() {
+                        return None;
+                    }
+                    crate::wayland::mutter_display::screen_report().ok()
+                })?;
+                if let Some((w, h, scale, monitors)) = report {
                     return Ok((w, h, scale, Some(monitors)));
                 }
             }
