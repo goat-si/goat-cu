@@ -63,6 +63,9 @@ mod token_action_policy;
 #[cfg(any(target_os = "linux", test))]
 mod browser_consent_presence;
 
+#[cfg(any(target_os = "linux", test))]
+mod browser_setup_guard;
+
 #[cfg(target_os = "linux")]
 pub mod input;
 

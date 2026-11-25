@@ -170,6 +170,33 @@ fn exact_omnibox<'a>(
     }
 }
 
+fn toolbar_ancestor(nodes: &[AtspiNode], field: &AtspiNode) -> bool {
+    let mut parent = field.parent_element_index;
+    for _ in 0..nodes.len() {
+        let Some(node) = parent.and_then(|id| nodes.iter().find(|n| n.element_index == Some(id)))
+        else {
+            return false;
+        };
+        if role_is(
+            node,
+            &[
+                "dialog",
+                "alert",
+                "document",
+                "document web",
+                "document frame",
+            ],
+        ) {
+            return false;
+        }
+        if role_is(node, &["tool bar", "toolbar"]) {
+            return true;
+        }
+        parent = node.parent_element_index;
+    }
+    false
+}
+
 /// Whether the omnibox currently holds exactly the fixed setup URL.
 fn omnibox_holds_setup_url(node: &AtspiNode, descriptor: &BrowserSetupDescriptor) -> bool {
     node.value
@@ -228,14 +255,13 @@ fn trusted_setup_navigation(
 
     // Wait for the new tab to publish its address field before writing to it.
     let deadline = Instant::now() + EXISTING_PROFILE_SETUP_READY_TIMEOUT;
-    loop {
+    let identity = loop {
         let tree =
             window_scoped_tree(pid, window_id).map_err(|error| anyhow::anyhow!(error.message))?;
-        if exact_omnibox(&tree.nodes, descriptor)
+        if let Some(field) = exact_omnibox(&tree.nodes, descriptor)
             .map_err(|error| anyhow::anyhow!(error.message))?
-            .is_some()
         {
-            break;
+            break field.identity.clone();
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
@@ -244,7 +270,7 @@ fn trusted_setup_navigation(
             );
         }
         std::thread::sleep(Duration::from_millis(150));
-    }
+    };
 
     // Transfer the URL through the clipboard rather than the keyboard.
     //
@@ -260,15 +286,35 @@ fn trusted_setup_navigation(
         .write_text(descriptor.setup_url.to_owned())
         .map_err(|error| anyhow::anyhow!("could not stage the fixed setup URL: {error}"))?;
     let paste = with_target_foreground(pid, window_id, session_policy().setup, || {
-        if wayland {
-            crate::wayland::hotkey_focused(&["ctrl".to_owned(), "a".to_owned()])?;
-            std::thread::sleep(Duration::from_millis(60));
-            crate::wayland::hotkey_focused(&["ctrl".to_owned(), "v".to_owned()])
-        } else {
-            crate::input::send_key_xtest("a", &["ctrl"])?;
-            std::thread::sleep(Duration::from_millis(60));
-            crate::input::send_key_xtest("v", &["ctrl"])
-        }
+        crate::browser_setup_guard::run_steps(
+            || {
+                let tree = window_scoped_tree(pid, window_id)
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+                let field = exact_omnibox(&tree.nodes, descriptor)
+                    .map_err(|error| anyhow::anyhow!(error.message))?
+                    .ok_or_else(|| anyhow::anyhow!("address field disappeared"))?;
+                crate::browser_setup_guard::validate(
+                    toolbar_ancestor(&tree.nodes, field),
+                    field.focused == Some(true),
+                    identity.is_some() && identity == field.identity,
+                )
+            },
+            |key| {
+                let (name, modifiers): (&str, &[&str]) = match key {
+                    "select" => ("a", &["ctrl"]),
+                    "paste" => ("v", &["ctrl"]),
+                    "enter" => ("enter", &[]),
+                    _ => unreachable!(),
+                };
+                if wayland {
+                    let mut keys: Vec<String> = modifiers.iter().map(|m| (*m).to_owned()).collect();
+                    keys.push(name.to_owned());
+                    crate::wayland::hotkey_focused(&keys)
+                } else {
+                    crate::input::send_key_xtest(name, modifiers)
+                }
+            },
+        )
     });
     // The user's clipboard is theirs; put it back whether or not the paste took.
     std::thread::sleep(Duration::from_millis(120));
@@ -276,16 +322,6 @@ fn trusted_setup_navigation(
         let _ = clipboard.write_text(previous);
     }
     paste?;
-
-    // Commit. Enter is the one synthesized keystroke left, and it carries no
-    // layout dependency.
-    with_target_foreground(pid, window_id, session_policy().setup, || {
-        if wayland {
-            crate::wayland::hotkey_focused(&["enter".to_owned()])
-        } else {
-            crate::input::send_key_xtest("enter", &[])
-        }
-    })?;
 
     // Verify the destination, not the input. Chromium exposes no readable text
     // on its omnibox over AT-SPI — no Value interface and no Text content even
@@ -359,6 +395,12 @@ fn window_scoped_tree(
                  {window_id}, so a matched control cannot be attributed to the approved window; \
                  relaunch the browser with --remote-debugging-port to skip setup entirely"
             ),
+        ));
+    }
+    if tree.truncated {
+        return Err(BrowserRefusal::new(
+            BrowserRefusalCode::BrowserBindingAmbiguous,
+            "the approved browser window accessibility tree was incomplete",
         ));
     }
     Ok(tree)
@@ -923,6 +965,18 @@ mod tests {
         let mut ambiguous = nodes;
         ambiguous.push(omnibox(None));
         assert!(exact_omnibox(&ambiguous, descriptor()).is_err());
+    }
+
+    #[test]
+    fn sole_dialog_field_is_not_a_toolbar_field() {
+        let mut dialog = node("dialog", "dialog", None, &["show"]);
+        dialog.element_index = Some(1);
+        let mut field = omnibox(None);
+        field.element_index = Some(2);
+        field.parent_element_index = Some(1);
+        let nodes = vec![dialog, field];
+        let candidate = exact_omnibox(&nodes, descriptor()).unwrap().unwrap();
+        assert!(!toolbar_ancestor(&nodes, candidate));
     }
 
     /// The regression that motivated the rewrite: XTEST dropped characters and
