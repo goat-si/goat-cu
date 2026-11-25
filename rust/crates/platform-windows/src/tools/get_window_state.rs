@@ -390,8 +390,9 @@ impl Tool for GetWindowStateTool {
                 CHROMIUM COVERAGE: a browser-owned permission bubble can be \
                 composited outside the requested native window. Chromium-family \
                 snapshots therefore describe this limit in structuredContent.capture_coverage. \
-                After a verified ineffective window action, take a \
-                fresh get_desktop_state snapshot, act explicitly in desktop scope if needed, \
+                After a verified ineffective window action, a window-scoped session must first \
+                start a desktop-scoped session. Take a fresh get_desktop_state snapshot, \
+                act explicitly in desktop scope if needed, \
                 then verify with another fresh desktop snapshot. \
                 This is separate from page JavaScript dialogs, which remain on \
                 browser_dialog.\n\n\
