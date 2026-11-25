@@ -113,6 +113,19 @@ fn no_target_check() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn check_before_target(
+    before_target: &mut dyn FnMut() -> anyhow::Result<()>,
+    events_sent: usize,
+) -> anyhow::Result<()> {
+    before_target().map_err(|source| {
+        TargetCheckFailed {
+            events_sent,
+            source,
+        }
+        .into()
+    })
+}
+
 /// Move the hardware cursor to `point`.
 fn warp_cursor(point: CGPoint) -> Result<(), core_graphics::base::CGError> {
     #[cfg(test)]
@@ -188,7 +201,16 @@ pub fn click_at_xy_desktop(
     count: usize,
     button: &str,
 ) -> anyhow::Result<()> {
-    click_at_xy_desktop_inner(prompt, x, y, count, button, &[], false)
+    click_at_xy_desktop_inner(
+        prompt,
+        x,
+        y,
+        count,
+        button,
+        &[],
+        false,
+        &mut no_target_check,
+    )
 }
 
 /// Global HID click with physical modifier transitions. The caller must guard
@@ -201,7 +223,16 @@ pub fn click_at_xy_desktop_with_modifiers(
     button: &str,
     modifiers: &[&str],
 ) -> anyhow::Result<()> {
-    click_at_xy_desktop_inner(prompt, x, y, count, button, modifiers, false)
+    click_at_xy_desktop_inner(
+        prompt,
+        x,
+        y,
+        count,
+        button,
+        modifiers,
+        false,
+        &mut no_target_check,
+    )
 }
 
 /// Global HID modifier click that restores the user's hardware cursor after
@@ -214,9 +245,32 @@ pub fn click_at_xy_desktop_with_modifiers_preserving_cursor(
     button: &str,
     modifiers: &[&str],
 ) -> anyhow::Result<()> {
-    click_at_xy_desktop_inner(prompt, x, y, count, button, modifiers, true)
+    click_at_xy_desktop_inner(
+        prompt,
+        x,
+        y,
+        count,
+        button,
+        modifiers,
+        true,
+        &mut no_target_check,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn click_at_xy_desktop_with_modifiers_preserving_cursor_checked(
+    prompt: PromptInput,
+    x: f64,
+    y: f64,
+    count: usize,
+    button: &str,
+    modifiers: &[&str],
+    before_target: &mut dyn FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    click_at_xy_desktop_inner(prompt, x, y, count, button, modifiers, true, before_target)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn click_at_xy_desktop_inner(
     prompt: PromptInput,
     x: f64,
@@ -225,6 +279,7 @@ fn click_at_xy_desktop_inner(
     button: &str,
     modifiers: &[&str],
     preserve_cursor: bool,
+    before_target: &mut dyn FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     crate::security_prompt::refuse_point(prompt, x, y)?;
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
@@ -299,6 +354,9 @@ fn click_at_xy_desktop_inner(
         let pairs = (1..=count.max(1))
             .map(|state| Ok((event(down_ty, state)?, event(up_ty, state)?)))
             .collect::<anyhow::Result<Vec<_>>>()?;
+        // Cursor warp and modifier preparation may already have affected the
+        // desktop even when no mouse-down has been posted.
+        check_before_target(before_target, 1)?;
         for (down, up) in pairs {
             dispatch_mouse_event(PostRoute::Hid, 0, &down);
             std::thread::sleep(cua_driver_core::input_pacing::click_gap());
@@ -408,7 +466,7 @@ pub fn click_at_xy_desktop_preserving_cursor(
     x: f64,
     y: f64,
 ) -> anyhow::Result<()> {
-    click_at_xy_desktop_inner(prompt, x, y, 1, "left", &[], true)
+    click_at_xy_desktop_inner(prompt, x, y, 1, "left", &[], true, &mut no_target_check)
 }
 
 extern "C" {
@@ -1243,8 +1301,7 @@ fn background_drag_plan(
     plan
 }
 
-impl BackgroundDragStep {
-}
+impl BackgroundDragStep {}
 
 /// Background press-drag-release addressed to one window of `pid`.
 ///
@@ -1693,7 +1750,10 @@ where
     let prepared = super::gesture::prepare_gesture(&mut io, &plan)?;
     let mut session_ended = None;
     let result = super::gesture::run_prepared_with_drag_hook(
-        &mut io, plan, prepared, || true,
+        &mut io,
+        plan,
+        prepared,
+        || true,
         |io, step, release_at| {
             let end = std::time::Instant::now() + std::time::Duration::from_millis(step.delay_ms);
             let mut open = session_open();
@@ -1702,8 +1762,13 @@ where
                 std::thread::sleep(left.min(DRAG_SESSION_POLL));
                 open = session_open();
             }
-            if !open { return Ok((true, None)); }
-            let destination = super::gesture::Placement { screen: to, window_local: None };
+            if !open {
+                return Ok((true, None));
+            }
+            let destination = super::gesture::Placement {
+                screen: to,
+                window_local: None,
+            };
             let mut drop_step = *step;
             drop_step.placement = destination;
             drop_step.delay_ms = DRAG_SESSION_TICK_MS;
@@ -1717,7 +1782,10 @@ where
                 *release_at = destination;
                 io.observe(&drop_step);
                 io.settle(&drop_step);
-                if !session_open() { ended = true; break; }
+                if !session_open() {
+                    ended = true;
+                    break;
+                }
             }
             session_ended = Some(ended);
             Ok((true, Some(destination)))
@@ -1727,7 +1795,9 @@ where
         Some(ended) => BackgroundDragOutcome::DragSession { ended },
         None => match result {
             GestureOutcome::Completed => BackgroundDragOutcome::Completed,
-            GestureOutcome::StoppedEarly { at } => BackgroundDragOutcome::StoppedEarly { at: at.screen },
+            GestureOutcome::StoppedEarly { at } => {
+                BackgroundDragOutcome::StoppedEarly { at: at.screen }
+            }
         },
     })
 }
@@ -3080,6 +3150,22 @@ mod tests {
     /// The check before the first target down sees the move and primer
     /// already sent; when it fails no target down goes out.
     #[test]
+    fn pre_target_check_stops_the_target_after_preparation() {
+        let mut target_sends = 0;
+        let result = check_before_target(&mut || anyhow::bail!("sheet appeared"), 1)
+            .map(|()| target_sends += 1);
+        assert_eq!(
+            result
+                .unwrap_err()
+                .downcast_ref::<TargetCheckFailed>()
+                .unwrap()
+                .events_sent,
+            1
+        );
+        assert_eq!(target_sends, 0);
+    }
+
+    #[test]
     fn a_failed_target_check_stops_before_the_first_target_click() {
         for (delivery, sent) in [
             (WindowClickDelivery::Background, 3),
@@ -3595,8 +3681,17 @@ mod tests {
     fn background_drag_session_that_never_ends_reports_it() {
         let capture = Capture::start(true);
         let outcome = drag_at_xy_background_session_with_origin(
-            42, (0.0, 0.0), (100.0, 0.0), 7, 0, 2, &[],
-            DragButton::Left, |_, _| {}, || true, (0.0, 0.0),
+            42,
+            (0.0, 0.0),
+            (100.0, 0.0),
+            7,
+            0,
+            2,
+            &[],
+            DragButton::Left,
+            |_, _| {},
+            || true,
+            (0.0, 0.0),
         )
         .unwrap();
         assert_eq!(outcome, BackgroundDragOutcome::DragSession { ended: false });

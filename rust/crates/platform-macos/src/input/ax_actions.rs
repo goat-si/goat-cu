@@ -444,6 +444,10 @@ pub struct SelectionReadback {
 }
 
 impl SelectionReadback {
+    pub(crate) fn target_ptr(&self) -> usize {
+        self.target as usize
+    }
+
     pub fn role(&self) -> &str {
         &self.role
     }

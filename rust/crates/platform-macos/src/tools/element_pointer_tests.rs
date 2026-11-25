@@ -77,6 +77,8 @@ type Case = (&'static str, Box<dyn Fn(&mut Fake)>);
 /// A target with a window at the origin and the element fully inside it.
 struct Fake {
     pid: i32,
+    sheet_clear: bool,
+    exact_foreground: bool,
     permitted: bool,
     rect: Option<[f64; 4]>,
     /// Rect read on the second and later reads (an element that moved).
@@ -113,6 +115,8 @@ impl Fake {
     fn new(pid: i32) -> Self {
         Self {
             pid,
+            sheet_clear: true,
+            exact_foreground: true,
             permitted: true,
             rect: Some(RECT),
             rect_later: None,
@@ -189,6 +193,12 @@ impl super::super::actionability::semantic::WindowReader for FakeBindingReader<'
 
 #[async_trait]
 impl ElementTarget for Fake {
+    fn sheet_clear(&self) -> bool {
+        self.sheet_clear
+    }
+    fn exact_foreground(&self) -> bool {
+        self.exact_foreground
+    }
     async fn gate(&self, _action: BackgroundAction) -> Result<BackgroundMutationLease, ToolResult> {
         self.note("gate");
         Ok(crate::tools::acquire_background_mutation(self.pid).await)
@@ -312,6 +322,44 @@ impl ElementTarget for Fake {
     async fn restore_after_pointer(&self, _prior_front: Option<i32>, _prologue: PointerPrologue) {
         self.note("restore");
     }
+}
+
+#[test]
+fn sheet_opening_before_dispatch_refuses_axopen_and_pointer() {
+    for use_ax_open in [true, false] {
+        let mut fake = Fake::new(4321);
+        fake.sheet_clear = false;
+        assert!(run_blocking(&fake, 3, 2, use_ax_open, false).is_err());
+        assert!(!fake.calls().contains(&"ax_open"));
+        assert!(fake.posts().is_empty());
+    }
+}
+
+#[test]
+fn selection_pixel_refuses_a_sheet_or_changed_point_before_dispatch() {
+    let expected = ElementPoint {
+        screen: CENTER,
+        window_local: CENTER,
+    };
+    let mut fake = Fake::new(4322);
+    fake.sheet_clear = false;
+    assert!(checked_selection_point(&fake, expected, false).is_err());
+    fake.sheet_clear = true;
+    let moved = ElementPoint {
+        screen: (CENTER.0 + 1.0, CENTER.1),
+        window_local: CENTER,
+    };
+    assert!(checked_selection_point(&fake, moved, false).is_err());
+    assert!(checked_selection_point(&fake, expected, false).is_ok());
+    fake.exact_foreground = false;
+    assert!(checked_selection_point(&fake, expected, true).is_err());
+}
+
+#[test]
+fn selection_foreground_requires_a_readable_focused_window() {
+    assert!(!exact_foreground_evidence(Some(7), 7, None, WINDOW));
+    assert!(exact_foreground_evidence(Some(7), 7, Some(WINDOW), WINDOW));
+    assert!(!exact_foreground_evidence(Some(8), 7, Some(WINDOW), WINDOW));
 }
 
 #[tokio::test]

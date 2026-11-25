@@ -92,6 +92,77 @@ where
 }
 
 #[derive(Debug)]
+struct SheetBlockedTarget;
+impl std::fmt::Display for SheetBlockedTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("An attached sheet blocks this element, or its ancestry could not be read. Call get_window_state and target the sheet.")
+    }
+}
+impl std::error::Error for SheetBlockedTarget {}
+
+fn ensure_sheet_target(element: &crate::ax::snapshot::RetainedElement) -> anyhow::Result<()> {
+    // SAFETY: a RetainedElement holds a +1 reference on a live element.
+    unsafe { ensure_sheet_clear(element.as_ptr() as AXUIElementRef) }
+}
+
+/// # Safety
+/// `element` must be a live AXUIElementRef.
+unsafe fn ensure_sheet_clear(element: AXUIElementRef) -> anyhow::Result<()> {
+    if crate::ax::exact_target::element_blocked_by_sheet(element) != Some(false) {
+        anyhow::bail!(SheetBlockedTarget);
+    }
+    Ok(())
+}
+
+fn dispatch_with_sheet_evidence<T>(
+    blocked: Option<bool>,
+    dispatch: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    if blocked != Some(false) {
+        anyhow::bail!(SheetBlockedTarget);
+    }
+    dispatch()
+}
+
+fn pixel_target_check_failure(error: &crate::input::mouse::TargetCheckFailed) -> ToolResult {
+    click_task_failure(format!("{error}; the target click was not sent, but preparation may have sent input. Read fresh state before retrying."))
+}
+
+#[cfg(test)]
+mod sheet_dispatch_tests {
+    #[test]
+    fn a_blocked_or_unreadable_sheet_never_dispatches_a_point() {
+        use std::cell::Cell;
+        for blocked in [Some(true), None] {
+            let sends = Cell::new(0);
+            let result = super::dispatch_with_sheet_evidence(blocked, || {
+                sends.set(sends.get() + 1);
+                Ok(())
+            });
+            assert!(result.is_err());
+            assert_eq!(sends.get(), 0);
+        }
+        let sends = Cell::new(0);
+        super::dispatch_with_sheet_evidence(Some(false), || {
+            sends.set(sends.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(sends.get(), 1);
+    }
+
+    #[test]
+    fn a_sheet_refusal_after_pointer_preparation_is_unverifiable() {
+        let error = crate::input::mouse::TargetCheckFailed {
+            events_sent: 2,
+            source: anyhow::anyhow!("sheet appeared"),
+        };
+        let result = super::pixel_target_check_failure(&error);
+        assert_eq!(result.structured_content.unwrap()["effect"], "unverifiable");
+    }
+}
+
+#[derive(Debug)]
 struct ObservedIdentityChanged;
 impl std::fmt::Display for ObservedIdentityChanged {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -105,6 +176,13 @@ fn ensure_observed_identity(element: &crate::ax::snapshot::RetainedElement) -> a
         anyhow::bail!(ObservedIdentityChanged);
     }
     Ok(())
+}
+
+fn sheet_refusal() -> ToolResult {
+    let message = SheetBlockedTarget.to_string();
+    ToolResult::error(&message).with_structured(serde_json::json!({
+        "status": "refused", "refusal": { "code": "stale_element_token", "message": message }
+    }))
 }
 
 fn identity_refusal(foreground: bool) -> ToolResult {
@@ -1025,6 +1103,15 @@ unsafe fn element_in_window_at(
     }
 }
 
+/// Sheet state of the point's exact-window AX hit. Unknown is refused.
+unsafe fn sheet_blocked_at_point(pid: i32, window_id: u32, x: f64, y: f64) -> Option<bool> {
+    let element = Retained(element_at_screen_position(pid, x, y)?);
+    if !crate::ax::exact_target::element_window_ids(element.0)?.is(window_id) {
+        return None;
+    }
+    crate::ax::exact_target::element_blocked_by_sheet(element.0)
+}
+
 /// The public `hit` record of an element a pointer route hit: its role,
 /// name and identifier, each omitted when unreadable; `None` when none is.
 ///
@@ -1743,6 +1830,22 @@ impl ClickTool {
             }
         }
 
+        // Apply the sheet admission to every token route, including the
+        // simulated route that recurses with a retained target.
+        if let Some(element) = element_guard.as_ref().or(simulated_target) {
+            let sheet_guard = element.clone();
+            let admitted =
+                latency::spawn_action_blocking(move || ensure_sheet_target(&sheet_guard).is_ok())
+                    .await
+                    .unwrap_or(false);
+            if !admitted {
+                return project_hit_focus_refusal(
+                    sheet_refusal(),
+                    crate::background_mutation::prior_for_current_task(pid),
+                );
+            }
+        }
+
         if !simulated && matches!(super::element_simulate::option(&args), Ok(true)) {
             let (Some(idx), Some(wid), Some(element)) =
                 (element_index, window_id, element_guard.as_ref())
@@ -2019,6 +2122,7 @@ impl ClickTool {
                     // Re-read after any activation: the early read skips a
                     // foreground call into a background app.
                     let ensure_enabled = || {
+                        ensure_sheet_target(&middle_guard)?;
                         if foreground {
                             crate::input::ax_actions::ensure_ax_action_enabled_after_activation(
                                 middle_guard.as_ptr(),
@@ -2064,6 +2168,13 @@ impl ClickTool {
                          (background CGEvent; not driver-verified — confirm via screenshot)."
                     ))
                     .with_structured(serde_json::json!({ "path": "cgevent", "verified": false, "effect": "unverifiable" })),
+                    Ok(Err(e)) if e.downcast_ref::<SheetBlockedTarget>().is_some() => {
+                        if foreground {
+                            click_task_failure(format!("{e} Foreground activation may have changed focus; no click was sent."))
+                        } else {
+                            sheet_refusal()
+                        }
+                    },
                     Ok(Err(e)) if e.downcast_ref::<ObservedIdentityChanged>().is_some() => identity_refusal(foreground),
                     Ok(Err(e)) => crate::security_prompt::tool_result(&e)
                         .or_else(|| super::element_disabled_error(pid, wid, &e, foreground))
@@ -2361,6 +2472,7 @@ impl ClickTool {
                                     let focus_generation = crate::input::skylight::focus_generation();
                                     let has_modifiers = !selection_modifiers.is_empty();
                                     let action = || {
+                                        ensure_sheet_target(&element_guard)?;
                                         ensure_observed_identity(&element_guard)?;
                                         outcome = Some(perform_ax_click(
                                             (element_ptr, idx),
@@ -2410,6 +2522,7 @@ impl ClickTool {
                                     }
                                     Ok((outcome, fronted))
                                 } else {
+                                    ensure_sheet_target(&element_guard)?;
                                     ensure_observed_identity(&element_guard)?;
                                     perform_ax_click(
                                         (element_ptr, idx),
@@ -2522,6 +2635,11 @@ impl ClickTool {
                     &changes,
                     web_unchanged,
                 ),
+                Ok(Err(e)) if e.downcast_ref::<SheetBlockedTarget>().is_some() => {
+                    click_task_failure(format!(
+                        "{e} Focus preparation may have sent input; no further click was sent."
+                    ))
+                }
                 Ok(Err(e)) if e.downcast_ref::<ObservedIdentityChanged>().is_some() => {
                     identity_refusal(delivery_mode.is_foreground())
                 }
@@ -2778,6 +2896,22 @@ impl ClickTool {
             } else {
                 (screen_x, screen_y, win_local_x, win_local_y)
             };
+
+            if let Some(wid) = window_id {
+                let clear = latency::spawn_action_blocking(move || unsafe {
+                    sheet_blocked_at_point(pid, wid, screen_x, screen_y) == Some(false)
+                })
+                .await
+                .unwrap_or(false);
+                if !clear {
+                    let prior = crate::background_mutation::prior_for_current_task(pid);
+                    return if action == "focus" {
+                        sheet_hit_focus_refusal(prior)
+                    } else {
+                        project_hit_focus_refusal(sheet_refusal(), prior)
+                    };
+                }
+            }
 
             // Check the relocated point before either AX or pointer delivery.
             if let Some(wid) = window_id.filter(|_| !delivery_mode.is_foreground()) {
@@ -3283,6 +3417,7 @@ impl ClickTool {
             // button != left. Left-button path stays on the existing Chromium-
             // routed `click_at_xy_with_window_local` for back-compat.
             let button_kind = button_str.clone();
+            let simulated_sheet_target = simulated_target.cloned();
             let dispatch_guard = match super::window_points::DispatchGuard::new(
                 space,
                 window_id,
@@ -3328,6 +3463,14 @@ impl ClickTool {
                             probe.own_post_starts();
                         }
                         let do_click = move || -> anyhow::Result<()> {
+                            if let Some(target) = &simulated_sheet_target {
+                                ensure_sheet_target(target)?;
+                            }
+                            let blocked = match window_id {
+                                Some(wid) => unsafe { sheet_blocked_at_point(pid, wid, screen_x, screen_y) },
+                                None => Some(false),
+                            };
+                            dispatch_with_sheet_evidence(blocked, || {
                             super::window_points::check_guard(&dispatch_guard)?;
                             let m: Vec<&str> = mods_owned.iter().map(String::as_str).collect();
                             if route == PixelClickRoute::ForegroundHid {
@@ -3372,7 +3515,10 @@ impl ClickTool {
                                             return crate::input::mouse::click_background_pixel_fast(
                                                 pid, (screen_x, screen_y), (win_local_x, win_local_y),
                                                 wid, count, &m,
-                                                &mut || super::window_points::check_guard(&dispatch_guard).map_err(Into::into),
+                                                &mut || dispatch_with_sheet_evidence(
+                                                    unsafe { sheet_blocked_at_point(pid, wid, screen_x, screen_y) },
+                                                    || super::window_points::check_guard(&dispatch_guard).map_err(Into::into),
+                                                ),
                                             );
                                         }
                                         return crate::input::mouse::click_at_xy_with_window_local(
@@ -3385,6 +3531,7 @@ impl ClickTool {
                                     crate::input::mouse::click_at_xy(pid, screen_x, screen_y, count, &m)
                                 }
                             }
+                            })
                         };
                         // Foreground rung: front the exact window → HID click →
                         // restore the prior front process. The HID tap has no
@@ -3523,6 +3670,20 @@ impl ClickTool {
                 }
                 Ok(Err(e)) => match crate::security_prompt::tool_result(&e) {
                     Some(refusal) => refusal,
+                    None if e
+                        .downcast_ref::<crate::input::mouse::TargetCheckFailed>()
+                        .is_some() =>
+                    {
+                        pixel_target_check_failure(
+                            e.downcast_ref::<crate::input::mouse::TargetCheckFailed>()
+                                .expect("checked type"),
+                        )
+                    }
+                    None if e.downcast_ref::<SheetBlockedTarget>().is_some() => {
+                        click_task_failure(format!(
+                            "{e} Focus preparation may have sent input; no further click was sent."
+                        ))
+                    }
                     None if route == PixelClickRoute::ForegroundHid => {
                         super::pixel_route::foreground_unavailable(
                             button_label,
@@ -4656,6 +4817,9 @@ async fn run_live_selection_write(
                     use cua_driver_core::actionability::Evidence;
                     let target_ptr = candidate.target.as_ptr() as AXUIElementRef;
                     let valid = || {
+                        if ensure_sheet_target(&candidate.target).is_err() {
+                            return Err(SelectionUnavailable::Changed);
+                        }
                         let bound = matches!(super::actionability::semantic::bind_exact_with(
                             &mut super::actionability::semantic::NativeWindowReader,
                             candidate.target.clone(), pid, window_id,
@@ -4784,6 +4948,17 @@ fn perform_native_text_focus(
         }
     }
     let focus_step = || -> anyhow::Result<bool> {
+        if ensure_sheet_target(&candidate.target).is_err() {
+            return Err(ClickWriteFailure {
+                message: format!("{} AXFocused was not written.", SheetBlockedTarget),
+                disposition: if prior == PriorInput::None {
+                    cua_driver_contract::ErrorDisposition::NOT_DELIVERED
+                } else {
+                    cua_driver_contract::ErrorDisposition::SUSPECTED_NOOP
+                },
+            }
+            .into());
+        }
         let err = crate::input::ax_actions::focus_element_raw(element_ptr);
         let outcome = crate::ax::write_outcome::native_write_outcome(
             crate::ax::write_outcome::NativeWriteKind::SetAttribute,
@@ -5003,6 +5178,13 @@ fn hit_focus_refusal(code: &str, message: impl Into<String>) -> ToolResult {
         .with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED)
 }
 
+pub(super) fn sheet_hit_focus_refusal(prior: cua_driver_core::mutation::PriorInput) -> ToolResult {
+    project_hit_focus_refusal(
+        hit_focus_refusal("hit_focus_sheet_blocked", "An attached sheet blocks the hit target or its ancestry is unreadable; AXFocused was not sent."),
+        prior,
+    )
+}
+
 pub(super) fn project_hit_focus_refusal(
     mut result: ToolResult,
     prior: cua_driver_core::mutation::PriorInput,
@@ -5109,6 +5291,9 @@ async fn run_live_hit_focus_stage(
                     use crate::ax::actionability::{NativeReader, Reader};
                     use cua_driver_core::actionability::Evidence;
                     let target = candidate.target.as_ptr() as AXUIElementRef;
+                    if ensure_sheet_target(&candidate.target).is_err() {
+                        return Err(sheet_hit_focus_refusal(cua_driver_core::mutation::PriorInput::None));
+                    }
                     if super::window_points::check_guard(&candidate.guard).is_err() {
                         return Err(hit_focus_refusal("hit_focus_target_changed", "The window geometry changed; AXFocused was not sent."));
                     }
@@ -6269,6 +6454,20 @@ mod perform_error_failure_tests {
     use cua_driver_contract::ErrorDisposition;
     use cua_driver_core::mutation::{ChainResult, PriorInput, Reason, WriteOutcome};
 
+    #[test]
+    fn uncertain_selection_preparation_is_publicly_unverifiable() {
+        let failure = super::ClickWriteFailure {
+            message: "Selection click was not sent; preparation may have sent input.".into(),
+            disposition: ErrorDisposition::SUSPECTED_NOOP,
+        };
+        let result = element_click_failure(&failure.into());
+        let value = result
+            .structured_content
+            .expect("uncertainty must be visible");
+        assert_eq!(value["effect"], "unverifiable");
+        assert_eq!(value["retryable"], false);
+    }
+
     /// The click's APIDisabled rule (#279): an accessibility-disabled perform
     /// proves nothing was sent, so it reaches the caller as the
     /// `action_unavailable` refusal with `dispatched: false`, never as an
@@ -6801,6 +7000,7 @@ fn element_click_failure(error: &anyhow::Error) -> ToolResult {
             .with_disposition(failure.disposition);
         }
         return ToolResult::error(format!("AX action failed: {error}"))
+            .with_structured(serde_json::json!({"code":"ax_action_unverified", "effect":"unverifiable", "retryable":false}))
             .with_disposition(failure.disposition);
     }
     match crate::input::ax_actions::element_action_refusal_code(error) {
@@ -7177,28 +7377,70 @@ fn perform_ax_click(
             let Some((before, _)) = selection.observe() else {
                 anyhow::bail!("selection target stopped exposing AXSelected before delivery");
             };
+            unsafe { ensure_sheet_clear(element) }?;
+            let selection_target =
+                super::element_pointer::target_for(pid, window_id, idx, unsafe {
+                    crate::ax::snapshot::RetainedElement::retain(selection.target_ptr())
+                });
+            let expected = super::element_pointer::ElementPoint {
+                screen: (target.screen_x, target.screen_y),
+                window_local: (target.window_x, target.window_y),
+            };
+            let mut check_selection = || -> anyhow::Result<()> {
+                unsafe { ensure_sheet_clear(element) }?;
+                super::element_pointer::checked_selection_point(
+                    &*selection_target,
+                    expected,
+                    foreground,
+                )?;
+                Ok(())
+            };
+            check_selection().map_err(|_| ClickWriteFailure {
+                message: if prior == cua_driver_core::mutation::PriorInput::None {
+                    "Selection target or sheet state could not be proven; the selection click was not sent.".into()
+                } else {
+                    "Selection target or sheet state could not be proven; the selection click was not sent, but earlier input may have been delivered.".into()
+                },
+                disposition: if prior == cua_driver_core::mutation::PriorInput::None {
+                    cua_driver_contract::ErrorDisposition::NOT_DELIVERED
+                } else {
+                    cua_driver_contract::ErrorDisposition::SUSPECTED_NOOP
+                },
+            })?;
             let modifier_refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
-            if foreground && !modifier_refs.is_empty() {
-                crate::input::mouse::click_at_xy_desktop_with_modifiers_preserving_cursor(
+            let click = if foreground && !modifier_refs.is_empty() {
+                crate::input::mouse::click_at_xy_desktop_with_modifiers_preserving_cursor_checked(
                     prompt,
                     target.screen_x,
                     target.screen_y,
                     1,
                     "left",
                     &modifier_refs,
-                )?;
+                    &mut check_selection,
+                )
             } else {
-                crate::input::mouse::click_at_xy_with_window_local(
+                crate::input::mouse::click_at_xy_with_window_local_checked(
                     pid,
-                    target.screen_x,
-                    target.screen_y,
-                    target.window_x,
-                    target.window_y,
+                    (target.screen_x, target.screen_y),
+                    (target.window_x, target.window_y),
                     window_id,
                     1,
                     &modifier_refs,
                     crate::input::mouse::WindowClickDelivery::from_foreground(foreground),
-                )?;
+                    &mut check_selection,
+                )
+            };
+            if let Err(error) = click {
+                if error
+                    .downcast_ref::<crate::input::mouse::TargetCheckFailed>()
+                    .is_some()
+                {
+                    return Err(ClickWriteFailure {
+                        message: "Selection target or sheet state changed; the selection click was not sent, but preparation may have sent input.".into(),
+                        disposition: cua_driver_contract::ErrorDisposition::SUSPECTED_NOOP,
+                    }.into());
+                }
+                return Err(error);
             }
             if !reads.selection {
                 return Ok(AxClickStep::Done(unconfirmed_selection_click(
@@ -7387,6 +7629,8 @@ fn perform_ax_click(
         let deadline = std::time::Instant::now() + MENU_OPEN_TIMEOUT;
         unsafe { !menu_beside(element, deadline) }
     };
+    // Making the window key, or the menu wait, can let the app open a sheet.
+    unsafe { ensure_sheet_clear(element) }?;
     let pressed_at = std::time::Instant::now();
     let err = latency::section(latency::Stage::AxPerform, || unsafe {
         crate::ax::bindings::perform_action(element, ax_action)

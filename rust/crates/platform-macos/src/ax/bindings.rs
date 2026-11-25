@@ -949,6 +949,43 @@ pub unsafe fn copy_children_checked(element: AXUIElementRef) -> Option<Vec<AXUIE
     retained_elements(value)
 }
 
+/// Read children for a modal-sheet admission check. An absent or failed read
+/// is not evidence that a window has no sheet.
+///
+/// # Safety
+/// `element` must be valid; the caller releases every returned element.
+pub unsafe fn copy_children_for_sheet_check(
+    element: AXUIElementRef,
+) -> Option<Vec<AXUIElementRef>> {
+    let attr = CFStr::new("AXChildren");
+    let mut value: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
+    if err != kAXErrorSuccess || value.is_null() {
+        return None;
+    }
+    retained_sheet_elements(value)
+}
+
+unsafe fn retained_sheet_elements(value: CFTypeRef) -> Option<Vec<AXUIElementRef>> {
+    if core_foundation::base::CFGetTypeID(value) != CFArray::<CFTypeRef>::type_id() {
+        CFRelease(value);
+        return None;
+    }
+    let array = CFArray::<CFTypeRef>::wrap_under_get_rule(value as _);
+    let ax_type = AXUIElementGetTypeID();
+    let valid = (0..array.len()).all(|i| {
+        array
+            .get(i)
+            .is_some_and(|item| core_foundation::base::CFGetTypeID(*item) == ax_type)
+    });
+    drop(array);
+    if !valid {
+        CFRelease(value);
+        return None;
+    }
+    retained_elements(value)
+}
+
 /// Get at most the first `max` children of an AX element. Only those are
 /// read from the application.
 ///
@@ -1617,6 +1654,14 @@ mod tests {
 
     use crate::windows::WindowSpaceView;
     use core_foundation::{boolean::CFBoolean, number::CFNumber};
+
+    #[test]
+    fn sheet_child_array_with_non_element_is_unknown() {
+        let array = CFArray::from_CFTypes(&[CFNumber::from(42).as_CFType()]);
+        let ptr = array.as_CFTypeRef();
+        unsafe { CFRetain(ptr) };
+        assert!(unsafe { retained_sheet_elements(ptr) }.is_none());
+    }
 
     /// Window 70 is a child of window 7; 71 is a child of 70.
     fn parent_of(window: u32) -> Option<u32> {

@@ -60,7 +60,7 @@ mod get_config;
 mod get_cursor_position;
 mod get_desktop_state;
 pub(crate) mod get_screen_size;
-mod health_report;
+pub(crate) mod health_report;
 mod move_cursor;
 mod page;
 mod pixel_focus;
@@ -1261,6 +1261,21 @@ mod hit_focus_safety_tests {
                 FocusDecision::StopOriginalError,
                 "{code}"
             );
+        }
+    }
+
+    #[test]
+    fn sheet_block_stops_the_focus_ladder_and_preserves_prior_input() {
+        for prior in [PriorInput::None, PriorInput::MayHaveDelivered] {
+            let result = super::click::sheet_hit_focus_refusal(prior);
+            let value = result.structured_content.unwrap();
+            assert_eq!(
+                decide_focus_next(None, true, value["effect"].as_str(), value["code"].as_str()),
+                FocusDecision::StopOriginalError,
+            );
+            if prior == PriorInput::MayHaveDelivered {
+                assert_eq!(value["effect"], "unverifiable");
+            }
         }
     }
 

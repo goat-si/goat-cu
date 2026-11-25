@@ -14,10 +14,11 @@ use std::sync::Arc;
 use super::impl_::{
     apply_foreground_report, atspi_click_outcome_unknown, atspi_outcome_unknown,
     attach_focus_guard, capture_admission_error, checked_element_local_coords,
-    coordinate_frame_schema, desktop_frame_requested, desktop_frame_unmapped, desktop_input_space,
-    desktop_to_window_local, element_is_menu_role, element_needs_real_click, element_screen_center,
-    emit_cursor_hook, foreground_budget, foreground_hyprland_action, foreground_hyprland_refusal,
-    foreground_structured, hyprland_foreground, input_error_result, isolated_hyprland_action,
+    coordinate_frame_schema, desktop_click_awaits_cursor_arrival, desktop_frame_requested,
+    desktop_frame_unmapped, desktop_input_space, desktop_to_window_local, element_is_menu_role,
+    element_needs_real_click, element_screen_center, emit_cursor_hook, foreground_budget,
+    foreground_hyprland_action, foreground_hyprland_refusal, foreground_structured,
+    hyprland_foreground, input_error_result, isolated_hyprland_action,
     isolated_hyprland_background, isolated_hyprland_refusal, isolated_hyprland_result,
     isolated_hyprland_task_error, named_session_cursor_key, non_ax_escalation, parse_mouse_button,
     prepare_desktop_click_cursor, prove_token_element, push_evidence, refuse_if_disabled,
@@ -1061,39 +1062,48 @@ impl Tool for ClickTool {
             // sees the cursor "click somewhere else."
             // The overlay draws in layout coordinates, like the input below.
             let (overlay_x, overlay_y) = space.to_layout(sx, sy);
-            let arrival = prepare_desktop_click_cursor(
-                crate::wayland::is_wayland()
-                    && crate::overlay::wayland_overlay_backend()
-                        == crate::overlay::WaylandOverlayBackend::LayerShell,
-                async {
-                    self.state.cursor_registry.set_enabled(&cursor_id, true);
-                    self.state.cursor_registry.update_position(
-                        &cursor_id,
-                        f64::from(overlay_x),
-                        f64::from(overlay_y),
-                    );
-                    emit_cursor_hook(
+            let draws_cursor = crate::overlay::draws_cursor(&cursor_id);
+            let wayland = crate::wayland::is_wayland();
+            let arrival = if !wayland || draws_cursor {
+                prepare_desktop_click_cursor(
+                    desktop_click_awaits_cursor_arrival(
+                        wayland
+                            && crate::overlay::wayland_overlay_backend()
+                                == crate::overlay::WaylandOverlayBackend::LayerShell,
+                        draws_cursor,
+                    ),
+                    async {
+                        self.state.cursor_registry.set_enabled(&cursor_id, true);
+                        self.state.cursor_registry.update_position(
+                            &cursor_id,
+                            f64::from(overlay_x),
+                            f64::from(overlay_y),
+                        );
+                        emit_cursor_hook(
+                            &cursor_id,
+                            f64::from(overlay_x),
+                            f64::from(overlay_y),
+                            false,
+                        );
+                        crate::wayland::overlay::animate_and_wait(
+                            cursor_id.clone(),
+                            f64::from(overlay_x),
+                            f64::from(overlay_y),
+                        )
+                        .await
+                    },
+                    reveal_pointer_action_for(
+                        &self.state,
                         &cursor_id,
                         f64::from(overlay_x),
                         f64::from(overlay_y),
                         false,
-                    );
-                    crate::wayland::overlay::animate_and_wait(
-                        cursor_id.clone(),
-                        f64::from(overlay_x),
-                        f64::from(overlay_y),
-                    )
-                    .await
-                },
-                reveal_pointer_action_for(
-                    &self.state,
-                    &cursor_id,
-                    f64::from(overlay_x),
-                    f64::from(overlay_y),
-                    false,
-                ),
-            )
-            .await;
+                    ),
+                )
+                .await
+            } else {
+                Ok(())
+            };
             if let Err(error) = arrival {
                 return ToolResult::error(error.to_string());
             }
@@ -1118,7 +1128,7 @@ impl Tool for ClickTool {
                 }
             })
             .await;
-            if matches!(&r, Ok(Ok(()))) {
+            if matches!(&r, Ok(Ok(()))) && (!wayland || draws_cursor) {
                 emit_cursor_hook(&cursor_id, f64::from(overlay_x), f64::from(overlay_y), true);
                 crate::overlay::send_command_for(
                     cursor_id,

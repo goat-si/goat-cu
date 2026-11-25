@@ -1,8 +1,109 @@
 use cua_driver_core::mutation::{Reason, WriteOutcome};
+
+pub(crate) fn still_foreground_after_activation_wait(before: u64, after: u64, bound: bool) -> bool {
+    before == after && bound
+}
+
+pub(crate) fn restore_if_target_still_foreground(
+    target_still_foreground: bool,
+    restore: impl FnOnce(),
+) {
+    if target_still_foreground {
+        restore();
+    }
+}
+
+pub(crate) fn attachment_if_succeeded<T>(succeeded: bool, make: impl FnOnce() -> T) -> Option<T> {
+    succeeded.then(make)
+}
+
+pub(crate) fn attempt_setup_restore(
+    target_is_current: impl FnOnce() -> bool,
+    identity_is_current: impl FnOnce() -> bool,
+    restore: impl FnOnce() -> bool,
+) -> Option<bool> {
+    (target_is_current() && identity_is_current()).then(restore)
+}
+
+#[cfg(test)]
+mod activation_wait_tests {
+    #[test]
+    fn changed_or_unbound_foreground_refuses_after_wait() {
+        use super::still_foreground_after_activation_wait as admitted;
+        assert!(admitted(7, 7, true));
+        assert!(!admitted(7, 8, true));
+        assert!(!admitted(7, 7, false));
+    }
+
+    #[test]
+    fn restoration_never_displaces_a_foreign_foreground() {
+        let restores = std::cell::Cell::new(0);
+        super::restore_if_target_still_foreground(false, || restores.set(restores.get() + 1));
+        assert_eq!(restores.get(), 0);
+        super::restore_if_target_still_foreground(true, || restores.set(restores.get() + 1));
+        assert_eq!(restores.get(), 1);
+    }
+
+    #[test]
+    fn failed_wait_after_focus_is_never_reported_as_not_delivered() {
+        let failure = super::failure_after_focus("activation wait failed");
+        assert_eq!(
+            super::keyboard_failure_outcome(false, Some(failure.inserted_any)),
+            Some(cua_driver_core::mutation::WriteOutcome::StopUncertain(
+                cua_driver_core::mutation::Reason::Unknown,
+            )),
+        );
+    }
+
+    #[test]
+    fn failed_attachment_never_constructs_a_detach_guard() {
+        let constructed = std::cell::Cell::new(0);
+        let guard = super::attachment_if_succeeded(false, || {
+            constructed.set(constructed.get() + 1);
+        });
+        assert!(guard.is_none());
+        assert_eq!(constructed.get(), 0);
+    }
+
+    #[test]
+    fn setup_restore_rechecks_foreground_before_issuing_restore() {
+        let restores = std::cell::Cell::new(0);
+        let target_is_current = false;
+        let outcome = super::attempt_setup_restore(
+            || target_is_current,
+            || true,
+            || {
+                restores.set(restores.get() + 1);
+                true
+            },
+        );
+        assert!(outcome.is_none());
+        assert_eq!(restores.get(), 0);
+        let outcome = super::attempt_setup_restore(
+            || true,
+            || false,
+            || {
+                restores.set(restores.get() + 1);
+                true
+            },
+        );
+        assert!(outcome.is_none());
+        assert_eq!(restores.get(), 0);
+    }
+}
 #[derive(Debug)]
 pub(crate) struct InputDispatchFailure {
     pub inserted_any: bool,
     pub message: String,
+}
+
+pub(crate) fn failure_after_focus(detail: impl std::fmt::Display) -> InputDispatchFailure {
+    InputDispatchFailure {
+        inserted_any: true,
+        message: format!(
+            "{detail}; focus preparation may have sent input. Inspect the target before retrying."
+        ),
+    }
 }
 impl std::fmt::Display for InputDispatchFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

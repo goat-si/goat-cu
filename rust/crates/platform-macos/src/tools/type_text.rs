@@ -4369,6 +4369,7 @@ mod u32_outcome_tests {
         for observation in [
             ValueRead::Withheld,
             ValueRead::Allowed(ValueObs::Text("old".into())),
+            ValueRead::Allowed(ValueObs::Failed(crate::ax::bindings::kAXErrorFailure)),
         ] {
             let writes = Cell::new(0);
             let result = insert_ax_write(

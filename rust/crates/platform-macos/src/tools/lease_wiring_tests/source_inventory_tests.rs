@@ -70,7 +70,9 @@ fn check_reviewed_glob_targets(root: &Path) {
         // added AX helpers do not export worker launchers.
         // S9 adds bounded AX attribute reads and an absence probe; neither
         // exports a worker launcher or mutating dispatch entry point.
-        (root.join("ax/bindings.rs"), 11896794543820533297_u64),
+        // S13 adds only a strict AXChildren reader for sheet admission;
+        // it neither launches workers nor dispatches input.
+        (root.join("ax/bindings.rs"), 2932961717859938868_u64),
         (
             root.join("../../cua-driver-contract/src/vocabulary.rs"),
             7383688377390068226_u64,

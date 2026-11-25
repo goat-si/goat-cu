@@ -1073,6 +1073,14 @@ fn effect_hint(c: &Ctx, effect: &str) -> Option<RecoveryHint> {
     let noop = effect == "suspected_noop";
     let browser = c.tool.starts_with("browser_");
     if browser {
+        if c.structured
+            .get("delivery")
+            .and_then(|v| v.get("mode"))
+            .and_then(Value::as_str)
+            == Some("unknown")
+        {
+            return Some(RecoveryHint::new("The action may have been delivered. Read the page and verify its state before taking another action.").call(c.read_page()));
+        }
         let text = match (c.tool, noop) {
             ("browser_type", false) => {
                 "The text was typed but not read back. Read the field with get_browser_state before typing again."
