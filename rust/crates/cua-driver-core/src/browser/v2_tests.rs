@@ -1973,7 +1973,10 @@ async fn failed_prepare_probe_releases_only_the_preparing_session() {
         assert_eq!(result["status"], "refused", "{result}");
         assert_eq!(result["refusal"]["code"], "browser_reconnect_exhausted");
         assert_eq!(result["refusal"]["detail"]["retried_after_consent"], false);
-        assert_eq!(f._server.accepted_connections(), 1);
+        assert_eq!(
+            f._server.accepted_connections(),
+            if with_peer { 2 } else { 1 }
+        );
         assert!(f
             .engine
             .existing_profile_grant("prepare-probe-failure", Some("prepare-probe-failure"), 1)
@@ -1994,7 +1997,7 @@ async fn failed_prepare_probe_releases_only_the_preparing_session() {
         assert_eq!(result["status"], "ok", "{result}");
         assert_eq!(
             f._server.accepted_connections(),
-            if with_peer { 1 } else { 2 }
+            if with_peer { 3 } else { 2 }
         );
         if with_peer {
             let state = GetBrowserStateTool::new(f.engine.clone())
