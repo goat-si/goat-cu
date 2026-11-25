@@ -327,7 +327,7 @@ fn window_info_by_handle(hwnd: u64) -> Option<WindowInfo> {
         return None;
     }
     let minimized = unsafe { IsIconic(native) }.as_bool();
-    let (x, y, width, height) = get_window_bounds(native);
+    let (x, y, width, height) = get_window_bounds(native)?;
     Some(WindowInfo {
         hwnd,
         pid,
@@ -393,7 +393,9 @@ unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     }
 
     // Get bounds — prefer DWM extended frame bounds (includes shadow), fallback to GetWindowRect.
-    let (x, y, w, h) = get_window_bounds(hwnd);
+    let Some((x, y, w, h)) = get_window_bounds(hwnd) else {
+        return TRUE;
+    };
 
     state.lock().unwrap().windows.push(WindowInfo {
         hwnd: hwnd.0 as u64,
@@ -410,26 +412,25 @@ unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     TRUE
 }
 
-fn get_window_bounds(hwnd: HWND) -> (i32, i32, i32, i32) {
+fn get_window_bounds(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
     unsafe {
         let mut rect = RECT::default();
-        // Try DwmGetWindowAttribute for accurate bounds (excludes drop shadow on W11).
-        let ok = DwmGetWindowAttribute(
+        let dwm = DwmGetWindowAttribute(
             hwnd,
             DWMWA_EXTENDED_FRAME_BOUNDS,
             &mut rect as *mut RECT as *mut _,
             std::mem::size_of::<RECT>() as u32,
-        );
-        if ok.is_err() {
-            // Fallback to GetWindowRect.
-            let _ = GetWindowRect(hwnd, &mut rect);
-        }
-        (
-            rect.left,
-            rect.top,
-            rect.right - rect.left,
-            rect.bottom - rect.top,
         )
+        .ok()
+        .map(|()| [rect.left, rect.top, rect.right, rect.bottom]);
+        if let Some(bounds) = crate::window_geometry::select(dwm, None) {
+            return Some(bounds);
+        }
+        let mut rect = RECT::default();
+        let win32 = GetWindowRect(hwnd, &mut rect)
+            .ok()
+            .map(|()| [rect.left, rect.top, rect.right, rect.bottom]);
+        crate::window_geometry::select(None, win32)
     }
 }
 
@@ -570,7 +571,7 @@ pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
         }
     };
 
-    let (x, y, w, h) = get_window_bounds(frame);
+    let (x, y, w, h) = get_window_bounds(frame)?;
 
     Some(WindowInfo {
         hwnd: frame.0 as u64,
