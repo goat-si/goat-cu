@@ -125,8 +125,8 @@ fn exact_native_prompt_root(nodes: &[AtspiNode]) -> Result<Option<usize>, Browse
     }
 }
 
-fn native_prompt_surface_present(nodes: &[AtspiNode]) -> bool {
-    exact_native_prompt_root(nodes).ok().flatten().is_some()
+fn native_prompt_surface_present(nodes: &[AtspiNode]) -> Result<bool, BrowserRefusal> {
+    crate::browser_consent_presence::prompt_present(|| exact_native_prompt_root(nodes))
 }
 
 fn redacted_native_prompt_snapshot(
@@ -390,7 +390,7 @@ pub fn dismiss(pid: u32, window_id: u64) -> Result<bool, BrowserRefusal> {
     loop {
         prove_window_owner(pid, window_id)?;
         let tree = crate::atspi::walk_tree(pid, window_id, None);
-        let prompt_present = native_prompt_surface_present(&tree.nodes);
+        let prompt_present = native_prompt_surface_present(&tree.nodes)?;
         if !prompt_present {
             return Ok(dismissed);
         }
@@ -522,7 +522,7 @@ pub async fn handle(
                 "redacted_native_nodes": last_snapshot,
             })));
         }
-        let prompt_present = native_prompt_surface_present(&tree.nodes);
+        let prompt_present = native_prompt_surface_present(&tree.nodes)?;
         saw_prompt |= prompt_present;
         match exact_allow_button(&tree.nodes, &tree.bounds)? {
             Some(index) if accessibility_action_at.is_none() => {
@@ -935,6 +935,7 @@ mod tests {
             actions(&nodes, &row_bounds(EN_US_ROW)),
             Err(BrowserRefusalCode::BrowserWrongTargetRefused)
         );
+        assert!(native_prompt_surface_present(&nodes).is_err());
     }
 
     #[test]

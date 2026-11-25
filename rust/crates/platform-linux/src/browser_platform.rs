@@ -1336,10 +1336,11 @@ impl BrowserPlatform for LinuxBrowserPlatform {
         })?;
         let window_id = request.window_id;
         run_existing_profile_cleanup(move || {
-            let dismissed_before = crate::browser_consent_ui::dismiss(pid, window_id)?;
-            let closed_setup_page = crate::browser_setup_ui::disable(pid, window_id, descriptor)?;
-            let dismissed_after = crate::browser_consent_ui::dismiss(pid, window_id)?;
-            Ok(dismissed_before || closed_setup_page || dismissed_after)
+            crate::browser_consent_presence::cleanup(
+                || crate::browser_consent_ui::dismiss(pid, window_id),
+                || crate::browser_setup_ui::disable(pid, window_id, descriptor),
+                || crate::browser_consent_ui::dismiss(pid, window_id),
+            )
         })?
     }
 

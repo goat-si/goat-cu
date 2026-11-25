@@ -60,6 +60,9 @@ mod inject_sequence;
 #[cfg(any(target_os = "linux", test))]
 mod token_action_policy;
 
+#[cfg(any(target_os = "linux", test))]
+mod browser_consent_presence;
+
 #[cfg(target_os = "linux")]
 pub mod input;
 
