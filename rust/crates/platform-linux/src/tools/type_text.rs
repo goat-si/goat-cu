@@ -24,8 +24,106 @@ use super::impl_::{
     spawn_text_write_bounded, stale_observed_element, terminal_pty_number, text_route_error_result,
     text_typing_budget, text_write_stop_result, token_failure_structured, typing_budget,
     unavailable_chromium_background, unavailable_wayland_focused_input_background,
-    unavailable_webkit_keyboard_background, values_agree, KeyRoute, ToolState,
+    unavailable_webkit_keyboard_background, values_agree, with_cleanup_warning, KeyRoute,
+    ToolState,
 };
+
+/// What the Qt5 synthetic-focus workaround did: the AT-SPI write's own
+/// outcome, and the error of the FocusOut sent after it, if any.
+struct SyntheticFocusWrite {
+    write: anyhow::Result<()>,
+    focus_out: Option<anyhow::Error>,
+}
+
+/// Send FocusIn (Qt5 exposes its widget tree only to a focused window),
+/// write, then FocusOut. A failed FocusOut is kept beside the write's
+/// outcome instead of replacing it: the write may already have landed.
+fn write_with_synthetic_focus(
+    focus_in: impl FnOnce() -> anyhow::Result<()>,
+    settle: impl FnOnce(),
+    write: impl FnOnce() -> anyhow::Result<()>,
+    focus_out: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<SyntheticFocusWrite> {
+    focus_in()?;
+    settle();
+    let write = write();
+    let focus_out = focus_out().err();
+    Ok(SyntheticFocusWrite { write, focus_out })
+}
+
+/// Preserve the write outcome and keep a failed FocusOut as a warning when
+/// the write succeeded or may have happened.
+fn finish_synthetic_focus(written: SyntheticFocusWrite) -> (anyhow::Result<()>, Option<String>) {
+    let SyntheticFocusWrite { write, focus_out } = written;
+    let warning = if write.is_ok()
+        || write
+            .as_ref()
+            .err()
+            .is_some_and(|error| crate::atspi::native::text_write_stop(error).is_some())
+    {
+        focus_out.as_ref().map(|error| format!("the synthetic FocusOut sent after the write failed ({error:#}), so the window may still act as focused"))
+    } else {
+        None
+    };
+    let outcome = crate::token_action_policy::qt5_restore_outcome(
+        write,
+        focus_out.map_or(Ok(()), Err),
+        crate::atspi::native::text_write_stop,
+    );
+    (outcome, warning)
+}
+
+#[cfg(test)]
+#[test]
+fn a_failed_focus_out_never_hides_a_write_that_was_sent() {
+    let failing_focus_out = || Err(anyhow::anyhow!("X11 connection lost"));
+    let attempt = |write: anyhow::Result<()>| {
+        let written = write_with_synthetic_focus(|| Ok(()), || {}, || write, failing_focus_out)
+            .expect("the FocusOut error is kept beside the write, not returned");
+        let (outcome, warning) = finish_synthetic_focus(written);
+        let result = match outcome {
+            Ok(()) => ToolResult::text("Typed 5 character(s) (via AT-SPI with focus workaround).")
+                .with_structured(type_text_structured("ax", 5, false)),
+            Err(error) if crate::atspi::native::text_write_stop(&error).is_some() => {
+                text_route_error_result("type_text", error)
+            }
+            Err(_) => return None,
+        };
+        Some(with_cleanup_warning(result, warning))
+    };
+    let warned = |wire: &Value| {
+        let text = wire["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Warning: the synthetic FocusOut"), "{text}");
+        assert!(wire["structuredContent"]["warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("X11 connection lost")));
+    };
+
+    // Delivered: still a success, so the caller never writes again.
+    let delivered = attempt(Ok(())).expect("a delivered write ends the call");
+    assert_ne!(delivered.is_error, Some(true));
+    let wire = serde_json::to_value(&delivered).unwrap();
+    assert_eq!(wire["structuredContent"]["path"], "ax");
+    warned(&wire);
+
+    // Sent and failed: still the unknown outcome, never a plain X11 error.
+    let sent = anyhow::Error::new(crate::atspi::InputMayHaveLanded(
+        "EditableText.InsertText did not answer in time".into(),
+    ));
+    let unknown = attempt(Err(sent)).expect("input that may have landed ends the call");
+    assert_eq!(unknown.is_error, Some(true));
+    let wire = serde_json::to_value(&unknown).unwrap();
+    assert_eq!(wire["structuredContent"]["effect"], "unverifiable");
+    assert_eq!(
+        wire["structuredContent"]["delivery"],
+        json!({"mode": "unknown"})
+    );
+    assert!(wire["structuredContent"].get("escalation").is_none());
+    warned(&wire);
+
+    // Nothing written: the next route may run.
+    assert!(attempt(Err(anyhow::anyhow!("no editable exposed"))).is_none());
+}
 
 /// `wayland::type_text_focused`, one call per character when `pacing` is
 /// positive. Wayland backends send a whole string in one request, so the
@@ -219,25 +317,22 @@ fn qt5_focus_workaround_write(
     xid: u64,
     text: &str,
     dispatch: Arc<crate::atspi::native::TextWriteDispatch>,
+    warning: Arc<std::sync::Mutex<Option<String>>>,
 ) -> anyhow::Result<()> {
     if !is_qt5_process(pid) {
         anyhow::bail!("not a Qt5 process; synthetic-FocusIn bridge workaround skipped");
     }
-    crate::input::send_focus_in(xid)?;
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    let write = crate::atspi::native::type_into_editable_with_dispatch(pid, text, dispatch);
-    let restore = crate::input::send_focus_out(xid);
-    if let (Ok(()), Err(error)) = (&write, &restore) {
-        tracing::warn!(
-            pid,
-            "Qt5 FocusOut after an acknowledged AT-SPI write failed: {error}"
-        );
-    }
-    crate::token_action_policy::qt5_restore_outcome(
-        write,
-        restore,
-        crate::atspi::native::text_write_stop,
-    )
+    let attempted = write_with_synthetic_focus(
+        || crate::input::send_focus_in(xid),
+        || std::thread::sleep(std::time::Duration::from_millis(100)),
+        || crate::atspi::native::type_into_editable_with_dispatch(pid, text, dispatch),
+        || crate::input::send_focus_out(xid),
+    )?;
+    let (outcome, cleanup_warning) = finish_synthetic_focus(attempted);
+    *warning
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = cleanup_warning;
+    outcome
 }
 
 /// Stop a token-bound write unless the element proved it has no editable route.
@@ -821,7 +916,8 @@ impl Tool for TypeTextTool {
                 return result;
             }
             if let Err(error) =
-                focus_nested_inject_target(pid, xid, token.clone(), px.zip(py)).await
+                focus_nested_inject_target(&self.state, &args, pid, xid, token.clone(), px.zip(py))
+                    .await
             {
                 return error;
             }
@@ -1287,7 +1383,9 @@ impl Tool for TypeTextTool {
         // the Qt5 FocusIn/FocusOut too.
         let first_dispatch = Arc::new(crate::atspi::native::TextWriteDispatch::default());
         let qt5_dispatch = Arc::new(crate::atspi::native::TextWriteDispatch::default());
+        let qt5_warning = Arc::new(std::sync::Mutex::new(None));
         let stages = {
+            let worker_warning = qt5_warning.clone();
             let (first_gate, qt5_gate) = (first_dispatch.clone(), qt5_dispatch.clone());
             let text = text.clone();
             spawn_text_write_bounded(
@@ -1303,7 +1401,7 @@ impl Tool for TypeTextTool {
                                 pid, &text, first_gate,
                             )
                         },
-                        || qt5_focus_workaround_write(pid, xid, &text, qt5_gate),
+                        || qt5_focus_workaround_write(pid, xid, &text, qt5_gate, worker_warning),
                     ))
                 },
             )
@@ -1313,10 +1411,18 @@ impl Tool for TypeTextTool {
             // Electron/Chromium can echo this write without the renderer
             // observing it, so the confirm is suppressed there (mirrors macOS).
             Ok(Ok(crate::token_action_policy::UntargetedAx::Written(route))) => {
-                return type_text_ax_result(pid, text_len, route);
+                let warning = qt5_warning
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                return with_cleanup_warning(type_text_ax_result(pid, text_len, route), warning);
             }
             Ok(Ok(crate::token_action_policy::UntargetedAx::Stopped(error))) => {
-                return text_route_error_result("type_text", error);
+                let warning = qt5_warning
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                return with_cleanup_warning(text_route_error_result("type_text", error), warning);
             }
             Ok(Ok(crate::token_action_policy::UntargetedAx::NotWritten)) => {}
             // The deadline passed or a stage panicked after a write began: it

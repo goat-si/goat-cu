@@ -11,7 +11,6 @@ use cua_driver_core::browser::{
 };
 
 use crate::atspi::AtspiNode;
-use crate::interaction::{session_policy, with_target_foreground};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ConsentButtonCandidate {
@@ -351,6 +350,7 @@ fn prove_window_owner(pid: u32, window_id: u64) -> Result<(), BrowserRefusal> {
     Ok(())
 }
 
+#[cfg(test)]
 fn exact_button_center(
     bounds: &[(usize, i32, i32, u32, u32)],
     element_index: usize,
@@ -366,23 +366,6 @@ fn exact_button_center(
         .checked_add(i32::try_from(height / 2)?)
         .ok_or_else(|| anyhow::anyhow!("Allow button center y overflowed"))?;
     Ok((center_x, center_y))
-}
-
-fn trusted_allow_click(pid: u32, window_id: u64) -> anyhow::Result<()> {
-    with_target_foreground(pid, window_id, session_policy().setup, || {
-        let tree = crate::atspi::walk_tree(pid, window_id, None);
-        let index = exact_allow_button(&tree.nodes, &tree.bounds)
-            .map_err(|error| anyhow::anyhow!(error.message))?
-            .ok_or_else(|| {
-                anyhow::anyhow!("the exact Chromium remote-debugging consent action became stale")
-            })?;
-        let (center_x, center_y) = exact_button_center(&tree.bounds, index)?;
-        if crate::desktop::desktop() != crate::desktop::Desktop::X11 {
-            crate::wayland::click_focused((center_x, center_y).into(), 1, 1)
-        } else {
-            crate::input::send_click_xtest_desktop(center_x, center_y, 1, 1)
-        }
-    })
 }
 
 /// The node at element `index` of a walk of the consent window, which an
@@ -411,6 +394,16 @@ pub fn dismiss(pid: u32, window_id: u64) -> Result<bool, BrowserRefusal> {
         if !prompt_present {
             return Ok(dismissed);
         }
+        if dismissed {
+            if Instant::now() >= deadline {
+                return Err(BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserWrongTargetRefused,
+                    "the remote-debugging consent prompt remained after its one cancel action",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
         let index = exact_cancel_button(&tree.nodes, &tree.bounds)?.ok_or_else(|| {
             BrowserRefusal::new(
                 BrowserRefusalCode::BrowserWrongTargetRefused,
@@ -418,12 +411,19 @@ pub fn dismiss(pid: u32, window_id: u64) -> Result<bool, BrowserRefusal> {
             )
         })?;
         let node = walked_node(&tree.nodes, index)?;
-        crate::atspi::perform_action_walked(pid, window_id, &node).map_err(|error| {
+        // An ambiguous cancel must end this attempt: a later pass must not
+        // press Cancel again while the first action may still have landed.
+        let (_, suspected_noop, unacknowledged) = crate::atspi::perform_action_walked(pid, window_id, &node).map_err(|error| {
             BrowserRefusal::new(
                 BrowserRefusalCode::BrowserWrongTargetRefused,
-                format!("the exact browser consent cancel action failed: {error}"),
-            )
+                format!("the exact browser consent cancel action may have acted; inspect the prompt before retrying: {error}"),
+            ).with_detail(serde_json::json!({"delivery":"unknown", "retryable":false}))
         })?;
+        if !crate::token_action_policy::consent_action_acknowledged(suspected_noop, unacknowledged)
+        {
+            return Err(BrowserRefusal::new(BrowserRefusalCode::BrowserWrongTargetRefused, "the consent cancel action was not confirmed; inspect the prompt before taking another action")
+                .with_detail(serde_json::json!({"delivery":"unknown", "retryable":false})));
+        }
         dismissed = true;
         if Instant::now() >= deadline {
             return Err(BrowserRefusal::new(
@@ -465,8 +465,8 @@ async fn consent_action<T: Send + 'static>(
             operation().map_err(|error| {
                 BrowserRefusal::new(
                     BrowserRefusalCode::BrowserWrongTargetRefused,
-                    format!("the exact browser consent action failed: {error}"),
-                )
+                    format!("the exact browser consent action may have acted; inspect the prompt before retrying: {error}"),
+                ).with_detail(serde_json::json!({"delivery":"unknown", "retryable":false}))
             })
         })
     });
@@ -477,7 +477,9 @@ async fn consent_action<T: Send + 'static>(
         )
     })??;
     // The native helper may outlast our deadline. Join it, then refuse without fallback.
-    check_deadline(deadline)?;
+    check_deadline(deadline).map_err(|refusal| {
+        refusal.with_detail(serde_json::json!({"delivery":"unknown", "retryable":false}))
+    })?;
     Ok(result)
 }
 
@@ -494,7 +496,6 @@ pub async fn handle(
     let deadline = Instant::now() + Duration::from_secs(4);
     let mut saw_prompt = false;
     let mut accessibility_action_at = None;
-    let mut trusted_click_attempted = false;
     // Names are withheld: the snapshot shows the topology of the last walk
     // that failed to settle without leaking page or prompt text.
     let mut last_snapshot = serde_json::Value::Null;
@@ -526,24 +527,21 @@ pub async fn handle(
         match exact_allow_button(&tree.nodes, &tree.bounds)? {
             Some(index) if accessibility_action_at.is_none() => {
                 let node = walked_node(&tree.nodes, index)?;
-                consent_action(&request.action, deadline, move || {
-                    crate::atspi::perform_action_walked(pid, window_id, &node)
-                })
-                .await?;
+                // Stop on an ambiguous action: the trusted pixel fallback
+                // must not send Allow after the semantic action may have landed.
+                let (_, suspected_noop, unacknowledged) =
+                    consent_action(&request.action, deadline, move || {
+                        crate::atspi::perform_action_walked(pid, window_id, &node)
+                    })
+                    .await?;
+                if !crate::token_action_policy::consent_action_acknowledged(
+                    suspected_noop,
+                    unacknowledged,
+                ) {
+                    return Err(BrowserRefusal::new(BrowserRefusalCode::BrowserWrongTargetRefused, "the consent allow action was not confirmed; inspect the prompt before taking another action")
+                        .with_detail(serde_json::json!({"delivery":"unknown", "retryable":false})));
+                }
                 accessibility_action_at = Some(Instant::now());
-            }
-            Some(_)
-                if !trusted_click_attempted
-                    && accessibility_action_at.is_some_and(|attempted| {
-                        attempted.elapsed() >= Duration::from_millis(150)
-                    }) =>
-            {
-                let window_id = request.window_id;
-                consent_action(&request.action, deadline, move || {
-                    trusted_allow_click(pid, window_id)
-                })
-                .await?;
-                trusted_click_attempted = true;
             }
             None if saw_prompt && !prompt_present => {
                 if accessibility_action_at.is_some() {
@@ -563,6 +561,32 @@ pub async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_unanswered_allow_stops_after_one_semantic_action() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker_calls = calls.clone();
+        let result = consent_action(
+            &BrowserConsentAction::default(),
+            Instant::now() + Duration::from_secs(2),
+            move || {
+                worker_calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(crate::atspi::InputMayHaveLanded("allow did not answer".into()).into())
+            },
+        )
+        .await;
+        let refusal = result.expect_err("ambiguous consent must stop");
+        assert!(
+            refusal.message.contains("may have acted"),
+            "{}",
+            refusal.message
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn expired_action_never_enters_native_helper() {

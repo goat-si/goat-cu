@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.52.13](https://github.com/trycua/cua/compare/cua-driver-rs-v0.52.12...cua-driver-rs-v0.52.13) (2026-11-17)
+
+
+### Bug Fixes
+
+* **cua-driver:** refuse trusted browser ref clicks whose point misses the ref ([#7512](https://github.com/trycua/cua/issues/7512)) ([d4828ba](https://github.com/trycua/cua/commit/d4828ba823ebee34731777d74121171e4dd6ca14)), closes [#2882](https://github.com/trycua/cua/issues/2882)
+
+## [0.52.12](https://github.com/trycua/cua/compare/cua-driver-rs-v0.52.11...cua-driver-rs-v0.52.12) (2026-11-17)
+
+
+### Bug Fixes
+
+* **cua-driver:** bind driver and testkit test sockets under a short /tmp dir ([#7064](https://github.com/trycua/cua/issues/7064)) ([1e37800](https://github.com/trycua/cua/commit/1e378009d2ca26dc1ac8bd1dff11909ffc3ccac4))
+* **cua-driver:** run one macOS AppKit E2E cell alone from appkit-cells.tsv ([#7229](https://github.com/trycua/cua/issues/7229)) ([26cfef1](https://github.com/trycua/cua/commit/26cfef1c8b31eedf60da7e29e4b815da20480e64))
+
+## [0.52.11](https://github.com/trycua/cua/compare/cua-driver-rs-v0.52.10...cua-driver-rs-v0.52.11) (2026-11-17)
+
+
+### Bug Fixes
+
+* **cua-driver:** attach existing Chrome profiles after one consent, honestly ([#7999](https://github.com/trycua/cua/issues/7999)) ([4f023d7](https://github.com/trycua/cua/commit/4f023d72b4cb9acad4f1ad5fe9d853f6ae33871d))
+
+## [0.52.10](https://github.com/trycua/cua/compare/cua-driver-rs-v0.52.9...cua-driver-rs-v0.52.10) (2026-11-17)
+
+
+### Bug Fixes
+
+* **cua-driver:** document macOS background Save Automation consent ([#5776](https://github.com/trycua/cua/issues/5776)) ([70117cc](https://github.com/trycua/cua/commit/70117cca32f1a1176cefbb973c43e61eae14902c))
+* **cua-driver:** name the failed Hyprland input availability predicate ([#7983](https://github.com/trycua/cua/issues/7983)) ([3fca227](https://github.com/trycua/cua/commit/3fca227046f850648f6a1b60daa8fe0a6d4fb476))
+* **cua-driver:** re-land the exit wait and browser_type Enter fixes from [#4488](https://github.com/trycua/cua/issues/4488) and [#4499](https://github.com/trycua/cua/issues/4499) ([#7857](https://github.com/trycua/cua/issues/7857)) ([81423fc](https://github.com/trycua/cua/commit/81423fc06fca78f07c94176a497aeef9bef750bd))
+* **cua-driver:** stop re-sending input that may already have landed ([#5574](https://github.com/trycua/cua/issues/5574)) ([abc5c46](https://github.com/trycua/cua/commit/abc5c46ca7028100b2760190ab436c82688f5284))
+
+## [0.52.9](https://github.com/trycua/cua/compare/cua-driver-rs-v0.52.8...cua-driver-rs-v0.52.9) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cua-driver:** list Windows windows without UI Automation ([#7963](https://github.com/trycua/cua/issues/7963)) ([fb14e14](https://github.com/trycua/cua/commit/fb14e147baed6921f6a83b6791fb3864af0d6146))
+
+## [0.52.8](https://github.com/trycua/cua/compare/cua-driver-rs-v0.52.7...cua-driver-rs-v0.52.8) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cua-driver:** join the AT-SPI bus AT_SPI_BUS_ADDRESS names on Linux ([#7943](https://github.com/trycua/cua/issues/7943)) ([91b39fb](https://github.com/trycua/cua/commit/91b39fb16c6241539697cabc16377236b271bd23))
+* **cua-driver:** scale shared Electron PX points by the capture's frame_scale ([#7941](https://github.com/trycua/cua/issues/7941)) ([27de17c](https://github.com/trycua/cua/commit/27de17c945ca0a9221a2a3a26e90d99205021abd))
+
+## [0.52.7](https://github.com/trycua/cua/compare/cua-driver-rs-v0.52.6...cua-driver-rs-v0.52.7) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cua-driver:** map PX keyboard focus points on the nested cua-compositor ([#7937](https://github.com/trycua/cua/issues/7937)) ([c0a22bf](https://github.com/trycua/cua/commit/c0a22bf102e0c3b375f60638dbb962334fbb7289))
+
 ## [0.52.6](https://github.com/trycua/cua/compare/cua-driver-rs-v0.52.5...cua-driver-rs-v0.52.6) (2026-11-16)
 
 

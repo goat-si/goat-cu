@@ -1781,7 +1781,7 @@ async fn run_step(
         // error instead.
         let background_scope = crate::batch_scope::current()
             .is_some_and(|scope| scope.delivery() == crate::batch_scope::ScopeDelivery::Background);
-        if result.is_error == Some(true) && tool == "click" && !background_scope {
+        if result.proves_no_input() && tool == "click" && !background_scope {
             if let Some((menu_args, note)) = menu_bar_route(&args, &result) {
                 report["refound"] = json!(note);
                 let Some(next) = dispatch_action(registry, &gate, "invoke_menu", menu_args).await
@@ -1799,7 +1799,7 @@ async fn run_step(
                 refound_note = Some(note);
             }
         }
-        if result.is_error == Some(true) && refound_note.is_none() {
+        if result.proves_no_input() && refound_note.is_none() {
             if let Some((retry, note)) = refind_stale_target(locator, &args, &result).await {
                 report["refound"] = json!(note);
                 let Some(next) = dispatch_action(registry, &gate, tool, retry).await else {
@@ -2258,8 +2258,11 @@ fn fit_error_text(content: &mut Vec<Content>, budget: usize) {
 
 /// Whether a refusal names foreground delivery as the route that works:
 /// the target ignores background input (Electron, LibreOffice VCL, ...).
+/// Only a result that shows nothing was delivered is one, whatever it
+/// recommends: sending input that may have landed again could type or click
+/// twice.
 fn wants_foreground(result: &ToolResult) -> bool {
-    if terminal_instance_refusal(result) {
+    if terminal_instance_refusal(result) || !result.proves_no_input() {
         return false;
     }
     let structured = result.structured_content.as_ref();

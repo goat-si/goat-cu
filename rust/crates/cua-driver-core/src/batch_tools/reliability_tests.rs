@@ -125,7 +125,7 @@ async fn a_step_refused_for_background_delivery_says_how_or_falls_back() {
     let refused = "Background pixel click is not available for pid 2261: its libreoffice-vcl toolkit ignores background (PID-routed) mouse events. Retry this action with delivery_mode:\"foreground\"; Cua Driver will activate the window.";
     let result = harness
         .run(json!({"pid": 2261, "window_id": 181, "steps": [
-            {"tool": "click", "args": {"x": 217, "y": 779, "fail_message": refused}}
+            {"tool": "click", "args": {"x": 217, "y": 779, "fail_message": refused, "fail_not_delivered": true}}
         ]}))
         .await;
     assert_eq!(result.is_error, Some(true));
@@ -142,12 +142,83 @@ async fn a_step_refused_for_background_delivery_says_how_or_falls_back() {
     let _ = harness
         .run(
             json!({"pid": 2261, "window_id": 181, "foreground_fallback": true, "steps": [
-                {"tool": "click", "args": {"x": 217, "y": 779, "fail_message": refused}}
+                {"tool": "click", "args": {"x": 217, "y": 779, "fail_message": refused, "fail_not_delivered": true}}
             ]}),
         )
         .await;
     assert_eq!(harness.hits("click"), before + 2);
     assert_eq!(harness.last("click")["delivery_mode"], "foreground");
+}
+
+#[tokio::test]
+async fn a_step_whose_input_may_have_landed_is_never_replayed() {
+    let harness = Harness::new();
+    let hint = "Retry this action with delivery_mode:\"foreground\".";
+    let escalation = json!({"recommended": "foreground", "reason": "background route failed"});
+    // Each failure follows dispatch: the click may have landed, so sending it
+    // again in the foreground could click twice, whatever the hint says.
+    for structured in [
+        // An untyped legacy response does not prove delivery or non-delivery.
+        json!({"code": "background_unavailable", "suggestion": hint, "escalation": escalation}),
+        json!({"code": "background_unavailable", "effect": "no_drop", "escalation": escalation}),
+        json!({"code": "background_unavailable", "effect": "unverifiable",
+               "suggestion": hint, "escalation": escalation}),
+        json!({"code": "ax_timeout", "effect": "unknown", "escalation": escalation}),
+        json!({"code": "background_unavailable", "effect": "partial",
+               "delivery": {"mode": "background", "delivered_count": 2},
+               "escalation": escalation}),
+        json!({"effect": "unverifiable", "route": "accessibility",
+               "delivery": {"mode": "unknown"}}),
+        // Not a refusal either: a suspected no-op was still sent, and an
+        // effect this rule does not know cannot show that nothing was.
+        json!({"code": "background_unavailable", "effect": "suspected_noop",
+               "escalation": escalation}),
+        json!({"code": "background_unavailable", "effect": "not_yet_defined",
+               "suggestion": hint, "escalation": escalation}),
+        json!({"code": "background_unavailable", "effect": "refused",
+               "delivery": {"mode": "background", "delivered_count": 1},
+               "escalation": escalation}),
+    ] {
+        let before = harness.hits("click");
+        let result = harness
+            .run(
+                json!({"pid": 1, "window_id": 2, "foreground_fallback": true, "steps": [
+                    {"tool": "click", "args": {"x": 3, "y": 4, "fail_message": hint,
+                                               "fail_structured": structured}}
+                ]}),
+            )
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(harness.hits("click"), before + 1, "replayed: {structured}");
+        assert!(
+            !text(&result).contains("foreground_fallback"),
+            "{}",
+            text(&result)
+        );
+    }
+
+    // A refusal raised before any input was sent, or one that proves nothing
+    // landed (a macOS drag-and-drop that released without a drop), is still
+    // replayed once.
+    for structured in
+        [json!({"code": "background_unavailable", "effect": "refused", "escalation": escalation})]
+    {
+        let before = harness.hits("click");
+        let _ = harness
+            .run(
+                json!({"pid": 1, "window_id": 2, "foreground_fallback": true, "steps": [
+                    {"tool": "click", "args": {"x": 3, "y": 4, "fail_message": hint,
+                                               "fail_structured": structured, "fail_not_delivered": true}}
+                ]}),
+            )
+            .await;
+        assert_eq!(
+            harness.hits("click"),
+            before + 2,
+            "not replayed: {structured}"
+        );
+        assert_eq!(harness.last("click")["delivery_mode"], "foreground");
+    }
 }
 
 #[test]
@@ -383,7 +454,7 @@ async fn a_menu_bar_item_token_runs_as_invoke_menu() {
     );
     let refused = "Background input refused (element_outside_target_window): the addressed element could not be proven to belong to window 90";
     let result = harness
-        .run(json!({"steps": [{"tool": "click", "args": {"pid": 80, "window_id": 90, "element_token": "s0000a0e1:771", "fail_message": refused}}]}))
+        .run(json!({"steps": [{"tool": "click", "args": {"pid": 80, "window_id": 90, "element_token": "s0000a0e1:771", "fail_message": refused, "fail_not_delivered": true}}]}))
         .await;
     // The probe invoke_menu carries no action record, so only the routing
     // is checked here; the real tool reports its own outcome.
@@ -420,6 +491,7 @@ struct RerenderState {
     refusal: Option<&'static str>,
     click_calls: usize,
     plain_stale: bool,
+    ambiguous_stale: bool,
     read_refusal: Option<&'static str>,
 }
 
@@ -469,6 +541,11 @@ impl Tool for Rerender {
             }
             "click" => {
                 state.click_calls += 1;
+                if state.ambiguous_stale {
+                    return ToolResult::error("element_token is stale after a possible action")
+                        .with_structured(json!({"refusal":{"code":"stale_element_token"},"effect":"unverifiable"}))
+                        .with_disposition(cua_driver_contract::ErrorDisposition::UNCERTAIN);
+                }
                 if let Some(code) = state.refusal {
                     return ToolResult::error(
                         "element_token is stale; Retry with delivery_mode:\"foreground\"",
@@ -486,7 +563,10 @@ impl Tool for Rerender {
                 if !token.starts_with(&current) {
                     if state.plain_stale {
                         return ToolResult::error("element_token is stale")
-                            .with_structured(json!({"refusal":{"code":"stale_element_token"}}));
+                            .with_structured(json!({"refusal":{"code":"stale_element_token"}}))
+                            .with_disposition(
+                                cua_driver_contract::ErrorDisposition::NOT_DELIVERED,
+                            );
                     }
                     return ToolResult::error(
                         "Background input refused (element_outside_target_window): the addressed \
@@ -644,6 +724,25 @@ fn rerender_registry(
 }
 
 #[tokio::test]
+async fn stale_error_after_possible_delivery_never_refinds_or_acts_again() {
+    let (registry, state) = rerender_registry(425109, vec![("AXButton", "Save")]);
+    state.lock().unwrap().ambiguous_stale = true;
+    crate::window_state_view::remember_for_test(
+        "s0000fa14",
+        425109,
+        7,
+        "- [14] AXButton \"Save\"\n",
+    );
+    let result = registry.invoke(super::super::RUN_STEPS_TOOL, json!({
+        "steps":[{"tool":"click","args":{"pid":425109,"window_id":7,"element_token":"s0000fa14:14"}}]
+    })).await;
+    assert_eq!(result.is_error, Some(true));
+    let state = state.lock().unwrap();
+    assert_eq!(state.snapshot, 40, "no stale refind read");
+    assert_eq!(state.click_calls, 1, "no second click");
+}
+
+#[tokio::test]
 async fn a_stale_element_token_is_found_again_by_its_role_and_label() {
     let (registry, state) = rerender_registry(
         425104,
@@ -700,4 +799,23 @@ async fn a_stale_token_is_not_retried_when_its_label_is_ambiguous_or_unknown() {
         );
     }
     assert!(state.lock().unwrap().clicked.is_empty());
+}
+
+#[tokio::test]
+async fn no_delivery_evidence_never_replays_a_foreground_hint() {
+    let harness = Harness::new();
+    let hint = "Retry this action with delivery_mode:\"foreground\"";
+    let result = harness
+        .run(
+            json!({"pid":1,"window_id":2,"foreground_fallback":true,"steps":[
+                {"tool":"click","args":{"x":3,"y":4,"fail_message":hint}}
+            ]}),
+        )
+        .await;
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(
+        harness.hits("click"),
+        1,
+        "an unclassified send must not be replayed"
+    );
 }

@@ -302,6 +302,16 @@ impl BrowserRefusal {
     /// Render as a tool result. NOT an MCP protocol error: the call
     /// executed correctly and its outcome is the refusal, so `isError`
     /// stays unset and agents branch on `structuredContent.status`.
+    /// Preserve the refusal envelope while making a possibly delivered action
+    /// visible to action-result consumers as unverifiable.
+    pub(crate) fn to_unverifiable_tool_result(&self) -> ToolResult {
+        let mut result = self.to_tool_result();
+        if let Some(fields) = result.structured_content.as_mut() {
+            fields["effect"] = serde_json::json!("unverifiable");
+        }
+        result
+    }
+
     pub fn to_tool_result(&self) -> ToolResult {
         let text = format!("refused ({}): {}", self.code.as_str(), self.message);
         ToolResult::text(text).with_structured(serde_json::json!({

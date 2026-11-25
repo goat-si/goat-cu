@@ -370,7 +370,6 @@ pub struct SetupUiHandle {
     descriptor: &'static BrowserSetupDescriptor,
     trusted_setup_navigation: bool,
     enable_attempted: bool,
-    trusted_checkbox_fallback_attempted: bool,
     pub opened_setup_page: bool,
     pub enabled_remote_debugging: bool,
     pub focused_setup_address_field: bool,
@@ -398,7 +397,23 @@ impl SetupUiHandle {
         restored
     }
 
-    pub fn abort(mut self, error: BrowserRefusal) -> BrowserRefusal {
+    pub fn abort(mut self, mut error: BrowserRefusal) -> BrowserRefusal {
+        if !crate::token_action_policy::setup_abort_cleanup_safe(
+            self.enable_attempted,
+            self.enabled_remote_debugging,
+        ) {
+            let cause = error.detail.take();
+            error.message.push_str("; the setup toggle may have acted and its state could not be confirmed; inspect it before taking further action");
+            return error.with_detail(serde_json::json!({
+                "setup_side_effects": {
+                    "opened_setup_page": self.opened_setup_page,
+                    "enabled_remote_debugging": "unknown",
+                    "restored_remote_debugging": "unverified",
+                    "cleanup_skipped": true,
+                },
+                "cause": cause,
+            }));
+        }
         let enabled_remote_debugging = self.enabled_remote_debugging;
         let restored_remote_debugging = self.rollback_remote_debugging();
         let opened_setup_page = self.opened_setup_page;
@@ -532,7 +547,6 @@ fn open_setup_page(
         descriptor,
         trusted_setup_navigation: true,
         enable_attempted: false,
-        trusted_checkbox_fallback_attempted: false,
         opened_setup_page: true,
         enabled_remote_debugging: false,
         focused_setup_address_field: true,
@@ -566,7 +580,6 @@ fn set_remote_debugging(
             descriptor,
             trusted_setup_navigation: false,
             enable_attempted: false,
-            trusted_checkbox_fallback_attempted: false,
             opened_setup_page: false,
             enabled_remote_debugging: false,
             focused_setup_address_field: false,
@@ -600,95 +613,33 @@ fn set_remote_debugging(
                     return Ok(handle);
                 }
                 Some(_) if !handle.enable_attempted => {
-                    if let Err(error) = crate::atspi::perform_action_walked(pid, window_id, node) {
-                        return Err(handle.abort(BrowserRefusal::new(
-                            BrowserRefusalCode::BrowserWrongTargetRefused,
-                            format!("the exact checkbox action failed: {error}"),
-                        )));
-                    }
+                    // A toggle that failed after it was sent may have
+                    // switched remote debugging: read it back like a success,
+                    // so a rollback knows what to restore.
                     handle.enable_attempted = true;
-                }
-                Some(_)
-                    if descriptor.product == BrowserProduct::MicrosoftEdge
-                        && !handle.trusted_checkbox_fallback_attempted =>
-                {
-                    handle.trusted_checkbox_fallback_attempted = true;
-                    handle.foregrounded_window = true;
-                    let trusted_navigation = handle.trusted_setup_navigation;
-                    let clicked = with_target_foreground(
-                        pid,
-                        window_id,
-                        session_policy().setup,
-                        || {
-                            std::thread::sleep(Duration::from_millis(60));
-                            let tree = crate::atspi::walk_tree(pid, window_id, None);
-                            let checkbox = exact_setup_checkbox(
-                            &tree.nodes,
-                            descriptor,
-                            trusted_navigation,
-                        )
-                        .map_err(|error| anyhow::anyhow!(error.message))?
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "the exact Microsoft Edge remote-debugging checkbox became stale before the trusted click"
-                            )
-                        })?;
-                            if checkbox.checked == Some(desired_enabled) {
-                                return Ok(false);
-                            }
-                            if checkbox.checked != Some(!desired_enabled) {
-                                anyhow::bail!(
-                                "the exact Microsoft Edge remote-debugging checkbox had an unknown state before the trusted click"
-                            );
-                            }
-                            let index = checkbox.element_index.expect("actionable checkbox index");
-                            // The frame this walk recorded for the checkbox, not a
-                            // lookup of its index in another snapshot.
-                            let (x, y, width, height) = tree
-                                .bounds
-                                .iter()
-                                .find(|(bounded, ..)| *bounded == index)
-                                .map(|&(_, x, y, width, height)| (x, y, width, height))
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!(
-                                        "the exact Microsoft Edge remote-debugging checkbox had no screen bounds"
-                                    )
-                                })?;
-                            if width <= 1 || height <= 1 {
-                                anyhow::bail!(
-                                "the exact Microsoft Edge remote-debugging checkbox had empty screen bounds"
-                            );
-                            }
-                            let center_x = x
-                                .checked_add(i32::try_from(width / 2)?)
-                                .ok_or_else(|| anyhow::anyhow!("checkbox center x overflowed"))?;
-                            let center_y = y
-                                .checked_add(i32::try_from(height / 2)?)
-                                .ok_or_else(|| anyhow::anyhow!("checkbox center y overflowed"))?;
-                            if crate::desktop::desktop() != crate::desktop::Desktop::X11 {
-                                // AT-SPI screen bounds are layout coordinates, as in
-                                // browser_consent_ui's click_focused path, not
-                                // desktop-frame points, so no frame conversion applies.
-                                let space = crate::wayland::DesktopInputSpace::default();
-                                crate::wayland::click_desktop(&space, center_x, center_y, 1, 1)?;
-                            } else {
-                                crate::input::send_click_xtest_desktop(center_x, center_y, 1, 1)?;
-                            }
-                            Ok(true)
-                        },
-                    );
-                    match clicked {
-                        Ok(injected) => handle.injected_global_input |= injected,
+                    let action = crate::atspi::perform_action_walked(pid, window_id, node);
+                    match action {
+                        Ok((_, suspected_noop, unacknowledged))
+                            if crate::token_action_policy::consent_action_acknowledged(
+                                suspected_noop,
+                                unacknowledged,
+                            ) => {}
+                        Ok(_) => {
+                            return Err(handle.abort(BrowserRefusal::new(
+                                BrowserRefusalCode::BrowserWrongTargetRefused,
+                                "the exact checkbox action was not confirmed",
+                            )))
+                        }
                         Err(error) => {
                             return Err(handle.abort(BrowserRefusal::new(
                                 BrowserRefusalCode::BrowserWrongTargetRefused,
-                                format!(
-                                    "could not toggle the exact Microsoft Edge remote-debugging checkbox: {error}"
-                                ),
+                                format!("the exact checkbox action may have acted: {error}"),
                             )))
                         }
                     }
                 }
+                // A semantic action was already sent. Observe the checked
+                // state until the deadline; another click could toggle it twice.
                 Some(_) => {}
                 None => {
                     return Err(handle.abort(BrowserRefusal::new(

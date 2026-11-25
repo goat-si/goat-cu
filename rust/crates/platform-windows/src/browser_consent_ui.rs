@@ -431,6 +431,17 @@ pub fn dismiss(pid: u32, hwnd: u64) -> Result<bool, BrowserRefusal> {
             release_nodes(&tree.nodes);
             return Ok(dismissed);
         }
+        if dismissed {
+            release_nodes(&tree.nodes);
+            if Instant::now() >= deadline {
+                return Err(BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserWrongTargetRefused,
+                    "the remote-debugging consent prompt remained after its one cancel action",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
         let invoked = match exact_cancel_button(&tree.nodes) {
             Ok(Some(element)) => unsafe { invoke(element) },
             Ok(None) => Err(BrowserRefusal::new(

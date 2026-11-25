@@ -113,14 +113,11 @@ impl Tool for ListWindowsTool {
             None
         };
 
-        // z_index: list_windows merges EnumWindows first (which the Win32
-        // window manager returns in canonical top-to-bottom z-order), then
-        // appends any UIA-only HWNDs UIA found that EnumWindows missed
-        // (UIA-only entries land at the bottom of the z-stack — they have
-        // no canonical Win32 ordering). Higher list index = farther from
-        // front. Swift convention: higher z_index = closer to front.
-        // Invert via `(len - 1 - i)` so the front-most window gets the
-        // largest z.
+        // z_index: list_windows returns EnumWindows' top-to-bottom z-order
+        // first, then the immersive shell windows EnumWindows skips, which
+        // have no canonical Win32 ordering and land at the bottom. Swift
+        // convention: higher z_index = closer to front, so invert the index.
+
         // #299: the second start-time pass, for the pids this listing reports;
         // a label is kept only where it agrees with the first pass, so a pid
         // reused mid-read is omitted rather than guessed.

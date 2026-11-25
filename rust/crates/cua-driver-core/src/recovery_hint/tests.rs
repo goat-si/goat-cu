@@ -124,6 +124,10 @@ fn every_hint_variant_stays_within_the_length_limit() {
             json!({"code": "browser_consent_required"}),
         ),
         (
+            "browser_prepare",
+            json!({"code": "browser_consent_required", "detail": {"reason": "browser_consent_unanswered"}}),
+        ),
+        (
             "browser_click",
             json!({"code": "browser_input_trust_unavailable"}),
         ),
@@ -670,6 +674,20 @@ fn trusted_input_refusals_name_the_alternative_route_the_producer_gave() {
 }
 
 #[test]
+fn uncertain_trusted_browser_input_never_advises_retry() {
+    let hint = hint_for(
+        "browser_pointer",
+        &Seed::default(),
+        false,
+        json!({"status":"refused","refusal":{
+            "code":"browser_input_trust_unavailable", "detail":{"delivery":"unknown","retryable":false}
+        }}),
+    );
+    assert!(!hint.hint.contains("retry"), "{}", hint.hint);
+    assert!(!hint.hint.contains("synthetic"), "{}", hint.hint);
+}
+
+#[test]
 fn incomplete_browser_typing_reports_the_counts() {
     let hint = hint_for(
         "browser_type",
@@ -1079,4 +1097,36 @@ fn ax_timeout_does_not_recommend_an_unconfirmed_resend() {
     assert!(hint.hint.contains("do not resend"), "{}", hint.hint);
     assert!(!hint.hint.contains("retry"), "{}", hint.hint);
     assert!(!hint.hint.contains("aim by pixel"), "{}", hint.hint);
+}
+
+#[test]
+fn an_unanswered_browser_prompt_asks_the_user_to_allow_and_retries_the_attach() {
+    let hint = hint_for(
+        "browser_prepare",
+        &window_seed(),
+        true,
+        json!({"status": "refused", "refusal": {
+            "code": "browser_consent_required",
+            "detail": {"reason": "browser_consent_unanswered"},
+        }}),
+    );
+    assert!(
+        hint.hint.contains("Allow remote debugging?"),
+        "{}",
+        hint.hint
+    );
+    assert!(!hint.hint.contains("Retrying will not"), "{}", hint.hint);
+    let call = call_value(&hint);
+    assert_eq!(call["tool"], "browser_prepare");
+    assert_eq!(call["arguments"]["strategy"]["kind"], "existing_profile");
+    assert!(call["arguments"].get("delivery_mode").is_none());
+
+    // Missing authorization keeps its own advice.
+    let hint = hint_for(
+        "browser_prepare",
+        &window_seed(),
+        true,
+        json!({"status": "refused", "refusal": {"code": "browser_consent_required"}}),
+    );
+    assert!(hint.hint.contains("Retrying will not"), "{}", hint.hint);
 }

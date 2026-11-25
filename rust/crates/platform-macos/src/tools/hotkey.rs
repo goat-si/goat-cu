@@ -60,7 +60,9 @@ fn def() -> &'static ToolDef {
                 accept it); with an AX target, that element is focused first. When the combo is a menu item's \
                 key equivalent (cmd+s, cmd+w, ...) in a native app, a window-only request uses the same \
                 menu chord route as press_key, including frontmost apps. Disabled Save uses the scripting \
-                route for a document window. Another disabled item can fall back to keys after validation; \
+                route for a document window using Apple Events and per-app Automation consent; macOS may show \
+                its first-use consent prompt, and denied permission refuses the save. With --no-automation-prompts, \
+                missing consent refuses with `automation_consent_required`. Another disabled item can fall back to keys after validation; \
                 an element-targeted menu request can instead be refused.\n\
                 • `foreground`: briefly fronts the window so native menu key equivalents dispatch, then restores \
                 the prior frontmost app; with an AX target or x,y the focused field receives the chord (native \
@@ -1007,6 +1009,20 @@ mod tests {
             );
             assert!(result.is_err(), "{repeats}");
             assert_eq!(writes.get(), 1, "{repeats}");
+        }
+    }
+
+    #[test]
+    fn hotkey_discloses_background_save_automation_consent() {
+        let description = &def().description;
+        for phrase in [
+            "Apple Events",
+            "per-app Automation consent",
+            "first-use consent prompt",
+            "denied permission refuses the save",
+            "automation_consent_required",
+        ] {
+            assert!(description.contains(phrase), "missing disclosure: {phrase}");
         }
     }
 
