@@ -699,7 +699,7 @@ fn top_level_enumeration_preserves_unknown_and_empty() {
     let environment = Environment::new(Scenario::Union);
     let scope = EvidenceScope::start();
     let ledger = super::SkipLedger::start();
-    let roots = super::top_level_with(&environment, 1, 42, None, None);
+    let roots = super::top_level_with(&environment, 1, 42, None, None).0;
     assert_eq!(roots, [2, 3]);
     assert!(!ledger.finish());
     let observed = scope.finish(roots);
@@ -811,7 +811,7 @@ fn recovery_probe_preserves_failure_and_no_match() {
     ] {
         let environment = Environment::new(scenario);
         let scope = crate::ax::evidence::EvidenceScope::start();
-        let roots = super::top_level_with(&environment, 1, 42, Some(99), None);
+        let roots = super::top_level_with(&environment, 1, 42, Some(99), None).0;
         assert_eq!(roots, expected_roots);
         let observed = scope.finish(roots);
         assert!(observed
@@ -892,7 +892,8 @@ fn scope_candidate_reads_preserve_unknown_and_absent() {
             });
             let role_present = name != "AXRole" || case == 1;
             assert_eq!(id_calls.get(), usize::from(role_present));
-            let decision = decide_window_scope(&[observed.legacy], 42, None, || WindowOwner::SamePid);
+            let decision =
+                decide_window_scope(&[observed.legacy], 42, None, || WindowOwner::SamePid);
             if role_present {
                 assert_eq!(decision.scope, WindowScope::Matched);
             } else {

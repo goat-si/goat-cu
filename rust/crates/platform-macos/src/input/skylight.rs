@@ -141,8 +141,7 @@ pub fn prime_exact_window_key(
          window is {:?}, its focused element is in window {:?}), so no keys were sent: they \
          could have gone to another window of the same app. Close the other window, or use \
          delivery_mode:\"foreground\"",
-        now.window,
-        now.element_window
+        now.window, now.element_window
     ))
 }
 
@@ -2952,9 +2951,11 @@ pub fn with_foreground_hid_activation(
         anyhow::bail!("could not resolve target window for foreground HID delivery");
     }
 
-    let focused_window_id = crate::ax::bindings::focused_window_ids_of_pid(target_pid)
-        .or_else(|| crate::ax::bindings::inline_editor_open(target_pid, target_wid)
-            .then(|| crate::ax::exact_target::AxWindowId::window(target_wid)));
+    let focused_window_id =
+        crate::ax::bindings::focused_window_ids_of_pid(target_pid).or_else(|| {
+            crate::ax::bindings::inline_editor_open(target_pid, target_wid)
+                .then(|| crate::ax::exact_target::AxWindowId::window(target_wid))
+        });
     if preserves_exact_existing_focus(prev_ok, prev_psn, target_psn, focused_window_id, target_wid)
     {
         // Re-activating an already key exact window can clear Chromium's
@@ -2982,6 +2983,8 @@ pub fn with_foreground_hid_activation(
         if prev_ok {
             unsafe { set_front(prev_psn.as_ptr() as *const c_void, 0, 0x400) };
         }
+        // The raise above may still have covered the agent cursor's overlay.
+        crate::cursor::overlay::request_repin();
         anyhow::bail!(
             "exact target window did not become focused for foreground HID delivery{}",
             focus_failure_hint(target_pid, target_wid)
@@ -2994,6 +2997,8 @@ pub fn with_foreground_hid_activation(
     if prev_ok {
         unsafe { set_front(prev_psn.as_ptr() as *const c_void, 0, 0x400) };
     }
+    // The raise put the target window over the agent cursor's overlay.
+    crate::cursor::overlay::request_repin();
 
     result
 }

@@ -866,7 +866,7 @@ impl Tool for GetWindowStateTool {
                 let mut published_snapshot = false;
                 let mut invalidated = Vec::new();
 
-                if let Some(tr) = tree_opt {
+                if let Some(mut tr) = tree_opt {
                     let source_trusted = tr.trusted;
                     let source_degraded_reason = tr.degraded_reason.clone();
                     let count = tr
@@ -1037,6 +1037,15 @@ impl Tool for GetWindowStateTool {
                     structured["total_element_count"] = json!(count);
                     structured["returned_element_count"] = json!(elements.len());
                     structured["elements"] = json!(elements);
+                    // Display-only rows of a window-scoped native walk. An
+                    // application-wide tree would mix in other windows' text.
+                    cua_driver_core::element_query::publish_native_observations(
+                        &mut structured,
+                        std::mem::take(&mut tr.observations),
+                        query.as_deref(),
+                        target_scoped && tr.window_scoped,
+                        tr.trusted,
+                    );
                     // Surface 6: snapshot id mirror for debug correlation.
                     if let Some(snapshot_id) = snapshot_id {
                         structured["snapshot_id"] = json!(

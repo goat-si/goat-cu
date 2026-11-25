@@ -80,3 +80,17 @@ platform: that answer's rows belong to the earlier read. On macOS and Windows
 from: once the pid names another process start, using them refuses with
 `process_instance_mismatch` (`process_instance_unverified` when the identity
 could not be read). Linux tokens are not bound to the process yet.
+
+`elements` holds addressable rows only. With `tree_format: "elements"` or
+`"both"`, `get_window_state` also returns `observations`: the display-only
+rows of the same walk (static text, labels, read-only values) with `role`,
+`depth`, `label`, `value`, `frame` and `parent_index`, but no `element_index`
+or `element_token`. No action tool accepts them. A `query` keeps the
+observations whose role, label or value contains it. The list stops at 500
+rows and then carries `observations_truncated: true`. A platform that cannot
+observe these rows leaves `observations` out, which means not observed, never
+empty. `verify_state` searches `elements` first and `observations` after, so
+a predicate on display text such as Calculator's result can be satisfied.
+It treats a missing element as absent only when the walk is complete and
+`observations` is present and not truncated; otherwise the result is
+`unknown`. Values are compared exactly, including bidi marks such as U+200E.

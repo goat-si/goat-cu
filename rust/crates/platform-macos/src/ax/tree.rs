@@ -673,6 +673,25 @@ pub struct TreeWalkResult {
     /// Offscreen rows a windowed read left unwalked, one entry per summary
     /// line. Empty when every row was walked.
     pub offscreen_rows: Vec<super::dense_rows::OffscreenRows>,
+    /// Top-level AX counts when the requested window could not be resolved.
+    pub ax_enumeration: Option<AXEnumerationSummary>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AXEnumerationSummary {
+    pub children_count: usize,
+    pub windows_count: usize,
+    pub union_count: usize,
+    pub ax_window_count: usize,
+    pub mapped_window_count: usize,
+}
+
+impl AXEnumerationSummary {
+    fn count_windows(&mut self, candidates: &[TopLevelCandidate]) {
+        let windows = candidates.iter().filter(|c| c.role == "AXWindow");
+        self.ax_window_count = windows.clone().count();
+        self.mapped_window_count = windows.filter(|c| c.ax_window_id.is_some()).count();
+    }
 }
 
 #[cfg(test)]
@@ -688,6 +707,7 @@ impl TreeWalkResult {
             walk: cua_driver_core::walk_budget::WalkBudget::nodes_only(usize::MAX).outcome(),
             window_scope: None,
             offscreen_rows: Vec::new(),
+            ax_enumeration: None,
         }
     }
 }
@@ -1360,6 +1380,7 @@ where
     let offscreen_rows;
     let mut batching_disabled = false;
     let window_scope;
+    let ax_enumeration;
 
     {
         let Some(app_elem) = create_application_with(environment, pid).into_walk_legacy() else {
@@ -1370,6 +1391,7 @@ where
             return (
                 TreeWalkResult {
                     offscreen_rows: Vec::new(),
+                    ax_enumeration: None,
                     tree_markdown: String::new(),
                     nodes,
                     truncated: false,
@@ -1387,9 +1409,10 @@ where
             );
         };
 
-        let (mut top_level, walk_these, resolved_scope) =
+        let (mut top_level, walk_these, resolved_scope, enumeration) =
             resolve_top_level_with(environment, app_elem, pid, window_id, &mut budget);
         window_scope = resolved_scope;
+        ax_enumeration = enumeration;
 
         let mut label_claims = Vec::new();
 
@@ -1574,7 +1597,7 @@ where
         environment.release_application(app_elem);
     }
 
-    let (result, sample) = finalize_with_deadline_sample(
+    let (mut result, sample) = finalize_with_deadline_sample(
         lines,
         nodes,
         offscreen_rows,
@@ -1584,6 +1607,7 @@ where
         window_scope,
         |budget| environment.budget_expired(budget),
     );
+    result.ax_enumeration = ax_enumeration;
     (result, Some(sample))
 }
 
@@ -1647,6 +1671,7 @@ fn finalize_with_deadline_sample(
             nodes_skipped,
             depth_truncated,
             window_scope,
+            None,
         ),
         final_deadline_sample,
     )
@@ -1924,6 +1949,7 @@ fn finalize_walk(
     nodes_skipped: bool,
     depth_truncated: bool,
     window_scope: Option<WindowScope>,
+    ax_enumeration: Option<AXEnumerationSummary>,
 ) -> TreeWalkResult {
     nodes.retain(|n| n.role != "AXTabStripSummary");
     let mut line_nodes = align_line_nodes(&lines, &nodes);
@@ -1948,6 +1974,7 @@ fn finalize_walk(
         depth_truncated,
         walk,
         window_scope,
+        ax_enumeration,
     }
 }
 
@@ -1960,7 +1987,12 @@ fn resolve_top_level_with<E: AxWalkEnvironment>(
     pid: i32,
     window_id: Option<u32>,
     budget: &mut WalkBudget,
-) -> (Vec<E::Element>, Vec<E::Element>, Option<WindowScope>) {
+) -> (
+    Vec<E::Element>,
+    Vec<E::Element>,
+    Option<WindowScope>,
+    Option<AXEnumerationSummary>,
+) {
     let mut launch_wait = LaunchWait::new(budget.time_limit());
     loop {
         let attempt_started = environment.now();
@@ -1968,14 +2000,14 @@ fn resolve_top_level_with<E: AxWalkEnvironment>(
         let recovery_deadline = budget
             .time_limit()
             .and_then(|limit| attempt_started.checked_add(limit));
-        let mut top_level =
+        let (mut top_level, mut enumeration) =
             top_level_with(environment, app_elem, pid, window_id, recovery_deadline);
         let Some(wid) = window_id else {
             let walk = top_level.clone();
-            return (top_level, walk, None);
+            return (top_level, walk, None, None);
         };
         let (mut decision, incomplete_scope) =
-            scope_top_level_with(environment, &top_level, pid, wid);
+            scope_top_level_counted(environment, &top_level, pid, wid, &mut enumeration);
         if !incomplete_scope && matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
             if let Some((parent_window_id, sheet)) =
                 window_holding_sheet_with(environment, &top_level, wid)
@@ -2006,7 +2038,9 @@ fn resolve_top_level_with<E: AxWalkEnvironment>(
             .iter()
             .map(|&index| top_level[index])
             .collect();
-        return (top_level, walk, Some(decision.scope));
+        let diagnostic =
+            matches!(decision.scope, WindowScope::AxUnresolved { .. }).then_some(enumeration);
+        return (top_level, walk, Some(decision.scope), diagnostic);
     }
 }
 
@@ -2022,17 +2056,29 @@ fn top_level_with<E: AxWalkEnvironment>(
     pid: i32,
     window_id: Option<u32>,
     recovery_deadline: Option<Instant>,
-) -> Vec<E::Element> {
+) -> (Vec<E::Element>, AXEnumerationSummary) {
     let children = environment.children(app_elem);
+    let children_count = match &children.legacy {
+        Read::Known(items) => items.len(),
+        _ => 0,
+    };
+    let windows = environment.windows(app_elem, pid, window_id);
+    let windows_count = windows.legacy.len();
     // A requested window on another Space is absent from AXWindows; the
     // `_including` variant recovers it by exact CGWindowID.
     let mut top_level = top_level_union_with(
         children,
-        || environment.windows(app_elem, pid, window_id),
+        || windows,
         |existing, candidate| environment.same(*existing, *candidate),
         |duplicate| environment.release(duplicate),
     );
 
+    let enumeration = AXEnumerationSummary {
+        children_count,
+        windows_count,
+        union_count: top_level.len(),
+        ..Default::default()
+    };
     if let Some(wid) = window_id {
         let already_present = top_level.iter().any(|&element| {
             environment.set_element_timeout(element);
@@ -2060,7 +2106,7 @@ fn top_level_with<E: AxWalkEnvironment>(
             }
         }
     }
-    top_level
+    (top_level, enumeration)
 }
 
 /// Union retained observations by identity; duplicates surrender their own
@@ -2232,11 +2278,28 @@ fn children_or_skipped<T>(read: Option<Vec<T>>) -> Vec<T> {
 }
 
 /// Decide which of `top_level` a walk scoped to `wid` covers.
+#[cfg(test)]
 fn scope_top_level_with<E: AxWalkEnvironment>(
     environment: &E,
     top_level: &[E::Element],
     pid: i32,
     wid: u32,
+) -> (ScopeDecision, bool) {
+    scope_top_level_counted(
+        environment,
+        top_level,
+        pid,
+        wid,
+        &mut AXEnumerationSummary::default(),
+    )
+}
+
+fn scope_top_level_counted<E: AxWalkEnvironment>(
+    environment: &E,
+    top_level: &[E::Element],
+    pid: i32,
+    wid: u32,
+    enumeration: &mut AXEnumerationSummary,
 ) -> (ScopeDecision, bool) {
     let observations: Vec<_> = top_level
         .iter()
@@ -2257,6 +2320,7 @@ fn scope_top_level_with<E: AxWalkEnvironment>(
         .into_iter()
         .map(|o| o.into_walk_legacy())
         .collect();
+    enumeration.count_windows(&candidates);
     // GOAT's walk keeps the AXWindows read in its evidence; the AX error
     // name (upstream #7192) is not threaded into the scope decision.
     if incomplete {
@@ -2696,7 +2760,11 @@ fn walk_element<S: AxTreeSource>(
         let attrs = match scroll_attrs.take() {
             Some(attrs) => Some(attrs),
             None => super::content_attrs::read_content_attrs_with(
-                source, element, &role, budget, batching_disabled,
+                source,
+                element,
+                &role,
+                budget,
+                batching_disabled,
             ),
         };
         let named = attrs.as_ref().is_some_and(|attrs| {
@@ -2705,12 +2773,27 @@ fn walk_element<S: AxTreeSource>(
         if named || exhaustive_nodes() {
             let mut node = match attrs {
                 Some(attrs) => {
-                    if attrs.read_failed { note_skipped(); }
-                    display_node(&role, attrs, source.key(element), depth, parent_index, in_web_content)
+                    if attrs.read_failed {
+                        note_skipped();
+                    }
+                    display_node(
+                        &role,
+                        attrs,
+                        source.key(element),
+                        depth,
+                        parent_index,
+                        in_web_content,
+                    )
                 }
                 None => {
                     note_skipped();
-                    role_only_node(role.clone(), source.key(element), depth, parent_index, in_web_content)
+                    role_only_node(
+                        role.clone(),
+                        source.key(element),
+                        depth,
+                        parent_index,
+                        in_web_content,
+                    )
                 }
             };
             node.canonical.role_read = role_read;
@@ -2720,9 +2803,24 @@ fn walk_element<S: AxTreeSource>(
             note_skipped();
         }
         walk_children(
-            source, element, surface, &role, depth + usize::from(named), child_walk_depth(&role, walk_depth),
-            parent_index, child_label_path, in_web_content, nodes, lines, counter, budget,
-            batching_disabled, max_depth, include_web_content, deferred, label_claims,
+            source,
+            element,
+            surface,
+            &role,
+            depth + usize::from(named),
+            child_walk_depth(&role, walk_depth),
+            parent_index,
+            child_label_path,
+            in_web_content,
+            nodes,
+            lines,
+            counter,
+            budget,
+            batching_disabled,
+            max_depth,
+            include_web_content,
+            deferred,
+            label_claims,
         );
         return;
     }
@@ -4408,6 +4506,34 @@ mod tests {
     }
     use std::cell::Cell;
 
+    /// Issue #4039: an unresolved scope reports how many top-level AXWindows
+    /// the SPI mapped to any CGWindowID, apart from how many there were.
+    #[test]
+    fn enumeration_counts_windows_and_mapped_windows_only() {
+        let mut enumeration = AXEnumerationSummary {
+            children_count: 3,
+            windows_count: 2,
+            union_count: 4,
+            ..AXEnumerationSummary::default()
+        };
+        enumeration.count_windows(&[
+            TopLevelCandidate::new("AXMenuBar", None),
+            TopLevelCandidate::new("AXWindow", Some(11)),
+            TopLevelCandidate::new("AXWindow", None),
+            TopLevelCandidate::new("AXSheet", Some(12)),
+        ]);
+        assert_eq!(
+            enumeration,
+            AXEnumerationSummary {
+                children_count: 3,
+                windows_count: 2,
+                union_count: 4,
+                ax_window_count: 2,
+                mapped_window_count: 1,
+            }
+        );
+    }
+
     #[test]
     fn querying_spliced_rows_keeps_ancestors_and_never_matches_offscreen_hints() {
         let md = "- [0] AXWindow \"Example\"\n  - [1] AXTable \"History\"\n    - (offscreen rows: 2; scroll the list, or pass query to search them)\n    - (11 inactive tabs omitted)\n    - [2] AXRow \"Message\"\n      - AXStaticText = \"needle\"\n  - [3] AXTextArea \"Compose\"\n";
@@ -4705,7 +4831,6 @@ mod tests {
         assert_eq!(live, Some(1));
         assert_eq!(calls.get(), 1);
     }
-
 }
 
 #[cfg(test)]
@@ -4808,8 +4933,10 @@ mod lean_row_tests {
             node("AXStaticText", Some(35), None, Some("line 02"), &[]),
         ];
         let mut lines = vec![
-            (0, format_node_line(&nodes[0])), (1, format_node_line(&nodes[1])),
-            (2, format_node_line(&nodes[2])), (2, format_node_line(&nodes[3])),
+            (0, format_node_line(&nodes[0])),
+            (1, format_node_line(&nodes[1])),
+            (2, format_node_line(&nodes[2])),
+            (2, format_node_line(&nodes[3])),
             (2, format_node_line(&nodes[4])),
         ];
         prune(&mut lines, &nodes);

@@ -438,6 +438,7 @@ fn run_fake_inner(
         ledger.finish(),
         depth_truncated,
         None,
+        None,
     )
 }
 

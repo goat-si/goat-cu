@@ -3,7 +3,7 @@
 [package]
 name = "cua-telemetry"
 description = "Anonymous, content-free product telemetry shared by the cua SDK, the `cua` CLI, `cua daemon`, cua-spacesd, the Spaces app and cua-driver: one schema, one install id, one set of switches."
-version = "0.28.1"
+version = "0.28.2"
 edition = "2024"
 # Not the libs/cua workspace's 1.97: cua-driver links this crate, and the
 # driver's Nix package builds with nixpkgs stable's rustc (1.95 in 26.05).

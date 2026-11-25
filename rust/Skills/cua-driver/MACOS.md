@@ -161,6 +161,9 @@ keep their separate menu route and can refuse a disabled item. macOS asks
 the user once to allow Cua Driver to control the app (Automation) the first
 time a scripting route runs; when that is off, the call refuses and nothing is
 saved.
+With `x`,`y` or an element in web content, a background menu key equivalent
+focuses the requested field through the checked pixel focus route before invoking
+the menu item.
 
 For unattended use, start `cua-driver serve --no-automation-prompts` before
 connecting `cua-driver mcp --socket <path>`. MCP's auto-started daemon does not

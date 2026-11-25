@@ -848,6 +848,9 @@ fn transport_from_legacy(
             ActionTransport::LinuxCuaCompositorInject
         }
         "hid" | "cgevent_hid" | "cgevent_fg" => ActionTransport::MacosCgEventHid,
+        // A GTK 3 app held AppKit-active by the activation event, with the
+        // click posted to its pid as NSEvent-built events.
+        "appkit_activated" => ActionTransport::MacosCgEventPid,
         "cgevent" => {
             if args
                 .get("delivery_mode")
@@ -2216,6 +2219,7 @@ mod tests {
             "cgevent_hid",
             "cgevent",
             "cgevent_fg",
+            "appkit_activated",
             "dom_event",
             "trusted",
             "key_events",

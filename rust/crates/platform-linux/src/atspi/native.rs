@@ -2583,9 +2583,18 @@ fn sibling_ordinal(visited: &[Visited<'_>], _parents: &[Option<usize>], pos: usi
 /// (`perform_action`, `focus_element`, `set_value`, …), and those resolve an
 /// index against the whole application. Renumbering per window would make a
 /// window-scoped snapshot's indices name different elements at actuation time.
-fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<AtspiNode>) {
+/// One walk rendered three ways: the Markdown tree, the indexed nodes, and
+/// the display-only rows the tree shows without an index.
+struct Rendered {
+    markdown: String,
+    nodes: Vec<AtspiNode>,
+    observations: Vec<cua_driver_contract::WindowObservation>,
+}
+
+fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> Rendered {
     let mut md = String::new();
     let mut nodes = Vec::new();
+    let mut observations = Vec::new();
     let mut idx = 0usize;
     // The real AT-SPI parent of every node, so `parent_element_index` is the
     // nearest *indexed ancestor* — never a preceding cousin at a lower depth
@@ -2736,16 +2745,40 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
             });
             idx += 1;
         } else if emit && !v.name.is_empty() && v.showing {
-            md.push_str(&format!(
-                "{indent}- {role} = \"{name}\"
-",
-                role = v.role,
-                name = v.name,
-            ));
+            let security_meta = FieldSecurityMeta {
+                role: &v.role,
+                subrole: None,
+                title: Some(&v.name),
+                description: (!v.description.is_empty()).then_some(v.description.as_str()),
+                placeholder: None,
+                identifier: None,
+                help: None,
+                is_password_flag: v.is_password,
+            };
+            let (label, value) = cua_driver_core::element_query::native_observation_text(
+                &security_meta,
+                Some(v.name.clone()),
+                v.value.clone(),
+            );
+            let label = label.unwrap_or_default();
+            md.push_str(&format!("{indent}- {role} = \"{label}\"\n", role = v.role));
+            observations.push(cua_driver_contract::WindowObservation {
+                role: v.role.clone(),
+                depth: v.depth as u32,
+                label: Some(label),
+                value: value.filter(|value| !value.is_empty()),
+                frame: None,
+                parent_index: parent_element_index.map(|index| index as u64),
+                in_web_content: v.in_web_doc.then_some(true),
+            });
         }
     }
 
-    (md, nodes)
+    Rendered {
+        markdown: md,
+        nodes,
+        observations,
+    }
 }
 
 /// The bracketed attributes of an indexed row: `enabled=false` for a disabled
@@ -2898,6 +2931,8 @@ pub fn walk_tree(pid: u32) -> Result<Option<(String, Vec<AtspiNode>)>> {
 pub struct WalkedTree {
     pub markdown: String,
     pub nodes: Vec<AtspiNode>,
+    /// Display-only rows of the walk (shown in `markdown` without an index).
+    pub observations: Vec<cua_driver_contract::WindowObservation>,
     pub bounds: Vec<(usize, i32, i32, u32, u32)>,
     /// True when a non-zero `xid` was resolved to exactly one application
     /// top-level and the snapshot contains only that window's nodes. False
@@ -2954,6 +2989,7 @@ pub(super) fn walk_tree_bounded_with_timeout(
                 return Ok(Some(WalkedTree {
                     markdown: String::new(),
                     nodes: Vec::new(),
+                    observations: Vec::new(),
                     bounds: Vec::new(),
                     window_scoped: false,
                     truncation: Some(Truncation {
@@ -2971,6 +3007,7 @@ pub(super) fn walk_tree_bounded_with_timeout(
                 return Ok(Some(WalkedTree {
                     markdown: String::new(),
                     nodes: Vec::new(),
+                    observations: Vec::new(),
                     bounds: Vec::new(),
                     window_scoped: false,
                     truncation: Some(Truncation {
@@ -2992,7 +3029,11 @@ pub(super) fn walk_tree_bounded_with_timeout(
             return Ok(None);
         };
         let walk_elapsed = walk_started.elapsed();
-        let (markdown, nodes) = render(&visited, scoped_frame);
+        let Rendered {
+            markdown,
+            nodes,
+            observations,
+        } = render(&visited, scoped_frame);
         let bounds_started = std::time::Instant::now();
         // Bounds resolution shares the deadline, but a walk that consumed the
         // whole budget must still yield *some* frames (element-index clicks
@@ -3039,6 +3080,7 @@ pub(super) fn walk_tree_bounded_with_timeout(
         Ok(Some(WalkedTree {
             markdown,
             nodes,
+            observations,
             bounds,
             window_scoped: scoped_frame.is_some(),
             truncation,

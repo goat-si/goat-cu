@@ -132,7 +132,9 @@ impl Tool for SetValueTool {
 
         let evidence = crate::process_identity::evidence(&args, pid).await;
         let (element_index, window_id, element_guard) = match latency::resolve(|| {
-            self.state.snapshots.resolve_for_instance(pid, &args, evidence)
+            self.state
+                .snapshots
+                .resolve_for_instance(pid, &args, evidence)
         }) {
             Ok(cua_driver_core::element_token::ResolvedElement::None) => {
                 return super::invalid_arguments(
@@ -389,7 +391,6 @@ impl Tool for SetValueTool {
             Some((element_ptr, Some(element_index))),
             Some(window_id),
         );
-
         // ── Focus-suppression wrap (Swift WindowChangeDetector + FocusGuard) ──
         // AXValue writes on popups / sliders can cause reflex activations
         // in Chromium-based apps; the AXPopUpButton path also AXPresses a
@@ -1584,7 +1585,9 @@ struct LiveAxValueOps {
 }
 impl AxValueOps for LiveAxValueOps {
     fn read_typed(&mut self) -> ValueRead {
-        unsafe { crate::ax::enablement::flush_pending_web_updates_for_element(self.pid, self.element) };
+        unsafe {
+            crate::ax::enablement::flush_pending_web_updates_for_element(self.pid, self.element)
+        };
         read_value_if_allowed(
             &mut crate::ax::label_reader::NativeLabelReader,
             self.element,

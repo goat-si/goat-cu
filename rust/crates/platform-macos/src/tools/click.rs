@@ -2827,15 +2827,20 @@ impl ClickTool {
                     let hit = pointer_hit(element);
                     // An element that does not advertise AXPress can still
                     // accept it as a no-op. On a toolkit that drops routed
-                    // mouse events (LibreOffice's Calc cells) that no-op used
-                    // to come back as a pressed click; fall through so the
-                    // pixel route refuses instead.
+                    // mouse events (LibreOffice's Calc cells) or only takes
+                    // them while active (GTK 3) that no-op used to come back
+                    // as a pressed click; fall through to the pixel route.
                     if !focus_only
                         && !crate::ax::bindings::copy_action_names(element)
                             .iter()
                             .any(|action| action == "AXPress")
-                        && crate::input::pointer_toolkit::detect(pid)
-                            == Some(crate::input::pointer_toolkit::PointerReadingToolkit::Vcl)
+                        && matches!(
+                            crate::input::pointer_toolkit::detect(pid),
+                            Some(
+                                crate::input::pointer_toolkit::PointerReadingToolkit::Vcl
+                                    | crate::input::pointer_toolkit::PointerReadingToolkit::GdkQuartz
+                            )
+                        )
                     {
                         CFRelease(element as _);
                         return Ok(PxAxPress::FallThrough);
@@ -3049,10 +3054,17 @@ impl ClickTool {
             {
                 return refusal;
             }
-            let route = match super::pixel_route::resolve(pid, fg, window_id, "mouse_click").await {
-                Ok(route) => route,
-                Err(refusal) => return refusal,
+            let gesture = if button_str == "left" && modifiers.is_empty() {
+                super::pixel_route::PointerGesture::LeftClick
+            } else {
+                super::pixel_route::PointerGesture::Other
             };
+            let route =
+                match super::pixel_route::resolve(pid, fg, window_id, "mouse_click", gesture).await
+                {
+                    Ok(route) => route,
+                    Err(refusal) => return refusal,
+                };
             let activation_policy = pixel_activation_policy(&button_str, fg, window_id.is_some());
             let target_stamp = crate::ax::enablement::process_start_stamp(pid);
             // ── Focus-suppression wrap (Swift WindowChangeDetector + FocusGuard) ──

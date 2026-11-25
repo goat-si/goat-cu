@@ -738,6 +738,7 @@ mod tests {
                     depth_truncated: false,
                     walk: budget.outcome(),
                     window_scope: None,
+                    ax_enumeration: None,
                 })?;
             }
             Ok::<_, BrowserRefusal>(())

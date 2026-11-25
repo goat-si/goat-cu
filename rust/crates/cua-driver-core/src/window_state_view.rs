@@ -87,7 +87,7 @@ pub fn schema_properties() -> Value {
         "tree_format": {
             "type": "string",
             "enum": ["markdown", "elements", "both"],
-            "description": "Which tree representation to return. Default \"markdown\": the compact `tree_markdown` only, where a row `[N]` is addressed with element_token `<snapshot_id>:N`. \"elements\": the structured `elements` array only (per-element element_token, frame, parent_index, value). \"both\": the two together, as before; roughly doubles the size."
+            "description": "Which tree representation to return. Default \"markdown\": the compact `tree_markdown` only, where a row `[N]` is addressed with element_token `<snapshot_id>:N`. \"elements\": the structured `elements` array only (per-element element_token, frame, parent_index, value), plus `observations`: display-only rows such as static text, with role, label, value and frame but no element_token, for reading and verify_state only. \"both\": the two together, as before; roughly doubles the size."
         },
         "since": {
             "type": "string",
@@ -586,6 +586,8 @@ pub fn apply(
             retain_elements(structured, opts.tree_format);
             if let Some(obj) = structured.as_object_mut() {
                 obj.remove("tree_markdown");
+                obj.remove("observations");
+                obj.remove("observations_truncated");
             }
             if structured.get("truncated").and_then(Value::as_bool) == Some(true) {
                 if let (Some(sid), Some(last)) = (
@@ -910,10 +912,15 @@ fn trim_metadata(opts: &ViewOptions, structured: &mut Value) {
     }
 }
 
-/// Keep `elements` per the requested format: dropped whole for markdown,
-/// otherwise left exactly as the backend built them, so
-/// `returned_element_count` keeps describing the array.
+/// Retain full structured elements for diff reads; display-only observations are
+/// omitted in Markdown and diff responses.
 fn retain_elements(structured: &mut Value, format: TreeFormat) {
+    if let Some(obj) = structured.as_object_mut() {
+        if format == TreeFormat::Markdown {
+            obj.remove("observations");
+            obj.remove("observations_truncated");
+        }
+    }
     if format == TreeFormat::Markdown {
         if let Some(obj) = structured.as_object_mut() {
             obj.remove("elements");
@@ -1781,6 +1788,7 @@ mod tests {
             "window_id": 7, "pid": 9, "snapshot_id": sid,
             "tree_markdown": md,
             "elements": [{"element_index": 1}, {"element_index": 2}],
+            "observations": [{"role": "AXStaticText", "depth": 1, "value": "6"}],
             "_note": "n", "background_input": {"routes": []},
             "element_count": 4
         });
@@ -2433,6 +2441,7 @@ mod tests {
         let (mut content, mut s) = payload("s000000a1", OLD);
         apply(&opts(json!({})), &ctx(7001), &mut content, &mut s);
         assert!(s.get("elements").is_none());
+        assert!(s.get("observations").is_none());
         assert!(s.get("_note").is_none());
         assert!(s.get("background_input").is_none());
         assert_eq!(s["tree_markdown"], OLD);
@@ -2739,6 +2748,10 @@ mod tests {
         );
         assert!(s.get("tree_markdown").is_none());
         assert_eq!(s["elements"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            s["observations"],
+            json!([{"role": "AXStaticText", "depth": 1, "value": "6"}])
+        );
         assert!(!text_of(&content).contains("AXButton"));
     }
 
@@ -2947,6 +2960,7 @@ mod tests {
             let output: WindowStateOutput = serde_json::from_value(s2.clone()).unwrap();
             assert_eq!(output.validate(), Ok(()), "{format}");
             assert_eq!(s2["since_status"], "diff", "{format}");
+            assert!(s2.get("observations").is_none(), "{format}");
             assert_eq!(s2["elements"].as_array().unwrap().len(), 3, "{format}");
             assert_eq!(s2["returned_element_count"], 3, "{format}");
             assert_eq!(s2["total_element_count"], 4, "{format}");

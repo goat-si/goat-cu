@@ -598,7 +598,14 @@ impl RightClickTool {
         {
             return refusal;
         }
-        let route = match super::pixel_route::resolve(pid, fg, window_id, "mouse_right_click").await
+        let route = match super::pixel_route::resolve(
+            pid,
+            fg,
+            window_id,
+            "mouse_right_click",
+            super::pixel_route::PointerGesture::Other,
+        )
+        .await
         {
             Ok(route) => route,
             Err(refusal) => return refusal,

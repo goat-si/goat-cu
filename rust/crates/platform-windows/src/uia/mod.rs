@@ -26,7 +26,7 @@ use cua_driver_core::snapshot_compaction::{
 };
 use cua_driver_core::walk_budget::WalkBudget;
 use windows::core::{Interface, BSTR, HRESULT};
-use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
+use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, TRUE};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::UI::Accessibility::{
     ExpandCollapseState_Collapsed, ExpandCollapseState_Expanded,
@@ -104,6 +104,10 @@ pub struct UiaNode {
     /// ExpandCollapsePattern state: `PartiallyExpanded` counts as expanded. `None` for a
     /// leaf node, or when the element has no ExpandCollapsePattern.
     pub expanded: Option<bool>,
+    /// UIA `IsPassword`: `Some(true)` for a password field, `Some(false)` for
+    /// an `Edit` control that is not one, `None` when unknown or
+    /// not applicable (non-text elements, MSAA fallback).
+    pub is_password: Option<bool>,
     /// Raw COM pointer (IUIAutomationElement for UIA path, IAccessible for
     /// MSAA path) as usize. Retained — `Snapshots` Drop releases it via
     /// the `kind`-appropriate vtable.
@@ -1441,6 +1445,7 @@ unsafe fn walk_cached_element(
                     selected: None,
                     checked: None,
                     expanded: None,
+                    is_password: None,
                     element_ptr: 0,
                     center_x: 0,
                     center_y: 0,
@@ -1713,10 +1718,12 @@ fn emit_cached_node(
     // A disabled control is indexed and published with `enabled: false`, as on
     // macOS: enablement is state the caller needs to read, not a reason to hide
     // the row. The token writers refuse it (`tools::impl_::refuse_if_disabled`).
+    let is_password = text_entry_is_password(read_cached_is_password(element), &control_type);
     let (has_value_pattern, actions) = collect_pattern_evidence(
         || unsafe { cached_pattern(element, UIA_ValuePatternId, ctx) }.is_some(),
         || detect_cached_actions(element, &control_type, ctx),
     );
+    let password_for_projection = read_cached_bool(element, UIA_IsPasswordPropertyId, ctx);
     let ProjectedNodeText {
         name,
         value,
@@ -1729,9 +1736,14 @@ fn emit_cached_node(
         help: help_text,
         description,
         automation_id: automation_id.clone(),
-        is_password: read_cached_bool(element, UIA_IsPasswordPropertyId, ctx),
+        is_password: if is_password == Some(true) {
+            Some(true)
+        } else {
+            password_for_projection
+        },
         has_value_pattern,
     });
+    let value = redact_password_value(value, is_password);
     let selected = read_cached_selected(element, ctx);
     let checked = read_cached_checked(element, ctx);
     let expanded = read_cached_expanded(element, ctx);
@@ -1775,6 +1787,7 @@ fn emit_cached_node(
                 selected,
                 checked,
                 expanded,
+                is_password,
                 element_ptr: ptr,
                 center_x,
                 center_y,
@@ -1797,6 +1810,7 @@ fn emit_cached_node(
                 selected,
                 checked,
                 expanded,
+                is_password,
                 element_ptr: 0,
                 center_x: 0,
                 center_y: 0,
@@ -1815,6 +1829,36 @@ fn emit_cached_node(
         control_type,
         emitted_parent,
         dropped_offscreen_content: false,
+    }
+}
+
+/// Keep `IsPassword` where it carries information: always when it is true,
+/// and as an explicit `false` only on `Edit` controls, the control type UIA
+/// gives a password field. Action names are no guide here: a slider's
+/// RangeValuePattern also maps to `set_value`, and a read-only text surface's
+/// TextPattern to `text`.
+pub(crate) fn text_entry_is_password(
+    is_password: Option<bool>,
+    control_type: &str,
+) -> Option<bool> {
+    match is_password {
+        Some(true) => Some(true),
+        Some(false) if control_type == "Edit" => Some(false),
+        _ => None,
+    }
+}
+
+/// Drop an element's value when it reports itself as a password field, so a
+/// provider that does not blank Value cannot leak the secret through `value`,
+/// the label fallback, or the Markdown row.
+pub(crate) fn redact_password_value(
+    value: Option<String>,
+    is_password: Option<bool>,
+) -> Option<String> {
+    if is_password == Some(true) {
+        None
+    } else {
+        value
     }
 }
 
@@ -1911,6 +1955,30 @@ fn read_cached_bool(
                 .boolVal
                 != 0,
         )
+    }
+}
+
+/// UIA `IsPassword`, or `None` when the provider does not support it. The
+/// plain `GetCachedPropertyValue` substitutes the property's default `false`
+/// for an unsupported property, which would report an unknown field as known
+/// not to be a password field.
+fn read_cached_is_password(element: &IUIAutomationElement) -> Option<bool> {
+    unsafe {
+        variant_bool(
+            &element
+                .GetCachedPropertyValueEx(UIA_IsPasswordPropertyId, TRUE)
+                .ok()?,
+        )
+    }
+}
+
+/// A `VT_BOOL` variant's value; `None` for any other type, including the
+/// not-supported sentinel.
+unsafe fn variant_bool(variant: &windows::core::VARIANT) -> Option<bool> {
+    if variant.as_raw().Anonymous.Anonymous.vt == 11 {
+        Some(variant.as_raw().Anonymous.Anonymous.Anonymous.boolVal != 0)
+    } else {
+        None
     }
 }
 /// Read bounding rect as (center_x, center_y, Some((l,t,r,b))). Returns
@@ -2142,6 +2210,9 @@ pub(crate) fn format_node_line(node: &UiaNode) -> String {
         if let Some(expanded) = node.expanded {
             attrs.push(format!("expanded={}", expanded));
         }
+        if node.is_password == Some(true) {
+            attrs.push("password".to_owned());
+        }
         if !node.actions.is_empty() {
             attrs.push(format!("actions=[{}]", node.actions.join(",")));
         }
@@ -2155,6 +2226,9 @@ pub(crate) fn format_node_line(node: &UiaNode) -> String {
         }
         if let Some(v) = &node.value {
             s.push_str(&format!(" = \"{}\"", v));
+        }
+        if node.is_password == Some(true) {
+            s.push_str(" [password]");
         }
     }
     s
@@ -2191,6 +2265,7 @@ mod tests {
             // GOAT's row states; unset here, so the row shows only enablement.
             checked: None,
             expanded: None,
+            is_password: None,
             element_ptr: 0,
             center_x: 0,
             center_y: 0,

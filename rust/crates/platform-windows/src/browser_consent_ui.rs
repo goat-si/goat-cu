@@ -539,6 +539,7 @@ mod tests {
             selected: None,
             checked: None,
             expanded: None,
+            is_password: None,
             element_ptr: 0,
             center_x: 0,
             center_y: 0,

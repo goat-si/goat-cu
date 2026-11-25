@@ -210,6 +210,45 @@ fn focus_with_retry(
     }
 }
 
+/// The screenshot-pixel centre of a snapshot element in web content, so the
+/// pixel focus click can move the page's focus to it. `None` for an element
+/// outside a web area.
+async fn web_ax_focus_point(
+    pid: i32,
+    window_id: u32,
+    element: Option<crate::ax::snapshot::RetainedElement>,
+    element_index: Option<usize>,
+) -> Option<(f64, f64)> {
+    let (Some(element), Some(index)) = (element, element_index) else {
+        return None;
+    };
+    let web_element = element.clone();
+    let is_web = latency::spawn_action_blocking(move || {
+        super::type_text::target_in_web_area(
+            pid,
+            Some((web_element.as_ptr(), Some(index))),
+            Some(window_id),
+        )
+    })
+    .await
+    .unwrap_or(true);
+    if !is_web {
+        return None;
+    }
+    latency::spawn_action_blocking(move || unsafe {
+        let (screen_x, screen_y) = crate::ax::bindings::element_screen_center(
+            element.as_ptr() as crate::ax::bindings::AXUIElementRef
+        )?;
+        let frame = super::px_frame::resolve_window_px_frame(window_id).ok()?;
+        Some((
+            (screen_x - frame.bounds.x) * frame.scale,
+            (screen_y - frame.bounds.y) * frame.scale,
+        ))
+    })
+    .await
+    .unwrap_or(None)
+}
+
 fn screen_sharing_modifier_delivery_error(
     is_screen_sharing: bool,
     has_modifiers: bool,
@@ -462,7 +501,7 @@ impl Tool for HotkeyTool {
         // whether or not the app is frontmost. That route checks the held
         // target window and returns its own result without posting the chord.
         let mut key_scope: Option<crate::input::skylight::WindowKeyScope> = None;
-        if !fg && px.is_none() {
+        if !fg {
             if let (Some(wid), Some(combo)) = (
                 window_id,
                 super::menu_equivalent::Combo::parse(&modifiers, &key),
@@ -495,39 +534,58 @@ impl Tool for HotkeyTool {
                     let shared_display = key_display.clone();
                     let shared_key = key.clone();
                     let shared_modifiers = modifiers.clone();
-                    if let Some(route) = window_menu_route(element_ptr, || async move {
-                        let lease = super::acquire_background_mutation(pid).await;
-                        if let Err(refusal) = lease
-                            .gate_again(
+                    if let Some(route) = window_menu_route(
+                        element_ptr.is_none() && px.is_none() && py.is_none(),
+                        || async move {
+                            let lease = super::acquire_background_mutation(pid).await;
+                            if let Err(refusal) = lease
+                                .gate_again(
+                                    wid,
+                                    None,
+                                    cua_driver_core::background_input::BackgroundAction::AxSemantic,
+                                )
+                                .await
+                            {
+                                return refusal;
+                            }
+                            let result = super::press_key::native_menu_chord(
+                                lease,
                                 wid,
-                                None,
-                                cua_driver_core::background_input::BackgroundAction::AxSemantic,
+                                shared_combo,
+                                shared_display,
+                                (shared_key, shared_modifiers),
+                                duration,
                             )
-                            .await
-                        {
-                            return refusal;
-                        }
-                        let result = super::press_key::native_menu_chord(
-                            lease,
-                            wid,
-                            shared_combo,
-                            shared_display,
-                            (shared_key, shared_modifiers),
-                            duration,
-                        )
-                        .await;
-                        let physical = result
-                            .structured_content
-                            .as_ref()
-                            .is_some_and(|value| value["path"] == "keys_under_scope");
-                        if physical {
-                            result
-                        } else {
-                            super::key_delivery_guard::semantic_duration(result, duration)
-                        }
-                    }) {
+                            .await;
+                            let physical = result
+                                .structured_content
+                                .as_ref()
+                                .is_some_and(|value| value["path"] == "keys_under_scope");
+                            if physical {
+                                result
+                            } else {
+                                super::key_delivery_guard::semantic_duration(result, duration)
+                            }
+                        },
+                    ) {
                         return route.await;
                     }
+                    let Some(target_stamp) = crate::ax::enablement::process_start_stamp(pid) else {
+                        return super::pre_dispatch_refusal("process_instance_unverified", "The target process instance could not be verified; no menu action was sent.");
+                    };
+                    let lease = match super::gate_background_window_action(
+                        pid,
+                        wid,
+                        element_ptr,
+                        super::window_keyboard_action(
+                            cua_driver_core::background_input::BackgroundAction::GenericKey,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(lease) => lease,
+                        Err(refusal) => return refusal,
+                    };
                     // The menu command acts on the app's key window. Make the
                     // addressed window key first, confirmed, or refuse: never
                     // act on another window (CUA-1767).
@@ -537,8 +595,44 @@ impl Tool for HotkeyTool {
                             Ok(scope) => scope,
                             Err(refusal) => return refusal,
                         };
-                    if let Some(ptr) = element_ptr {
-                        // The menu command acts on the focused element.
+                    // The menu command acts on the focused element. A pixel
+                    // target, or an element in web content (where AXFocused
+                    // can be acknowledged without moving the page's focus),
+                    // is focused with the pixel focus click (#5355).
+                    let focus_xy = match (px, py) {
+                        (Some(x), Some(y)) => Some((x, y)),
+                        (None, None) => {
+                            web_ax_focus_point(pid, wid, element_guard.clone(), element_index).await
+                        }
+                        _ => None,
+                    };
+                    if let Some((x, y)) = focus_xy {
+                        let focus = match super::focus_by_pixel(
+                            &self.state,
+                            pid,
+                            Some(wid),
+                            x,
+                            y,
+                            false,
+                            args.opt_str("session"),
+                            args.opt_str("_session_id"),
+                            args.get("from_zoom")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            Some(&lease),
+                            super::prior_from_key_scope(_menu_key_scope.as_ref()),
+                            false,
+                        )
+                        .await
+                        {
+                            Ok(focus) => focus,
+                            Err(error) => return error,
+                        };
+                        if !menu_can_follow_focus(focus) {
+                            return ToolResult::text("The focus action may have run; the menu shortcut was not sent. Read fresh state before trying again.")
+                                .with_structured(serde_json::json!({"effect":"unverifiable", "code":"focus_delivery_unverified"}));
+                        }
+                    } else if let Some(ptr) = element_ptr {
                         let focused =
                             latency::spawn_action_blocking(move || focus_hotkey_element(pid, ptr))
                                 .await;
@@ -549,8 +643,30 @@ impl Tool for HotkeyTool {
                             );
                         }
                     }
-                    let menu_result = super::invoke_menu::run_in_background(
-                        pid,
+                    if crate::ax::enablement::process_start_stamp(pid) != Some(target_stamp) {
+                        return super::click::project_hit_focus_refusal(
+                            super::pre_dispatch_refusal(
+                                "process_instance_mismatch",
+                                "The target process changed before the menu action.",
+                            ),
+                            cua_driver_core::mutation::PriorInput::MayHaveDelivered,
+                        );
+                    }
+                    if let Err(refusal) = lease
+                        .gate_again(
+                            wid,
+                            element_ptr,
+                            cua_driver_core::background_input::BackgroundAction::AxSemantic,
+                        )
+                        .await
+                    {
+                        return super::click::project_hit_focus_refusal(
+                            refusal,
+                            cua_driver_core::mutation::PriorInput::MayHaveDelivered,
+                        );
+                    }
+                    let menu_result = super::invoke_menu::run_in_background_with_lease(
+                        &lease,
                         wid,
                         item.path,
                         super::invoke_menu::MenuRequest::KeyEquivalent(key_display.clone()),
@@ -868,8 +984,15 @@ impl Tool for HotkeyTool {
     }
 }
 
-fn window_menu_route<T>(element: Option<usize>, route: impl FnOnce() -> T) -> Option<T> {
-    element.is_none().then(route)
+fn menu_can_follow_focus(focus: super::not_editable::FocusDispatch) -> bool {
+    matches!(
+        focus,
+        super::not_editable::FocusDispatch::None | super::not_editable::FocusDispatch::SentAx
+    )
+}
+
+fn window_menu_route<T>(window_only: bool, route: impl FnOnce() -> T) -> Option<T> {
+    window_only.then(route)
 }
 
 /// Only native applications use this menu lookup.
@@ -1027,9 +1150,18 @@ mod tests {
     }
 
     #[test]
+    fn uncertain_pixel_focus_never_falls_through_to_a_menu_command() {
+        use super::super::not_editable::FocusDispatch;
+        assert!(super::menu_can_follow_focus(FocusDispatch::None));
+        assert!(!super::menu_can_follow_focus(FocusDispatch::Indeterminate));
+        assert!(super::menu_can_follow_focus(FocusDispatch::SentAx));
+        assert!(!super::menu_can_follow_focus(FocusDispatch::SentClick));
+    }
+
+    #[test]
     fn window_hotkey_reaches_frontmost_disabled_chord_decision() {
         let result = super::lookup_native_menu(true, || Some(())).and_then(|()| {
-            super::window_menu_route(None, || {
+            super::window_menu_route(true, || {
                 super::super::press_key::tests::frontmost_disabled_result()
             })
         });
@@ -1041,7 +1173,7 @@ mod tests {
             fields["warning"],
             "menu item read disabled before the press; effect unverified"
         );
-        assert!(super::window_menu_route::<()>(Some(1), || panic!(
+        assert!(super::window_menu_route::<()>(false, || panic!(
             "element route must stay separate"
         ))
         .is_none());
