@@ -79,3 +79,108 @@
 | S13-R2-L1 | S13 review r2 | Low (test) | platform-linux atspi/native.rs:11006 application_attributes_wake_once_per_pid now asserts only a combined count of two (was per-PID first/second) | accepted | fix slice: per-PID wake counts after each invocation |
 | S13-R2-N1 | S13 review r2 | Note | Windows input-queue pump uses PeekMessageW (runs sent-message handlers); source cannot prove every handler returns within the deadline or that input can't reach another foreground window; no regression confirmed | recorded | add to OPEN-1 final-head audit scope (Windows foreground route) |
 | S14-P1 | S14 writer audit (024_s14.md:68) | Triage | S14 open risk: X11 DIP detector falls back to unscaled frames when the projected tree lacks a top-level frame (possible wrong screenshot_frame on scaled X11). Pre-existing: Linux AT-SPI debug logging of accessible names, macOS consent-observation completeness gaps, possible Windows GDI teardown leak | recorded | X11: fix slice F5 if contained (failing-first), else PR follow-up; others PR follow-up list |
+| S14-R1-H1 | S14 review r1 | High (blocking; consequence of coordinator decision O1) | cua-driver-core ui_tree_revision.rs:65/:121: ledger keyed by session+pid+window+process_instance; record_scoped updates only the reading session's entry; contract (:233) says a later read seeing a change refuses. Session B observing a changed tree does not invalidate session A's revision, so A's pid/window action passes the check on a stale view (upstream's global revision did not have this gap). Test :328 covers use-by-another-session only | accepted | fix slice F4: keep ownership per session; any authorized read that observes a change for the same (pid, window, process_instance) advances/invalidates every session's revision for it; failing-first registry test A reads, B observes change, A's pid/window action refused before dispatch |
+| O1-H1 | OPEN-1 audit r1 | High (blocking) | platform-windows tools/type_text.rs:659/670-683 posts text then retypes a strict missing suffix after a bounded read-back; input/keyboard.rs:603 round trips ignore results. Delayed original suffix can land after the replay (duplicate text/keys) | accepted | slice F5: remove automatic tail replay; incomplete observation -> unverifiable + fresh-state guidance; failing-first fake target exposing prefix then delivering tail: one dispatch, no suffix post |
+| O1-H2 | OPEN-1 audit r1 | High (blocking) | platform-macos tools/type_text.rs:1586 derives a char count from field growth; :2895-2922 keep the largest partial; :802-815 return retryable:true + retry_from_character; queued events (:2454-2458) and AX insert partial counts (:3748-3755) can make the offset wrong | accepted | slice F3: no retry offset / retryable for unproven partial delivery; unverifiable + read-before-action; failing-first held-tail test |
+| O1-H3 | OPEN-1 audit r1 | High (blocking) | platform-windows hotkey.rs:251 / press_key.rs:156 / type_text.rs:195 focus_by_pixel (ClickTool, impl_.rs:1019) before returning background_unavailable (hotkey :374-382), labelled refused with a repeat-in-foreground recommendation (core delivery.rs:140, windows input/delivery.rs:342): the click may have had side effects. No automatic batch replay established | accepted | slice F5: decide background capability before the pixel click; else keep the click receipt and return unverifiable, non-retryable; failing-first counting test for all three tools |
+| O2-H1 | OPEN-2 audit r1 | High (blocking) | cua-driver-core browser/semantic.rs:645/666/687/721 DOM fallback copies value attribute without checking input[type=password]; rendered at :1185; secret_fence covers browser_fill_secret only | accepted | slice F2: classify password inputs before building semantic nodes; withhold value in DOM and AX projections and query forms; failing-first fixture (type=password, mixed case, no AX node) + non-password control |
+| O2-H2 | OPEN-2 audit r1 | High (blocking) | platform-macos tools/page.rs:309/312/325 query_dom default attrs include value and read el[a] for every match; returned via :72/:80/:181/:184. Tool excluded from GOAT's manifest (allowed-changes.json:14) but remains a driver surface | accepted | slice F2: suppress value for password inputs (default and explicit), fail closed when type unknown; failing-first sentinel test + ordinary input still readable |
+| O2-L1 | OPEN-2 audit r1 | Lead | platform-windows tools/page.rs:141/149/157 reads UIA CurrentName and ValueValue without IsPassword | lead | slice F2: fake password provider test; fix if it exposes the sentinel |
+| S14-R2-H1 | S14 review r2 | High (blocking) | cua-driver-core batch_tools.rs:2695/:1667: a revision-bearing run_steps step with role/name does a fresh lookup (locate.rs:1276 get_window_state; first read of a different view does not advance the revision, ui_tree_revision.rs:135), substitutes the new token and dispatches; stale NOT_DELIVERED also allows refind+retry (:1802). Contradicts O1 (no automatic re-read-and-act) | accepted | slice F4: refuse revision-bearing steps that need a fresh lookup; disable stale-target recovery when a revision was supplied; failing-first batch tests (no lookup, no action) |
+| S14-R2-H2 | S14 review r2 | High (blocking) | batch_tools.rs:1784/:2414: a revision-bearing click with typed NOT_DELIVERED stale result and a stored menu path is rerouted to invoke_menu without the revision; invoke_menu is not revision-accepting (ui_tree_revision.rs:38) | accepted | slice F4: no menu reroute for revision-bearing steps (return the original refusal); failing-first batch test asserting no invoke_menu |
+| S14-R2-M1 | S14 review r2 | Medium | platform-macos type_text.rs:2237 checks exact focus before key delivery, but the paced paste route (keyboard.rs:680, :261; type_text.rs:2248) prepares the clipboard and sends Cmd+V without rechecking the exact element (only sibling-window focus) | accepted | slice F3: recheck exact-target focus immediately before Cmd+V; on failure restore clipboard and report no-send; failing-first test changing focus during clipboard preparation |
+| O1-R2-H1 | OPEN-1 audit r2 | High (blocking) | platform-linux wayland/virtual_keyboard.rs:135/157-165 send_key round trip after keyboard.key; wayland/mod.rs:3158 any error -> resend chord via wtype, then libei (:3163-3176) | accepted | slice F5: fallback only when failure precedes the first key dispatch; failing-first fake keyboard that records the last key then fails its round trip -> no wtype/libei |
+| O1-R2-H2 | OPEN-1 audit r2 | High (blocking) | platform-macos set_value.rs:2452 Chromium select type-ahead; missing value at 800 ms -> FallbackAfterInput (:2361-2376, :2482-2488) -> popup selection route (:2560-2566, :2606-2621) | accepted | slice F3: deadline after type-ahead = sent + unverifiable, no popup route; failing-first late type-ahead test |
+| O1-R2-H3 | OPEN-1 audit r2 | High (blocking; contradicts #279) | platform-macos set_value.rs:1788/1793-1808 numeric AX write, IllegalArgument classified uncertain, then set_string on the same target | accepted | slice F3: stop after the uncertain numeric write, unverifiable, non-retryable; failing-first fake numeric setter changing state + IllegalArgument -> no set_string |
+| O1-R2-H4 | OPEN-1 audit r2 | High (blocking) | platform-macos hotkey.rs:187 focus writer called every iteration (transient error or lagging read -> another write); production callers :933/:952. PR #300 intended it, conflicts with no-resend (same class as S9-R2-H1) | accepted | slice F3: one focus write, poll read-back only, unverifiable if unconfirmed, no chord; failing-first |
+| O1-R2-M1 | OPEN-1 audit r2 | Medium | platform-windows win32/combo.rs:280 ignores EM_SETSEL result then sends EM_REPLACESEL (SendMessageTimeoutW :130-141) | accepted | slice F5 (with S8-R2-H1 combo work in F2 if same file: F2 owns combo.rs): stop on unacknowledged selection, uncertain; failing-first |
+| O2-R2-H1 | OPEN-2 audit r2 | High (blocking) | platform-linux atspi/native.rs:2003/:2145/:2153 password role 40 redacts value but keeps provider description; emitted in Markdown/structured rows (:2749/:2765/:2795), description may become name (:2716); get_window_state.rs:450 label; recording_hooks.rs:71/:87 persist it. atspi_text.rs:81 keeps a password field's name when its Text response looks distinct (incl. empty) | accepted | slice F2: withhold provider name/description for identified or possibly secure nodes before every projection; failing-first role-40 fixtures with sentinel in description and in name, Markdown + structured + recording, plus nonsecure control |
+| O2-R2-H2 | OPEN-2 audit r2 | High (blocking) | platform-macos input/keyboard.rs:90/:99 (ax/bindings.rs:273) failed AXSubrole read -> None; focus_may_take_a_secret (:68) then treats an AXTextField as nonsecure; long/non-ASCII text goes through the general pasteboard (:34/:139/:687, write :280/:291) | accepted | slice F2: pasteboard only when security attributes positively establish nonsecure; unreadable/ambiguous -> type directly; revalidate before writing; failing-first failed-subrole sentinel test (+secure, nonsecure, focus-change cases) |
+| O2-R2-M1 | OPEN-2 audit r2 | Medium | cua-driver-core batch_tools/locate.rs:294 Check::describe interpolates caller value/value_contains; batch_tools.rs:1613/1627/1642/1931 and locate.rs:2084 put it in text and structured results | accepted | slice F2: omit/redact expected value text in check descriptions (both formats, success and failure); failing-first sentinel tests |
+| O1-R3-H1 | OPEN-1 audit r3 | High | platform-macos tools/scroll.rs:744/1245-1291/1328-1329: after a posted wheel, an unchanged bar for 250 ms leads to AX scrollbar write / reveal / page action; acknowledged AX mutation + unchanged read allows another route | follow-up C1 (pre-existing: blame 8bad179d initial commit) | stop with unverifiable after a sent wheel/AX fallback whose effect is unconfirmed; held-wheel failing-first test |
+| O1-R3-H2 | OPEN-1 audit r3 | High | scroll.rs:479 AXScrollToVisible result discarded before wheel dispatch (:704); key route :874-884 ignores the focus write result before keys | follow-up C1 (pre-existing: 20/21 lines 8bad179d; c71144fa touched one line, #8142 aim) | classify each sent AX result, stop on uncertain, carry the receipt |
+| O1-R3-H3 | OPEN-1 audit r3 | High | platform-windows uia/scroll.rs:128/139 ScrollIntoView acknowledged + unchanged/unreadable point -> ancestor scrolls (:307-331, 15 ms pause); used by click/element input via tools/impl_.rs:180 | follow-up C1 (pre-existing: blame ad4c92f94, before the sync) | observe without another mutation after a reveal write; uncertain reveal result |
+| O1-R3-M1 | OPEN-1 audit r3 | Medium | platform-linux set_value.rs:482 popup-opening click then option + Escape (:452-463); missing option -> no_such_option_result "nothing was changed", effect:none (:389-390, :422-425) | follow-up C1 (pre-existing: blame 87e2e869 #290; 2 lines S7) | carry the popup input receipt; effect unverifiable when input was sent |
+| OPEN-1-UNTRACED | OPEN-1 audit r3 (last round) | Follow-up | untraced functions: macOS ScrollArea::reveal, page_ladder, key-route error projection, perform_ax_click, run_live_selection_candidate, run_live_native_focus_stage, pixel invoke_in_guarded branches, native_menu_chord, semantic_perform_error, DragTool::invoke, menu_refusal_without_keys, select_popup_option, minimized_set_value, finish_ladder, native_write_outcome consumers, dispatch_semantic; Windows PostedClick::send/cleanup consumers, finish_pixel_uia_attempt, run_rungs call sites in ClickTool::invoke, combo::set_value notification outcomes, gate_then_write, chain_error callers; Linux spawn_text_write_until caller drop, type_into_editable_with_dispatch, activate_option_token_gated, final_insert_step; platform callers of SnapshotStore::resolve_for_instance | follow-up C1 | list in the C1 issue |
+
+## Scope ruling (coordinator, binding) — buckets
+
+Rule: FIX-NOW = (a) introduced or worsened by the sync, incl. our own merge decisions; (b) any security/privacy finding regardless of age; (c) small pre-existing fix in a file this PR already changes, no design work. FOLLOW-UP = pre-existing behavior the sync did not worsen that needs non-trivial work, test-coverage-only gaps that need new test design, doc nits outside this PR's own records. Audits: OPEN-1 round 3 and OPEN-2 round 2 are the last rounds; untraced areas go to follow-up issues with function names.
+
+| Row | Bucket | Slice / issue | Reason |
+|---|---|---|---|
+| S1-M1 | fix-now | F4 | (a) S1 merge: rooted token yields no window (fail-closed) |
+| S1-M2 | fix-now | F4 | (a) window inheritance ordering adopted with S1 |
+| S1-R2-M1 | fix-now | F4 | (a) test assertion lost with upstream removal; small |
+| S1-R2-L1 | fix-now | F5 | (a) recovery text wrong after upstream removal; one line |
+| S1-R2-L2 | fix-now | F6 | record errata in this PR's own record |
+| S2-H1 | fix-now | F5 | (b) consent identity |
+| S2-L1 | fix-now | F6 | record errata |
+| S2-R2-H1 | fix-now | F5 | (b) setup omnibox identity |
+| S2-R2-M1 | fix-now | F5 | (a)+(b) consent ambiguity swallowed |
+| S2-R2-N1, S2-R3-N1, S5-N1 | PR body | F6 | notes; consumer check |
+| S3-M1 | fix-now | F3 | (a) D3 popup helper fails open |
+| S3-M2 | split | F3 / C2 | fix-now: missing window list/target -> refuse (small); follow-up: animation timing/atomicity |
+| S3-P1 | follow-up | C3 | pre-existing, not worsened |
+| S3-P2 | follow-up | C1 | pre-existing |
+| S3-R1-M1 | fix-now | F1 | (a) web_effect merge |
+| S4-B1 | fix-now | F3 | (a) clippy blocker |
+| S4-P1 | follow-up | C3 | pre-existing |
+| S4-P2 | follow-up | C1 | pre-existing resend in consent cleanup |
+| S4-R1-M1 | fix-now | F3 | (a) #7730 drag observer |
+| S4-R1-M2 | follow-up | C2 | upstream logic, GOAT pre-S4 also raised; not worsened |
+| S4-R2-M1 | fix-now | F3 | (a) GOAT test deleted by the merge |
+| S4-R2-L1 | fix-now | F3 | (c) doc in mouse.rs touched by F3 |
+| S5-P1 | follow-up | C4 | pre-existing |
+| S5-P2 | follow-up | C3 | pre-existing |
+| S5-P3 | follow-up | C2 | pre-existing |
+| S5-R1-M1 | fix-now | F4 | (a) F1 decision per-window tickets |
+| S5-R1-M2 | fix-now | F4 | (b) cross-session disclosure ordering; same file |
+| S5-R1-L1 | fix-now | F4 | (b)+(c) existence leak; same file |
+| S5-R2-M1 | fix-now | F4 | (b) daemon session impersonation |
+| S5-R2-L1 | fix-now | F4 | (b)+(c) basis oracle; same area |
+| S5-R2-N1 | PR body | F6 | test notes |
+| S6-P1 | follow-up | C5 / C1 | pre-existing triage |
+| S6-R1-N1, S6-R2-M1 | fix-now | F4 | (b) with S5-R2-M1 |
+| S6-R2-M2 | fix-now | F4 | (a) S6 retired-client state blocks retry |
+| S6-R2-M3 | follow-up | C6 | test-coverage, needs new e2e design |
+| S7-P1 | follow-up | C4 | pre-existing |
+| S7-N1, S9-N1, S9-N2, S10-N1, S11-N1, S12-D1, S13-R1-N1 | PR body | F6 | notes/decisions |
+| S7-R1-H1 | fix-now | F5 | (b) consent reuse |
+| S7-R1-M1 | fix-now | F5 | (a) #7857 adopted in S7; resubmit risk |
+| S7-R2-M1 | fix-now | F5 | (a) S7 listing switch removed tests |
+| S8-R2-H1 | fix-now | F2 | (b) password echo |
+| S8-R2-M1 | fix-now | F2 | (b) world-readable screen frames (test artifacts) |
+| S8-R2-M2 | follow-up | C6 | test oracle redesign |
+| S9-R1-H1 | fix-now | F1 | (b) escaped action name |
+| S9-R1-M1 | fix-now if F1 completes it, else follow-up | F1 / C6 | test seam |
+| S9-R1-D1 | PR body | F6 | maintainer decision |
+| S9-R2-H1 | fix-now | F1 | already fixed red/green in F1 |
+| S9-R2-M1 | fix-now | F6 | (a) test weakened by the merge; one assertion |
+| S10-P1 | follow-up | C1 | pre-existing |
+| S10-R1-M1 | fix-now | F4 | (c) same batch_tools function as S14-R2-H1/H2 |
+| S10-R1-L1 | fix-now | F6 | (a) trivial metadata |
+| S11-R1-M1 | fix-now | F5 | (b) socket inheritance |
+| S11-R1-N1 | follow-up | C3 | pre-existing |
+| S11-R2-M1 | fix-now | F4 | (a) single_flight adopted in S11 |
+| S12-N1 | fix-now | F6 | CHANGELOG lists non-adopted features |
+| S12-R1-M1 | fix-now | F1 | (c) in F1, record overclaim |
+| S12-R2-N1 | fix-now | F2 | GOAT.md security doc |
+| S12-R2-M1 | fix-now | F2 | (b) binding |
+| S12-R2-L1 | fix-now | F3 | (a) #8521 |
+| S13-R1-M1 | fix-now | F3 | (a) #7884 |
+| S13-R2-M1 | fix-now | F1 | (a) #7798 |
+| S13-R2-L1 | fix-now | F6 | (a) test weakened by the merge |
+| S13-R2-N1 | follow-up | C1 | pre-existing pump limitation |
+| S14-P1 | follow-up | C5 | X11 fallback not worse than before; others pre-existing |
+| S14-R1-H1, S14-R2-H1, S14-R2-H2 | fix-now | F4 | (a) O1 decision |
+| S14-R2-M1 | fix-now | F2 | (b)+(c) paste to wrong field; same keyboard.rs paste code as O2-R2-H2 |
+| O1-H1, O1-H2, O1-H3, O1-R2-H1, O1-R2-H2, O1-R2-H3, O1-R2-H4 | follow-up | C1 | pre-existing resend paths (ruling) |
+| O1-R2-M1 | fix-now | F2 | (c) combo.rs changed for S8-R2-H1 |
+| O2-H1, O2-H2, O2-L1, O2-R2-H1, O2-R2-H2, O2-R2-M1 | fix-now | F2 | (b) password leaks |
+| OPEN-1, OPEN-2 untraced areas | follow-up | C1 / C7 | last rounds per ruling; exact functions in the issues |
+
+Follow-up issue clusters (goat-si/goat-cu, one each, path:line evidence): C1 pre-existing resend/no-resend paths + OPEN-1 untraced routes; C2 macOS menu/popup/activation timing; C3 session/state correctness and CLI; C4 Windows; C5 Linux; C6 test coverage; C7 OPEN-2 untraced output paths.
+| O1-R3-H1, O1-R3-H2, O1-R3-H3, O1-R3-M1 | follow-up | C1 | pre-existing per blame (8bad179d / ad4c92f94 / 87e2e869), not worsened by the sync |
+| OPEN-1-UNTRACED | follow-up | C1 | audit's last round per ruling; functions listed |
+| OPEN-2-UNTRACED | follow-up | C7 | round 2 last: native write fallbacks, Linux fallback walks, locator/refusal producers, tracing calls, telemetry producers, doctor probes, recording/screenshot paths |

@@ -23,3 +23,7 @@ Not fixed here (PR follow-up list, with path:line from the ledger): S6-P1, S7-P1
 ## After the slices
 
 Full verification at the final head (cargo check --locked host set; clippy -D warnings for platform-macos, cua-driver-core, cua-driver and cursor-overlay on macOS; lib tests for changed crates; protocol, contract, installer tests; cargo deny licenses bans sources; Linux container run of cua-driver-core if docker is available), fresh Terra final review of the PR head, push, PR, goat-ci slow_tests dispatch.
+
+## Revision after the scope ruling (F1 committed 57bbad52)
+
+Buckets per row are in 090_findings.md ("Scope ruling — buckets"). F2 is split: F2a (macOS + core) = S12-R2-M1, S12-R2-N1, O2-H1, O2-H2, O2-R2-H2, S14-R2-M1, O2-R2-M1; F2b (Windows + Linux + e2e artifacts) = S8-R2-H1, O1-R2-M1, O2-L1, O2-R2-H1, S8-R2-M1. F3-F6 as revised in the bucket table. OPEN-1/OPEN-2 audits are closed (last rounds); untraced areas go to follow-up issues C1/C7.
