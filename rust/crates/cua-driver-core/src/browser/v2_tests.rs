@@ -2269,11 +2269,7 @@ async fn approved_existing_profile_tools_stay_within_the_reviewed_cdp_surface() 
 }
 
 #[tokio::test]
-async fn existing_profile_sessions_share_one_browser_connection_across_session_ends() {
-    // Chrome asks the person to approve every new browser-level WebSocket.
-    // Sessions for the same browser instance must therefore multiplex over
-    // the one approved socket, survive each other's session end, and let a
-    // later session reuse the parked socket without a new browser prompt.
+async fn existing_profile_sessions_use_separate_browser_connections() {
     let (f, _provider) = protected_existing_profile_fixture().await;
     let prepare = |session: &'static str, transport: &'static str| {
         let engine = f.engine.clone();
@@ -2319,8 +2315,8 @@ async fn existing_profile_sessions_share_one_browser_connection_across_session_e
     assert_eq!(b_state["status"], "ok", "{b_state}");
     assert_eq!(
         f._server.accepted_connections(),
-        after_first_attach,
-        "a second session must not open another browser-level socket"
+        after_first_attach + 1,
+        "a second session must open its own browser-level socket"
     );
 
     // Ending A must neither close nor invalidate B's use of the socket.
@@ -2329,15 +2325,14 @@ async fn existing_profile_sessions_share_one_browser_connection_across_session_e
     let b_state = state("shared-socket-b", "shared-transport-b").await;
     assert_eq!(b_state["status"], "ok", "{b_state}");
 
-    // After every session ended, the next approved session reuses the
-    // parked socket instead of dialing (which would prompt again).
+    // A later session opens another connection after both earlier sessions end.
     crate::session::fire_session_end("shared-transport-b");
     tokio::task::yield_now().await;
     let c = prepare("shared-socket-c", "shared-transport-c").await;
     assert_eq!(c["status"], "ok", "{c}");
     let c_state = state("shared-socket-c", "shared-transport-c").await;
     assert_eq!(c_state["status"], "ok", "{c_state}");
-    assert_eq!(f._server.accepted_connections(), after_first_attach);
+    assert_eq!(f._server.accepted_connections(), after_first_attach + 2);
     crate::session::fire_session_end("shared-transport-c");
 }
 

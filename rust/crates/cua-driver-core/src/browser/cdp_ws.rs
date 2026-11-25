@@ -276,7 +276,7 @@ async fn read_loop(mut read: SplitStream<WsStream>, demux: Arc<Demux>) {
 
 /// A single browser-endpoint connection.
 pub struct CdpConnection {
-    writer: Mutex<SplitSink<WsStream, Message>>,
+    writer: Mutex<Option<SplitSink<WsStream, Message>>>,
     demux: Arc<Demux>,
     next_id: AtomicU64,
     existing_profile_policy: AtomicBool,
@@ -291,6 +291,14 @@ impl Drop for CdpConnection {
 }
 
 impl CdpConnection {
+    async fn close(&self) {
+        self.demux.close();
+        self.reader.abort();
+        let writer = self.writer.lock().await.take();
+        if let Some(mut writer) = writer {
+            let _ = tokio::time::timeout(Duration::from_secs(2), writer.close()).await;
+        }
+    }
     pub async fn connect(ws_url: &str) -> anyhow::Result<Self> {
         Self::connect_within(ws_url, CONNECT_TIMEOUT).await
     }
@@ -312,7 +320,7 @@ impl CdpConnection {
         });
         let reader = tokio::spawn(read_loop(read, demux.clone()));
         Ok(Self {
-            writer: Mutex::new(write),
+            writer: Mutex::new(Some(write)),
             demux,
             next_id: AtomicU64::new(1),
             existing_profile_policy: AtomicBool::new(false),
@@ -466,11 +474,25 @@ impl CdpConnection {
         }
         let sent = {
             let mut writer = self.writer.lock().await;
-            writer.send(Message::Text(msg.to_string())).await
+            if self.is_closed() {
+                self.demux.pending.lock().unwrap().remove(&id);
+                anyhow::bail!("CDP socket closed before {method}");
+            }
+            let writer = writer
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("CDP socket closed before {method}"))?;
+            tokio::time::timeout(timeout, writer.send(Message::Text(msg.to_string()))).await
         };
-        if let Err(e) = sent {
-            self.demux.pending.lock().unwrap().remove(&id);
-            anyhow::bail!("CDP send failed during {method}: {e}");
+        match sent {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                self.demux.pending.lock().unwrap().remove(&id);
+                anyhow::bail!("CDP send failed during {method}: {e}");
+            }
+            Err(_) => {
+                self.demux.pending.lock().unwrap().remove(&id);
+                anyhow::bail!("CDP send timed out during {method}");
+            }
         }
 
         match tokio::time::timeout(timeout, rx).await {
@@ -502,20 +524,14 @@ pub const SHARED_SOCKET_ABSOLUTE_TTL: Duration = Duration::from_secs(8 * 60 * 60
 /// How a grant gives up its hold on a shared existing-profile socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SharedSocketRelease {
-    /// Normal session end: when this was the last holder, keep the
-    /// already-consented socket open (parked) for the idle bound so the next
-    /// approved session does not trigger another browser consent prompt.
+    /// Normal session end. Consent-bound sockets are closed on release.
     Park,
     /// Security-relevant end (identity change, remote debugging being turned
     /// back off, expiry): close the socket once no other session holds it.
     Close,
 }
 
-/// Grant-owned state of one browser-level existing-profile socket. Chrome
-/// asks the person to approve every new browser-level WebSocket, but not
-/// target attaches over an existing one, so every approved session for the
-/// same browser instance multiplexes over this one socket through flattened
-/// target sessions.
+/// Grant-owned state of one browser-level existing-profile socket.
 #[derive(Clone)]
 struct SharedSocket {
     /// Live grant generations bound to this socket. Generations are unique
@@ -570,6 +586,10 @@ fn loopback_port(url: &str) -> Option<u16> {
         return bracketed.split_once("]:")?.1.parse().ok();
     }
     authority.rsplit_once(':')?.1.parse().ok()
+}
+
+fn grant_socket_key(url: &str, generation: u64) -> String {
+    format!("{url}/#cua-grant-{generation}")
 }
 
 /// Whether an existing-profile grant owns the DevTools listener used by this
@@ -671,26 +691,6 @@ impl PoolInner {
             self.unmark_shared(url);
         }
     }
-
-    /// Return the live shared socket for `url`, dropping it first when it is
-    /// closed or past its bounds.
-    fn live_shared<'a>(
-        &self,
-        conns: &'a mut HashMap<String, PoolEntry>,
-        url: &str,
-        now: Instant,
-    ) -> Option<&'a mut PoolEntry> {
-        let stale = conns.get(url).is_some_and(|entry| {
-            entry
-                .shared
-                .as_ref()
-                .is_some_and(|shared| entry.conn.is_closed() || shared.expired(now, &self.ttl))
-        });
-        if stale {
-            self.remove_entry(conns, url);
-        }
-        conns.get_mut(url).filter(|entry| entry.shared.is_some())
-    }
 }
 
 impl Drop for PoolInner {
@@ -702,10 +702,7 @@ impl Drop for PoolInner {
     }
 }
 
-/// One pooled browser-level connection per endpoint URL. Existing-profile
-/// entries are shared by every grant for that browser instance: each grant
-/// generation is a refcounted holder, and the socket outlives individual
-/// sessions only within the bounded parking window.
+/// Existing-profile connections are keyed by endpoint and grant generation.
 pub struct CdpPool {
     inner: Arc<PoolInner>,
 }
@@ -762,10 +759,8 @@ impl CdpPool {
         Ok(conn)
     }
 
-    /// Bind grant `generation` to the browser socket for `ws_url`. A live
-    /// shared socket (held by another session, or parked after one ended) is
-    /// joined without dialing, so no new browser consent prompt appears. Only
-    /// when no usable socket exists is exactly one new socket opened.
+    /// Bind `generation` to its own browser socket, reusing only that grant's
+    /// still-live connection within the same attempt.
     pub async fn claim_existing(
         &self,
         ws_url: &str,
@@ -773,39 +768,37 @@ impl CdpPool {
     ) -> anyhow::Result<Arc<CdpConnection>> {
         loopback_port(ws_url)
             .ok_or_else(|| anyhow::anyhow!("existing-profile endpoint has no loopback port"))?;
+        let key = grant_socket_key(ws_url, generation);
         let _dial = self.inner.dial_gate.lock().await;
+        let stale = {
+            let mut conns = self.inner.conns.lock().await;
+            let stale = conns
+                .get(&key)
+                .filter(|entry| {
+                    entry.shared.as_ref().is_some_and(|shared| {
+                        entry.conn.is_closed() || shared.expired(Instant::now(), &self.inner.ttl)
+                    })
+                })
+                .map(|entry| entry.conn.clone());
+            if stale.is_some() {
+                self.inner.remove_entry(&mut conns, &key);
+            }
+            stale
+        };
+        if let Some(stale) = stale {
+            stale.close().await;
+        }
         {
             let now = Instant::now();
             let mut conns = self.inner.conns.lock().await;
-            if let Some(entry) = self.inner.live_shared(&mut conns, ws_url, now) {
-                let shared = entry
-                    .shared
-                    .as_mut()
-                    .expect("live_shared returns shared entries");
+            if let Some(entry) = conns.get_mut(&key).filter(|entry| entry.shared.is_some()) {
+                let shared = entry.shared.as_mut().expect("filtered grant-owned entry");
+                if entry.conn.is_closed() || shared.expired(now, &self.inner.ttl) {
+                    anyhow::bail!("the browser socket expired during claim");
+                }
                 shared.holders.insert(generation);
                 shared.last_used_at = now;
                 return Ok(entry.conn.clone());
-            }
-            match conns.get(ws_url) {
-                Some(entry) if !entry.conn.is_closed() => {
-                    // Convert the one live socket that proved the endpoint
-                    // into grant-owned state in place, without redialing.
-                    let conn = entry.conn.clone();
-                    conn.restrict_to_existing_profile();
-                    self.inner.insert_shared(
-                        &mut conns,
-                        ws_url,
-                        PoolEntry {
-                            conn: conn.clone(),
-                            shared: Some(SharedSocket::new(generation, now)),
-                        },
-                    );
-                    return Ok(conn);
-                }
-                Some(_) => {
-                    anyhow::bail!("the approved browser socket closed before it was claimed")
-                }
-                None => {}
             }
         }
 
@@ -820,7 +813,7 @@ impl CdpPool {
         let mut conns = self.inner.conns.lock().await;
         self.inner.insert_shared(
             &mut conns,
-            ws_url,
+            &key,
             PoolEntry {
                 conn: conn.clone(),
                 shared: Some(SharedSocket::new(generation, Instant::now())),
@@ -840,7 +833,7 @@ impl CdpPool {
         let now = Instant::now();
         let mut conns = self.inner.conns.lock().await;
         let entry = conns
-            .get_mut(ws_url)
+            .get_mut(&grant_socket_key(ws_url, generation))
             .ok_or_else(|| anyhow::anyhow!("the grant-owned browser socket is missing"))?;
         let shared = entry
             .shared
@@ -859,48 +852,16 @@ impl CdpPool {
         Ok(entry.conn.clone())
     }
 
-    /// Move one grant from `old_generation` to `new_generation`. If another
-    /// session already re-established a live shared socket, join it without
-    /// dialing; otherwise open exactly one replacement socket (which the
-    /// browser treats as a new connection and may ask the person to approve).
+    /// Refuse automatic reconnect: a new socket needs a fresh consent flow.
     pub async fn reconnect_existing(
         &self,
         ws_url: &str,
         old_generation: u64,
-        new_generation: u64,
+        _new_generation: u64,
     ) -> anyhow::Result<Arc<CdpConnection>> {
-        let _dial = self.inner.dial_gate.lock().await;
-        {
-            let now = Instant::now();
-            let mut conns = self.inner.conns.lock().await;
-            if let Some(entry) = self.inner.live_shared(&mut conns, ws_url, now) {
-                let shared = entry
-                    .shared
-                    .as_mut()
-                    .expect("live_shared returns shared entries");
-                shared.holders.remove(&old_generation);
-                shared.holders.insert(new_generation);
-                shared.last_used_at = now;
-                return Ok(entry.conn.clone());
-            }
-        }
-
-        // See claim_existing: never hold the entry mutex across a dial that
-        // can wait for browser-owned consent UI.
-        let conn = Arc::new(CdpConnection::connect(ws_url).await?);
-        conn.restrict_to_existing_profile();
-        let mut conns = self.inner.conns.lock().await;
-        // Holders of the dead socket rebind through their own reconnect,
-        // which joins this socket without dialing.
-        self.inner.insert_shared(
-            &mut conns,
-            ws_url,
-            PoolEntry {
-                conn: conn.clone(),
-                shared: Some(SharedSocket::new(new_generation, Instant::now())),
-            },
-        );
-        Ok(conn)
+        self.release_existing(ws_url, old_generation, SharedSocketRelease::Close)
+            .await;
+        anyhow::bail!("reconnecting requires a fresh browser consent flow")
     }
 
     /// Drop a (likely dead) unrestricted connection so the next call
@@ -915,78 +876,41 @@ impl CdpPool {
         }
     }
 
-    /// Release grant `generation`'s hold on the socket for `ws_url`. Only a
-    /// current holder can affect the socket, and the socket is never closed
-    /// while another session still holds it.
-    pub async fn release_existing(&self, ws_url: &str, generation: u64, mode: SharedSocketRelease) {
-        let now = Instant::now();
+    /// Release and close the grant's own socket even if clones remain.
+    pub async fn release_existing(
+        &self,
+        ws_url: &str,
+        generation: u64,
+        _mode: SharedSocketRelease,
+    ) {
+        let key = grant_socket_key(ws_url, generation);
         let mut conns = self.inner.conns.lock().await;
-        let Some(entry) = conns.get_mut(ws_url) else {
+        let Some(entry) = conns.get(&key) else {
             return;
         };
-        let Some(shared) = entry.shared.as_mut() else {
+        let Some(shared) = entry.shared.as_ref() else {
             return;
         };
-        if !shared.holders.remove(&generation) || !shared.holders.is_empty() {
+        if !shared.holders.contains(&generation) {
             return;
         }
-        if mode == SharedSocketRelease::Park
-            && !entry.conn.is_closed()
-            && !shared.expired(now, &self.inner.ttl)
-        {
-            shared.last_used_at = now;
-            drop(conns);
-            self.schedule_parked_reaper(ws_url);
-        } else {
-            self.inner.remove_entry(&mut conns, ws_url);
-        }
+        let conn = entry.conn.clone();
+        self.inner.remove_entry(&mut conns, &key);
+        drop(conns);
+        conn.close().await;
     }
 
     /// Number of sessions holding the shared socket for `ws_url`, or `None`
     /// when no grant-owned socket exists (diagnostics/tests).
     pub async fn shared_socket_holders(&self, ws_url: &str) -> Option<usize> {
         let conns = self.inner.conns.lock().await;
-        conns
-            .get(ws_url)
-            .and_then(|entry| entry.shared.as_ref())
-            .map(|shared| shared.holders.len())
-    }
-
-    fn schedule_parked_reaper(&self, ws_url: &str) {
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let weak = Arc::downgrade(&self.inner);
-        let url = ws_url.to_owned();
-        let mut wait = self.inner.ttl.idle;
-        runtime.spawn(async move {
-            loop {
-                tokio::time::sleep(wait + Duration::from_millis(10)).await;
-                let Some(inner) = weak.upgrade() else {
-                    return;
-                };
-                let now = Instant::now();
-                let mut conns = inner.conns.lock().await;
-                let Some(entry) = conns.get(&url) else {
-                    return;
-                };
-                let Some(shared) = entry.shared.as_ref() else {
-                    return;
-                };
-                if !shared.holders.is_empty() {
-                    // Held again; a later release schedules a fresh reaper.
-                    return;
-                }
-                if entry.conn.is_closed() || shared.expired(now, &inner.ttl) {
-                    inner.remove_entry(&mut conns, &url);
-                    return;
-                }
-                wait = inner
-                    .ttl
-                    .idle
-                    .saturating_sub(now.duration_since(shared.last_used_at));
-            }
-        });
+        let count = conns
+            .iter()
+            .filter(|(key, entry)| {
+                key.starts_with(&format!("{ws_url}/#cua-grant-")) && entry.shared.is_some()
+            })
+            .count();
+        (count > 0).then_some(count)
     }
 }
 
@@ -1062,7 +986,10 @@ mod tests {
         let pool = CdpPool::new();
         let initial = pool.get(&url).await.unwrap();
         let claimed = pool.claim_existing(&url, 1).await.unwrap();
-        assert!(Arc::ptr_eq(&initial, &claimed), "claim must not redial");
+        assert!(
+            !Arc::ptr_eq(&initial, &claimed),
+            "an unrestricted socket cannot confer consent"
+        );
         assert_eq!(
             claimed.method_policy(),
             CdpMethodPolicy::ExistingProfile,
@@ -1114,16 +1041,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_share_one_browser_socket_and_cannot_close_each_other() {
+    async fn sessions_have_separate_sockets_and_cannot_close_each_other() {
         let (url, dials, server) = counting_browser().await;
         let pool = CdpPool::new();
         let a = pool.claim_existing(&url, 10).await.unwrap();
         let b = pool.claim_existing(&url, 11).await.unwrap();
-        assert!(Arc::ptr_eq(&a, &b), "second session must join, not redial");
+        assert!(!Arc::ptr_eq(&a, &b), "sessions need separate sockets");
         assert_eq!(
             dials.load(Ordering::SeqCst),
-            1,
-            "one consent for both sessions"
+            2,
+            "each session needs its own socket"
         );
         assert_eq!(pool.shared_socket_holders(&url).await, Some(2));
 
@@ -1146,27 +1073,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parked_socket_serves_the_next_session_without_a_new_dial() {
+    async fn reconnect_requires_new_consent() {
+        let (url, _dials, server) = counting_browser().await;
+        let pool = CdpPool::new();
+        let original = pool.claim_existing(&url, 1).await.unwrap();
+        assert!(pool.reconnect_existing(&url, 1, 2).await.is_err());
+        assert!(original.is_closed());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn owner_must_match_for_parked_and_live_sockets() {
+        let (url, _dials, server) = counting_browser().await;
+        let pool = CdpPool::new();
+        let first = pool.claim_existing(&url, 1).await.unwrap();
+        assert!(Arc::ptr_eq(
+            &first,
+            &pool.claim_existing(&url, 1).await.unwrap()
+        ));
+        pool.release_existing(&url, 1, SharedSocketRelease::Park)
+            .await;
+        assert!(
+            first.is_closed(),
+            "release must close even while an Arc remains"
+        );
+        let other = pool.claim_existing(&url, 2).await.unwrap();
+        assert!(!Arc::ptr_eq(&first, &other), "another owner must redial");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn released_socket_is_closed_and_next_session_dials() {
         let (url, dials, server) = counting_browser().await;
         let pool = CdpPool::new();
         let first = pool.claim_existing(&url, 1).await.unwrap();
         pool.release_existing(&url, 1, SharedSocketRelease::Park)
             .await;
-        assert_eq!(pool.shared_socket_holders(&url).await, Some(0), "parked");
+        assert_eq!(pool.shared_socket_holders(&url).await, None);
         assert!(
-            endpoint_port_is_grant_owned(&url),
-            "a parked personal-profile socket stays off the legacy route"
+            !endpoint_port_is_grant_owned(&url),
+            "released socket does not remain parked"
         );
-        assert!(pool.get(&url).await.is_err());
+        assert!(first.is_closed());
 
         let next = pool.claim_existing(&url, 2).await.unwrap();
-        assert!(Arc::ptr_eq(&first, &next));
-        assert_eq!(dials.load(Ordering::SeqCst), 1);
+        assert!(!Arc::ptr_eq(&first, &next));
+        assert_eq!(dials.load(Ordering::SeqCst), 2);
         server.abort();
     }
 
     #[tokio::test]
-    async fn parked_socket_closes_after_the_idle_bound() {
+    async fn release_closes_socket_before_idle_bound() {
         let (url, dials, server) = counting_browser().await;
         let pool = CdpPool::with_shared_socket_ttls(
             std::time::Duration::from_millis(50),
@@ -1221,27 +1178,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnect_joins_a_socket_another_session_already_reopened() {
-        let (url, dials, server) = counting_browser().await;
+    async fn reconnect_cannot_join_another_sessions_socket() {
+        let (url, _dials, server) = counting_browser().await;
         let pool = CdpPool::new();
-        let dead = pool.claim_existing(&url, 1).await.unwrap();
-        pool.claim_existing(&url, 2).await.unwrap();
-        dead.demux.close();
-
-        let reopened = pool.reconnect_existing(&url, 1, 3).await.unwrap();
-        let joined = pool.reconnect_existing(&url, 2, 4).await.unwrap();
-        assert!(Arc::ptr_eq(&reopened, &joined));
-        assert_eq!(
-            dials.load(Ordering::SeqCst),
-            2,
-            "one reconnect dial for both sessions"
-        );
-        assert_eq!(pool.shared_socket_holders(&url).await, Some(2));
+        let a = pool.claim_existing(&url, 1).await.unwrap();
+        let b = pool.claim_existing(&url, 2).await.unwrap();
+        a.demux.close();
+        assert!(pool.reconnect_existing(&url, 1, 3).await.is_err());
+        assert!(!b.is_closed());
+        assert!(pool.get_existing(&url, 2).await.is_ok());
         server.abort();
     }
 
     #[tokio::test]
-    async fn revoking_all_sessions_closes_parked_sockets_only() {
+    async fn close_parked_preserves_live_sockets() {
         let (parked_url, _d1, s1) = counting_browser().await;
         let (held_url, _d2, s2) = counting_browser().await;
         let pool = CdpPool::new();
@@ -1250,7 +1200,7 @@ mod tests {
             .await;
         pool.claim_existing(&held_url, 2).await.unwrap();
 
-        assert_eq!(pool.inner.close_parked().await, 1);
+        assert_eq!(pool.inner.close_parked().await, 0);
         assert_eq!(pool.shared_socket_holders(&parked_url).await, None);
         assert_eq!(pool.shared_socket_holders(&held_url).await, Some(1));
         s1.abort();
@@ -1324,32 +1274,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stalled_reconnect_does_not_block_generation_release() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = tokio::spawn(async move {
-            let (first, _) = listener.accept().await.unwrap();
-            let _first_ws = tokio_tungstenite::accept_async(first).await.unwrap();
-            let (_stalled_reconnect, _) = listener.accept().await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        });
-        let url = format!("ws://127.0.0.1:{port}/devtools/browser/reconnect");
+    async fn refused_reconnect_does_not_block_generation_release() {
+        let (url, _dials, server) = counting_browser().await;
         let pool = CdpPool::new();
         let claimed = pool.claim_existing(&url, 1).await.unwrap();
-        claimed.demux.close();
-
-        let mut reconnect = Box::pin(pool.reconnect_existing(&url, 1, 2));
-        tokio::select! {
-            _ = &mut reconnect => panic!("reconnect unexpectedly completed"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
-        }
-        tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            pool.release_existing(&url, 1, SharedSocketRelease::Close),
-        )
-        .await
-        .expect("grant release must not wait for the reconnect handshake");
-        drop(reconnect);
+        assert!(pool.reconnect_existing(&url, 1, 2).await.is_err());
+        pool.release_existing(&url, 1, SharedSocketRelease::Close)
+            .await;
+        assert!(claimed.is_closed());
         server.abort();
     }
 
