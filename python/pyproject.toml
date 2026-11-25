@@ -12,7 +12,7 @@ authors = [
     { name = "TryCua", email = "hello@trycua.com" }
 ]
 keywords = [
-    "mcp>=1.30.0",
+    "mcp",
     "computer-use",
     "automation",
     "accessibility",
