@@ -220,7 +220,7 @@ fn rooted_capture_requires_snapshot_ownership_and_live_process() {
 fn scoped_commit_and_cancellation_do_not_supersede_full_capture_ticket() {
     let store = SnapshotStore::new();
     let parent = full(&store);
-    let ticket = store.begin_capture(42, 7);
+    let ticket = store.begin_capture_for_session(42, 7, Some("owner"));
     drop(root(&store, &token_for(parent, 0)));
     let scope = root(&store, &token_for(parent, 1));
     commit(&store, scope, Payload(vec![2])).unwrap();
@@ -366,7 +366,7 @@ fn all_full_retirement_paths_invalidate_derived_scope() {
                 store.remove(42, 7, Some("owner"));
             }
             "remove_for_capture" => {
-                let ticket = store.begin_capture(42, 7);
+                let ticket = store.begin_capture_for_session(42, 7, Some("owner"));
                 store.remove_for_capture(42, 7, Some("owner"), &ticket);
             }
             "clear" => {
