@@ -62,6 +62,16 @@ pub fn refuse_pid(input: PromptInput, pid: i32) -> Result<(), ToolResult> {
     let protected = match owner.kind {
         PromptOwner::None => false,
         PromptOwner::Always => true,
+        PromptOwner::SystemSettings => {
+            let windows: Vec<_> = crate::windows::on_screen_windows_any_layer()
+                .into_iter()
+                .filter(|w| w.pid == pid)
+                .collect();
+            windows.is_empty()
+                || windows
+                    .iter()
+                    .any(|w| settings_window_protected(pid, w.window_id))
+        }
         PromptOwner::ConsentAlertsOnly => crate::windows::on_screen_windows_any_layer()
             .into_iter()
             .any(|window| window.pid == pid && is_consent_window(pid, window.window_id)),
@@ -98,6 +108,7 @@ pub fn refuse_point(input: PromptInput, x: f64, y: f64) -> Result<(), PromptProt
         let protected = match owner.kind {
             PromptOwner::None => false,
             PromptOwner::Always => true,
+            PromptOwner::SystemSettings => settings_window_protected(window.pid, window.window_id),
             PromptOwner::ConsentAlertsOnly => is_consent_window(window.pid, window.window_id),
         };
         if protected {
@@ -195,6 +206,42 @@ fn process_name(pid: i32) -> Option<String> {
 /// Whether UserNotificationCenter's window `window_id` asks for consent.
 fn is_consent_window(pid: i32, window_id: u32) -> bool {
     security_prompt::is_consent_alert(alert_content(pid, window_id).as_ref(), consent_labels())
+}
+
+/// Only panes identified by the OS window's AX title can be ruled out.
+/// Unknown, localized, transient and unreadable titles remain protected.
+fn settings_window_protected(pid: i32, window_id: u32) -> bool {
+    use crate::ax::bindings::{
+        ax_get_window_id, copy_ax_windows_or_error, AXUIElementCreateApplication,
+        AXUIElementSetMessagingTimeout,
+    };
+    use core_foundation::base::{CFRelease, CFTypeRef};
+    unsafe {
+        let app = AXUIElementCreateApplication(pid);
+        if app.is_null() {
+            return true;
+        }
+        AXUIElementSetMessagingTimeout(app, 0.25);
+        let windows = copy_ax_windows_or_error(app);
+        CFRelease(app as CFTypeRef);
+        let Ok(windows) = windows else {
+            return true;
+        };
+        let mut safe = false;
+        for window in windows {
+            if ax_get_window_id(window) == Some(window_id) {
+                let role = read_string(window, "AXRole").flatten();
+                let title = read_string(window, "AXTitle").flatten();
+                safe = settings_pane_is_verified_nonprivacy(role.as_deref(), title.as_deref());
+            }
+            CFRelease(window as CFTypeRef);
+        }
+        !safe
+    }
+}
+
+fn settings_pane_is_verified_nonprivacy(role: Option<&str>, title: Option<&str>) -> bool {
+    role == Some("AXWindow") && title == Some("Software Update")
 }
 
 /// The secure field and button titles of `pid`'s AX window `window_id`, or
@@ -505,6 +552,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn settings_unknown_and_privacy_panes_fail_closed() {
+        for (role, title) in [
+            (None, None),
+            (Some("AXWindow"), None),
+            (Some("AXWindow"), Some("Device Control and Data Access")),
+            (Some("AXWindow"), Some("Privacy & Security")),
+            (None, Some("Software Update")),
+        ] {
+            assert!(!settings_pane_is_verified_nonprivacy(role, title));
+        }
+        assert!(settings_pane_is_verified_nonprivacy(
+            Some("AXWindow"),
+            Some("Software Update")
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires System Settings open to a privacy pane"]
+    fn live_privacy_pane_refuses_pid_and_pixel_input() {
+        let window = crate::windows::on_screen_windows_any_layer()
+            .into_iter()
+            .find(|w| {
+                Owner::of(w.pid).kind == PromptOwner::SystemSettings
+                    && w.bounds.width > 300.0
+                    && w.bounds.height > 300.0
+            })
+            .expect("System Settings window");
+        assert!(
+            refuse_point(
+                PromptInput::Refuse,
+                window.bounds.x + window.bounds.width / 2.0,
+                window.bounds.y + window.bounds.height / 2.0
+            )
+            .is_err(),
+            "pixel route must refuse"
+        );
+        assert!(
+            refuse_pid(PromptInput::Refuse, window.pid).is_err(),
+            "element route must refuse"
+        );
+        assert!(refuse_pid(PromptInput::Allow, window.pid).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires System Settings open to Software Update"]
+    fn live_software_update_is_not_a_privacy_pane() {
+        let window = crate::windows::on_screen_windows_any_layer()
+            .into_iter()
+            .find(|w| {
+                Owner::of(w.pid).kind == PromptOwner::SystemSettings
+                    && w.bounds.width > 300.0
+                    && w.bounds.height > 300.0
+            })
+            .expect("System Settings window");
+        assert!(!settings_window_protected(window.pid, window.window_id));
+        assert!(refuse_pid(PromptInput::Refuse, window.pid).is_ok());
+    }
+
+    #[test]
     fn only_keychain_and_password_prompts_hold_up_browser_launches() {
         assert!(is_keychain_prompt_owner(
             Some("com.apple.SecurityAgent"),
@@ -592,6 +698,10 @@ mod tests {
             let consent = match owner.kind {
                 PromptOwner::None => continue,
                 PromptOwner::Always => None,
+                PromptOwner::SystemSettings => Some((
+                    Some(Vec::new()),
+                    settings_window_protected(window.pid, window.window_id),
+                )),
                 PromptOwner::ConsentAlertsOnly => {
                     let content = alert_content(window.pid, window.window_id);
                     assert!(

@@ -69,7 +69,11 @@ fn focus_may_take_a_secret(secure_event_input: bool, focus: Option<&FocusedField
     if secure_event_input {
         return true;
     }
-    let Some(focus) = focus.filter(|focus| !focus.role.trim().is_empty()) else {
+    // AXSearchField is a documented, non-secure text subrole. An absent,
+    // unknown or provider-specific subrole does not establish that property.
+    let Some(focus) = focus.filter(|focus| {
+        focus.role == "AXTextField" && focus.subrole.as_deref() == Some("AXSearchField")
+    }) else {
         return true;
     };
     cua_driver_core::snapshot_compaction::is_secure_text_field(
@@ -264,6 +268,16 @@ pub fn run_pasteboard_transaction<B: PasteboardBackend>(
     trigger_paste: impl FnOnce() -> anyhow::Result<()>,
     settle_delay: std::time::Duration,
 ) -> anyhow::Result<()> {
+    run_pasteboard_transaction_checked(backend, text, || Ok(()), trigger_paste, settle_delay)
+}
+
+fn run_pasteboard_transaction_checked<B: PasteboardBackend>(
+    backend: &mut B,
+    text: &str,
+    before_write: impl FnOnce() -> anyhow::Result<()>,
+    trigger_paste: impl FnOnce() -> anyhow::Result<()>,
+    settle_delay: std::time::Duration,
+) -> anyhow::Result<()> {
     let mut snapshot = None;
     for _ in 0..2 {
         let before_count = backend.change_count();
@@ -277,6 +291,7 @@ pub fn run_pasteboard_transaction<B: PasteboardBackend>(
         anyhow::anyhow!("pasteboard changeCount mutated concurrently during backup snapshot")
     })?;
 
+    before_write()?;
     let transient_item = PasteboardItemSnapshot {
         representations: vec![
             (PASTEBOARD_TRANSIENT_TYPE.to_owned(), Vec::new()),
@@ -445,13 +460,20 @@ impl PasteboardBackend for MacosPasteboardBackend {
 
 fn paste_text_preserving_clipboard(
     text: &str,
+    before_write: impl FnOnce() -> anyhow::Result<()>,
     trigger_paste: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let _guard = PASTEBOARD_LOCK
         .lock()
         .map_err(|_| anyhow::anyhow!("pasteboard lock poisoned"))?;
     let mut backend = MacosPasteboardBackend;
-    run_pasteboard_transaction(&mut backend, text, trigger_paste, PASTEBOARD_SETTLE_DELAY)
+    run_pasteboard_transaction_checked(
+        &mut backend,
+        text,
+        before_write,
+        trigger_paste,
+        PASTEBOARD_SETTLE_DELAY,
+    )
 }
 
 /// Default key down→up gap and inter-key pacing.
@@ -684,20 +706,9 @@ pub fn type_text_with_delay(pid: i32, text: &str, inter_char_delay_ms: u64) -> a
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
 
-    deliver_text_runs(
-        text,
-        || !text_target_may_be_secret(Some(pid)),
-        |run| paste_text_preserving_clipboard(run, || hotkey(pid, "v", &["cmd"])),
-        |run| type_text_chars_to_pid(&source, pid, run, inter_char_delay_ms),
-        |ch| {
-            let (down, up) = char_key_events(&source, ch)?;
-            post_keyboard_event(pid, &down);
-            key_gap_sleep();
-            post_keyboard_event(pid, &up);
-            key_gap_sleep();
-            Ok(())
-        },
-    )
+    // This API has no exact-focus witness to recheck after clipboard setup.
+    // Use physical keys; callers with a witness use `type_text_while`.
+    type_text_chars_to_pid(&source, pid, text, inter_char_delay_ms)
 }
 
 /// [`type_text_with_delay`] that asks `may_send` before every key press (each
@@ -767,16 +778,28 @@ pub fn type_text_while(
             if !guard.borrow_mut()() {
                 return Err(stopped());
             }
-            paste_text_preserving_clipboard(run, || {
-                if !guard.borrow_mut()() {
-                    return Err(anyhow::Error::new(PasteSequenceAbort {
-                        posted: posted.get(),
-                        reason: "the focused window changed before the paste".into(),
-                        clipboard_restored: PasteRestoration::Unknown,
-                    }));
-                }
-                hotkey(pid, "v", &["cmd"])
-            })?;
+            paste_text_preserving_clipboard(
+                run,
+                || {
+                    if !guard.borrow_mut()() {
+                        return Err(stopped());
+                    }
+                    if text_target_may_be_secret(Some(pid)) {
+                        anyhow::bail!("focused field security could not be established");
+                    }
+                    Ok(())
+                },
+                || {
+                    if !guard.borrow_mut()() {
+                        return Err(anyhow::Error::new(PasteSequenceAbort {
+                            posted: posted.get(),
+                            reason: "the focused window changed before the paste".into(),
+                            clipboard_restored: PasteRestoration::Unknown,
+                        }));
+                    }
+                    hotkey(pid, "v", &["cmd"])
+                },
+            )?;
             posted.set(posted.get() + run.chars().count());
             Ok(())
         },
@@ -1219,6 +1242,15 @@ pub fn type_text_global_with_guard(
             }
             let count = run.chars().count();
             paste_text_preserving_clipboard(run, || {
+                if !guard.borrow_mut()() {
+                    return Err(anyhow::Error::new(DesktopSequenceAbort {
+                        posted: posted.load(std::sync::atomic::Ordering::SeqCst),
+                        reason: "focus changed before clipboard preparation".into(),
+                    }));
+                }
+                if text_target_may_be_secret(None) { anyhow::bail!("focused field security could not be established"); }
+                Ok(())
+            }, || {
                 // Revalidate at the trigger boundary: the transaction
                 // locked, snapshotted and wrote the pasteboard first, so
                 // focus may have changed during that work.
@@ -2870,7 +2902,7 @@ mod tests {
             subrole: subrole.map(str::to_owned),
             ..FocusedFieldMeta::default()
         };
-        let plain = field("AXTextField", None);
+        let plain = field("AXTextField", Some("AXSearchField"));
         assert!(!focus_may_take_a_secret(false, Some(&plain)));
         assert!(
             focus_may_take_a_secret(true, Some(&plain)),
@@ -2890,6 +2922,38 @@ mod tests {
             ..plain
         };
         assert!(focus_may_take_a_secret(false, Some(&otp)));
+    }
+
+    #[test]
+    fn unreadable_subrole_never_uses_pasteboard() {
+        let field = FocusedFieldMeta {
+            role: "AXTextField".into(),
+            subrole: None,
+            ..Default::default()
+        };
+        let pasted = std::cell::Cell::new(false);
+        deliver_text_runs(
+            "sentinel-secret-long-enough-to-use-pasteboard",
+            || !focus_may_take_a_secret(false, Some(&field)),
+            |_| {
+                pasted.set(true);
+                Ok(())
+            },
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(!pasted.get());
+    }
+
+    #[test]
+    fn ambiguous_subrole_never_uses_pasteboard() {
+        let focus = FocusedFieldMeta {
+            role: "AXTextField".into(),
+            subrole: Some("AXUnknown".into()),
+            ..Default::default()
+        };
+        assert!(focus_may_take_a_secret(false, Some(&focus)));
     }
 
     struct MockPasteboard {
@@ -2939,6 +3003,26 @@ mod tests {
             self.writes.push(Vec::new());
             Ok(self.count.get())
         }
+    }
+
+    #[test]
+    fn security_recheck_before_clipboard_write_prevents_exposure() {
+        let mut pb = MockPasteboard {
+            count: std::cell::Cell::new(0),
+            items: std::cell::RefCell::new(Vec::new()),
+            writes: Vec::new(),
+            concurrent_copy_during_paste: std::cell::RefCell::new(None),
+            fail_restore: false,
+        };
+        let result = run_pasteboard_transaction_checked(
+            &mut pb,
+            "sentinel-secret",
+            || anyhow::bail!("target became ambiguous"),
+            || Ok(()),
+            std::time::Duration::ZERO,
+        );
+        assert!(result.is_err());
+        assert!(pb.writes.is_empty());
     }
 
     #[derive(Clone)]

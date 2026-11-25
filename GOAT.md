@@ -20,6 +20,13 @@ upstream release binaries. The repository was named goat-si/cua-driver until 202
 
 ## macOS click and focus refusals
 
+Input aimed at operating-system security or consent prompts is refused by the
+`os_security_prompt` enforcement adapter, including System Settings Privacy &
+Security panes. A System Settings window whose pane cannot be identified is
+also refused. The trusted host may deliberately select unrestricted mode, in
+which this adapter permits input; the dispatch boundary conveys that decision
+through a reserved argument that callers cannot set.
+
 Some macOS click paths refuse instead of guessing, by design. These show up as refusals in live runs:
 
 - A click whose target's accessibility action list cannot be read is refused before any selection

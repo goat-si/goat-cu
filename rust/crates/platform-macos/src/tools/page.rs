@@ -322,7 +322,15 @@ fn build_query_selector_js(selector: &str, attributes: &[String]) -> String {
   var els = Array.from(document.querySelectorAll(sel));
   return JSON.stringify(els.map(function(el){{
     var obj = {{}};
-    attrs.forEach(function(a){{ obj[a] = el[a] !== undefined ? el[a] : el.getAttribute(a); }});
+    attrs.forEach(function(a){{
+      if (String(a).toLowerCase() === 'value') {{
+        var tag, type;
+        try {{ tag = el.tagName; type = el.type; }} catch (_) {{ return; }}
+        if (typeof tag !== 'string' || (tag.toLowerCase() === 'input' &&
+            (typeof type !== 'string' || type.toLowerCase() === 'password'))) return;
+      }}
+      obj[a] = el[a] !== undefined ? el[a] : el.getAttribute(a);
+    }});
     obj.textContent = (el.textContent||'').trim().substring(0,200);
     return obj;
   }}));
@@ -343,6 +351,29 @@ fn json_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_dom_suppresses_password_values() {
+        use std::io::Write;
+        for attrs in [vec![], vec!["value".to_owned()]] {
+            let script = build_query_selector_js("input", &attrs);
+            let mut child = std::process::Command::new(
+                "/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc",
+            )
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+            let expression = script.trim_end_matches(';');
+            write!(child.stdin.take().unwrap(), "var document = {{querySelectorAll: function() {{ return [{{tagName:'INPUT',type:'PaSsWoRd',value:'sentinel-secret',getAttribute:function(){{return null}}}},{{tagName:'INPUT',value:'sentinel-unknown',getAttribute:function(){{return null}}}},{{tagName:'INPUT',type:'text',value:'visible-control',getAttribute:function(){{return null}}}}]; }}}}; print({expression});").unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success());
+            let result = String::from_utf8(output.stdout).unwrap();
+            assert!(!result.contains("sentinel-secret"), "{result}");
+            assert!(!result.contains("sentinel-unknown"), "{result}");
+            assert!(result.contains("visible-control"), "{result}");
+        }
+    }
 
     const MENU_ONLY: &str = "- [0] AXMenuBar\n  - [1] AXMenuBarItem \"Apple\"\n";
 

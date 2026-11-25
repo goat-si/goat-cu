@@ -88,6 +88,14 @@ struct DomMeta {
     frame_id: Option<String>,
 }
 
+fn is_password_input(meta: &DomMeta) -> bool {
+    meta.tag.eq_ignore_ascii_case("input")
+        && meta
+            .attrs
+            .get("type")
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("password"))
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DomIndex {
     nodes: HashMap<i64, DomMeta>,
@@ -558,7 +566,11 @@ pub(crate) fn compose_accessibility_tree(
         let visibility = classify_visibility(dom_meta, layout_meta, viewport);
         let actions = action_kinds(&role, dom_meta, &states, layout_meta);
         let name = ax_value_string(ax.get("name")).and_then(clean_semantic_text);
-        let value = ax_value_string(ax.get("value")).and_then(clean_semantic_text);
+        let value = if dom_meta.is_some_and(is_password_input) {
+            None
+        } else {
+            ax_value_string(ax.get("value")).and_then(clean_semantic_text)
+        };
         let document_order = dom_meta.map_or(fallback_order, |meta| meta.order);
         nodes.push(SemanticNode {
             ax_id,
@@ -718,11 +730,14 @@ fn supplement_dom_actions(
             backend_node_id: Some(backend_node_id),
             role,
             name,
-            value: meta
-                .attrs
-                .get("value")
-                .cloned()
-                .and_then(clean_semantic_text),
+            value: (!is_password_input(meta))
+                .then(|| {
+                    meta.attrs
+                        .get("value")
+                        .cloned()
+                        .and_then(clean_semantic_text)
+                })
+                .flatten(),
             states,
             frame: frame.clone(),
             visibility,
@@ -1207,6 +1222,50 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn password_values_are_not_projected_or_queryable() {
+        let mut dom = DomIndex::default();
+        for (id, kind, value) in [
+            (1, "PaSsWoRd", "sentinel-secret"),
+            (2, "text", "visible-control"),
+            (3, "password", "sentinel-ax"),
+        ] {
+            dom.nodes.insert(
+                id,
+                DomMeta {
+                    tag: "input".into(),
+                    attrs: HashMap::from([
+                        ("type".into(), kind.into()),
+                        ("value".into(), value.into()),
+                    ]),
+                    order: id as usize,
+                    ..Default::default()
+                },
+            );
+        }
+        let doc = compose_accessibility_tree(
+            &json!({"nodes": [{"nodeId":"3", "backendDOMNodeId":3, "role":{"value":"textbox"}, "value":{"value":"sentinel-ax"}}]}),
+            &dom,
+            &LayoutIndex::default(),
+            &Viewport::default(),
+            frame(),
+        );
+        assert!(doc.nodes.iter().all(|node| !node
+            .value
+            .as_deref()
+            .unwrap_or("")
+            .contains("sentinel")));
+        assert!(doc
+            .nodes
+            .iter()
+            .any(|node| node.value.as_deref() == Some("visible-control")));
+        assert_eq!(
+            doc.page(0, 300, Some("sentinel-secret"), None)
+                .selected_nodes,
+            0
+        );
+    }
 
     #[test]
     fn file_inputs_expose_upload_instead_of_text_typing() {

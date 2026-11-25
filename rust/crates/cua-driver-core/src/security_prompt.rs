@@ -122,6 +122,8 @@ pub enum PromptOwner {
     Always,
     /// A window is a prompt only if [`is_consent_alert`] says so.
     ConsentAlertsOnly,
+    /// System Settings windows require a verified non-privacy pane.
+    SystemSettings,
 }
 
 /// How a window owned by a process with this bundle id or executable name
@@ -129,7 +131,12 @@ pub enum PromptOwner {
 pub fn macos_prompt_owner(bundle_id: Option<&str>, process_name: Option<&str>) -> PromptOwner {
     let matches =
         |(bundle, name): (&str, &str)| bundle_id == Some(bundle) || process_name == Some(name);
-    if matches(MACOS_NOTIFICATION_CENTER) {
+    if bundle_id == Some("com.apple.systempreferences")
+        || bundle_id == Some("com.apple.Settings")
+        || process_name == Some("System Settings")
+    {
+        PromptOwner::SystemSettings
+    } else if matches(MACOS_NOTIFICATION_CENTER) {
         PromptOwner::ConsentAlertsOnly
     } else if MACOS_PROMPT_OWNERS.iter().any(|owner| matches(*owner)) {
         PromptOwner::Always
@@ -202,6 +209,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn system_settings_is_a_conditionally_protected_owner() {
+        for (bundle, name) in [
+            (Some("com.apple.systempreferences"), None),
+            (Some("com.apple.Settings"), None),
+            (None, Some("System Settings")),
+        ] {
+            assert_ne!(macos_prompt_owner(bundle, name), PromptOwner::None);
+        }
+    }
+
+    #[test]
     fn prompt_owners_match_by_bundle_id_or_process_name() {
         assert_eq!(
             macos_prompt_owner(None, Some("SecurityAgent")),
@@ -221,7 +239,6 @@ mod tests {
         );
         for (bundle, name) in [
             (Some("com.apple.finder"), Some("Finder")),
-            (Some("com.apple.systempreferences"), Some("System Settings")),
             (
                 Some("com.apple.usernotificationcenter"),
                 Some("securityagent"),
@@ -284,7 +301,10 @@ mod tests {
         let curly_only = vec!["Don\u{2019}t Allow".to_owned()];
         assert!(is_consent_alert(Some(&alert("Don't Allow")), &curly_only));
         let ascii_only = vec!["Don't Allow".to_owned()];
-        assert!(is_consent_alert(Some(&alert("Don\u{2019}t Allow")), &ascii_only));
+        assert!(is_consent_alert(
+            Some(&alert("Don\u{2019}t Allow")),
+            &ascii_only
+        ));
         assert!(
             !is_consent_alert(Some(&alert("Dont Allow")), &curly_only),
             "only the apostrophe is folded"

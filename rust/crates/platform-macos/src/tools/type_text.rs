@@ -1029,6 +1029,22 @@ pub(crate) fn text_delivery_failure(prefix: &str, error: &anyhow::Error) -> Tool
         }
         return result;
     }
+    if let Some(abort) = error.downcast_ref::<crate::input::keyboard::PasteSequenceAbort>() {
+        let restored = match abort.clipboard_restored {
+            crate::input::keyboard::PasteRestoration::Unknown => "unknown",
+            crate::input::keyboard::PasteRestoration::Restored => "restored",
+            crate::input::keyboard::PasteRestoration::SkippedConcurrentChange => {
+                "skipped_concurrent_change"
+            }
+            crate::input::keyboard::PasteRestoration::Failed => "failed",
+        };
+        return ToolResult::error(message).with_structured(serde_json::json!({
+            "code": "paste_focus_changed", "paste_sent": false,
+            "characters_sent": abort.posted, "clipboard_restored": restored,
+            "effect": "unverifiable",
+            "retryable": false,
+        }));
+    }
     if error
         .downcast_ref::<crate::input::keyboard::KeyDeliveryUncertain>()
         .is_some()
@@ -2145,6 +2161,10 @@ struct KeyFocusChecks {
     exact_keys_window: Option<u32>,
 }
 
+fn key_delivery_allowed(sibling_focused: bool, exact_target_focused: bool) -> bool {
+    !sibling_focused && exact_target_focused
+}
+
 fn focus_write_with(
     settable: crate::ax::write_outcome::Settable,
     prior: cua_driver_core::mutation::PriorInput,
@@ -2272,11 +2292,23 @@ fn cgevent_type_verified_with(
         }
     }
     let send_guarded_text = |payload: &str| -> anyhow::Result<()> {
-        if let Some(wid) = exact_keys_window {
+        if let Some(wid) = exact_keys_window.or_else(|| element_ptr_and_idx.and(window_id)) {
             let sent = crate::input::keyboard::type_text_while(pid, payload, delay_ms, || {
-                !crate::input::skylight::sibling_window_focused(pid, wid)
+                key_delivery_allowed(
+                    crate::input::skylight::sibling_window_focused(pid, wid),
+                    element_ptr_and_idx
+                        .is_none_or(|(ptr, _)| element_has_exact_app_focus(pid, wid, ptr)),
+                )
             })?;
             if sent < payload.chars().count() {
+                if element_ptr_and_idx
+                    .is_some_and(|(ptr, _)| !element_has_exact_app_focus(pid, wid, ptr))
+                {
+                    return Err(crate::input::keyboard::key_construction_error(
+                        anyhow::anyhow!("the exact target lost focus; no further text was sent"),
+                        sent,
+                    ));
+                }
                 return Err(crate::input::keyboard::key_construction_error(
                     crate::input::skylight::sibling_focus_refusal(pid, wid, sent > 0),
                     sent,
@@ -4508,6 +4540,77 @@ mod u32_outcome_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn focus_change_during_clipboard_preparation_sends_no_paste() {
+        use crate::input::keyboard::{
+            run_pasteboard_transaction, PasteRestoration, PasteSequenceAbort, PasteboardBackend,
+            PasteboardItemSnapshot,
+        };
+        use std::cell::Cell;
+        struct Clipboard<'a> {
+            count: isize,
+            items: Vec<PasteboardItemSnapshot>,
+            focus: &'a Cell<bool>,
+        }
+        impl PasteboardBackend for Clipboard<'_> {
+            fn change_count(&self) -> isize {
+                self.count
+            }
+            fn snapshot_items(&self) -> anyhow::Result<Vec<PasteboardItemSnapshot>> {
+                Ok(self.items.clone())
+            }
+            fn write_items(&mut self, items: &[PasteboardItemSnapshot]) -> anyhow::Result<isize> {
+                self.count += 1;
+                self.items = items.to_vec();
+                self.focus.set(false);
+                Ok(self.count)
+            }
+            fn clear(&mut self) -> anyhow::Result<isize> {
+                self.count += 1;
+                self.items.clear();
+                Ok(self.count)
+            }
+        }
+        let focused = Cell::new(true);
+        let original = vec![PasteboardItemSnapshot {
+            representations: vec![("public.utf8-plain-text".into(), b"old".to_vec())],
+        }];
+        let mut clipboard = Clipboard {
+            count: 0,
+            items: original.clone(),
+            focus: &focused,
+        };
+        let sent = Cell::new(false);
+        let result = run_pasteboard_transaction(
+            &mut clipboard,
+            "long sentinel secret",
+            || {
+                if !super::key_delivery_allowed(false, focused.get()) {
+                    return Err(PasteSequenceAbort {
+                        posted: 0,
+                        reason: "focus changed".into(),
+                        clipboard_restored: PasteRestoration::Unknown,
+                    }
+                    .into());
+                }
+                sent.set(true);
+                Ok(())
+            },
+            std::time::Duration::ZERO,
+        );
+        assert!(!sent.get());
+        let error = result.unwrap_err();
+        assert!(error.downcast_ref::<PasteSequenceAbort>().is_some());
+        let projected = super::text_delivery_failure("type_text", &error)
+            .structured_content
+            .unwrap();
+        assert_eq!(projected["paste_sent"], false);
+        assert_eq!(projected["clipboard_restored"], "restored");
+        assert_eq!(
+            clipboard.items[0].representations[0],
+            original[0].representations[0]
+        );
+    }
     #[test]
     fn chromium_submission_return_failure_after_body_is_nonretryable() {
         use super::*;

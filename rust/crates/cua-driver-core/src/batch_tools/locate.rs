@@ -298,11 +298,11 @@ impl Check {
         } else {
             out.push_str(" is shown");
         }
-        if let Some(value) = &self.value {
-            out.push_str(&format!(", value \"{value}\""));
+        if self.value.is_some() {
+            out.push_str(", value matches");
         }
-        if let Some(value) = &self.value_contains {
-            out.push_str(&format!(", value contains \"{value}\""));
+        if self.value_contains.is_some() {
+            out.push_str(", value contains expected text");
         }
         if let Some(enabled) = self.enabled {
             out.push_str(if enabled { ", enabled" } else { ", disabled" });
@@ -1655,6 +1655,28 @@ impl<'a> Locator<'a> {
 
     /// Poll until the check holds or its timeout passes.
     pub async fn check(&self, check: &Check, fallback: &WindowSpec) -> Result<Checked, Miss> {
+        let redact = |text: &str| {
+            [check.value.as_deref(), check.value_contains.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|value| !value.is_empty())
+                .fold(text.to_owned(), |text, value| {
+                    text.replace(value, "[redacted]")
+                })
+        };
+        match self.check_inner(check, fallback).await {
+            Ok(mut result) => {
+                result.observed = result.observed.as_deref().map(redact);
+                Ok(result)
+            }
+            Err(mut miss) => {
+                miss.message = redact(&miss.message);
+                Err(miss)
+            }
+        }
+    }
+
+    async fn check_inner(&self, check: &Check, fallback: &WindowSpec) -> Result<Checked, Miss> {
         let window_spec = if check.window.is_empty() {
             fallback.clone()
         } else {
@@ -2665,6 +2687,12 @@ pub(crate) fn call_target(args: &Value) -> (Option<i64>, Option<u64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_description_does_not_disclose_expected_values() {
+        let check = Check::parse(&json!({"role":"textbox", "value":"sentinel-secret", "value_contains":"sentinel-secret"}), 0).unwrap();
+        assert!(!check.describe().contains("sentinel-secret"));
+    }
 
     #[derive(Default)]
     struct TestClock(std::sync::atomic::AtomicU64);

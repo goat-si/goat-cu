@@ -308,6 +308,38 @@ fn empty_state() -> Value {
 }
 
 #[tokio::test]
+async fn check_results_do_not_echo_expected_values_on_success_or_failure() {
+    for phase in ["expect", "wait_for"] {
+        for success in [true, false] {
+            for field in ["value", "value_contains"] {
+                let harness = Harness::new();
+                let mut state = save_state();
+                state["elements"][0]["value"] = json!("sentinel-private-value");
+                state["elements"][0]["enabled"] = json!(true);
+                harness.respond("get_window_state", state);
+                let mut check =
+                    json!({"pid":42,"window_id":9,"name":"Save","enabled":success,"timeout_ms":0});
+                check[field] = json!("sentinel-private-value");
+                let mut step = json!({});
+                step[phase] = check;
+                let result = harness.run(json!({"steps":[step]})).await;
+                assert_eq!(result.is_error == Some(true), !success, "{result:?}");
+                assert!(
+                    !text(&result).contains("sentinel-private-value"),
+                    "{}",
+                    text(&result)
+                );
+                assert!(!result
+                    .structured_content
+                    .unwrap()
+                    .to_string()
+                    .contains("sentinel-private-value"));
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn incomplete_observation_never_proves_gone_and_preserves_result_shape() {
     let harness = Harness::new();
     let mut state = empty_state();
