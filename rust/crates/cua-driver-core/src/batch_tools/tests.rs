@@ -2282,3 +2282,86 @@ async fn args_mixed_with_a_stray_field_is_still_refused() {
     );
     assert_eq!(harness.hits("press_key"), 0);
 }
+
+#[tokio::test]
+async fn f4a_token_window_wins_over_batch_and_prior_window() {
+    for preceding in [false, true] {
+        let harness = Harness::new();
+        let mut steps = vec![];
+        if preceding {
+            steps.push(json!({"tool":"click","args":{"pid":42,"window_id":8,"x":1,"y":1}}));
+        }
+        steps.push(json!({"tool":"click","args":{"element_token":"s00000001:38"}}));
+        steps.push(json!({"tool":"press_key","args":{"key":"return"}}));
+        let result = harness
+            .run(json!({"pid":42,"window_id":8,"steps":steps,"observe":{}}))
+            .await;
+        assert_ne!(result.is_error, Some(true), "{}", text(&result));
+        assert_eq!(harness.last("click")["window_id"], 9);
+        assert_eq!(harness.last("press_key")["window_id"], 9);
+        assert_eq!(harness.last("get_window_state")["window_id"], 9);
+    }
+}
+
+#[tokio::test]
+async fn f4a_rooted_token_resolves_window_only_for_its_publisher() {
+    use crate::snapshot_store::{
+        InstanceCapture, InstanceEvidence, ScopedWalk, SnapshotPayload, SnapshotStore,
+    };
+    struct Payload;
+    impl SnapshotPayload for Payload {
+        type Element = ();
+        fn len(&self) -> usize {
+            1
+        }
+        fn retain(&self, i: usize) -> Option<()> {
+            (i == 0).then_some(())
+        }
+        fn structural_path(&self, i: usize) -> Option<Vec<usize>> {
+            (i == 0).then_some(vec![0])
+        }
+    }
+    let auth = context(None);
+    let owner = format!("__cua_runtime_{}:session-a", auth.runtime_scope_key());
+    let fp = crate::browser::types::ProcessFingerprint {
+        pid: 42,
+        start_time: Some(1),
+        executable: Some("/app".into()),
+    };
+    let store = Arc::new(SnapshotStore::new());
+    let parent = store
+        .publish_for_session_with_instance(
+            42,
+            9,
+            Payload,
+            Some(&owner),
+            None,
+            InstanceCapture::Captured(fp.clone()),
+        )
+        .unwrap()
+        .0;
+    let root = store
+        .begin_scoped_capture(
+            42,
+            9,
+            &crate::element_token::token_for(parent, 0),
+            Some(&owner),
+            InstanceEvidence::Live(fp),
+        )
+        .unwrap()
+        .validate_root(|_, _, _, _| Ok(()))
+        .unwrap();
+    let scoped = store
+        .commit_scoped_capture(root, ScopedWalk::Complete(Payload))
+        .unwrap();
+    let token = crate::element_token::token_for(scoped, 0);
+    let harness = Harness::build_with_resolver(
+        false,
+        Some(Arc::new(move |args| store.window_for_token(args))),
+    );
+    for (session, succeeds) in [("session-a", true), ("session-b", false)] {
+        let result = harness.registry.invoke_with_context(super::RUN_STEPS_TOOL, json!({"session":session,"steps":[{"tool":"click","args":{"element_token":token}}],"observe":{}}), auth.clone()).await;
+        assert_eq!(result.is_error != Some(true), succeeds, "{}", text(&result));
+    }
+    assert_eq!(harness.hits("click"), 1);
+}

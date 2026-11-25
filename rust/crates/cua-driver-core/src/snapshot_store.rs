@@ -1372,10 +1372,24 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         let pid = inner.pid_of_current(snapshot_id, session)?;
         let window_id = inner
             .lanes
-            .get(&pid)?
-            .iter()
-            .find(|entry| entry.id == snapshot_id)?
-            .window_id;
+            .get(&pid)
+            .and_then(|lane| {
+                lane.iter()
+                    .find(|entry| entry.id == snapshot_id && entry.publisher.as_deref() == session)
+            })
+            .map(|entry| entry.window_id)
+            .or_else(|| {
+                inner
+                    .scoped
+                    .iter()
+                    .filter(|((owner, _), _)| *owner == pid)
+                    .flat_map(|(_, entries)| entries.iter())
+                    .find(|entry| {
+                        entry.snapshot.id == snapshot_id
+                            && entry.snapshot.publisher.as_deref() == session
+                    })
+                    .map(|entry| entry.snapshot.window_id)
+            })?;
         Some((pid, window_id))
     }
 

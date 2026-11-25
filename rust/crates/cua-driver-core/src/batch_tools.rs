@@ -1656,6 +1656,28 @@ async fn run_step(
             element,
             find_timeout,
         } = action;
+        let has_revision = args
+            .get(crate::ui_tree_revision::UI_TREE_REVISION_ARG)
+            .is_some();
+        if has_revision && !element.is_empty() {
+            return failure(
+                index,
+                label,
+                Phase::Find,
+                "revision_requires_explicit_target",
+                "a revision-bearing step cannot perform a fresh element lookup".to_owned(),
+                report,
+            );
+        }
+        if window.is_empty() {
+            if let Some(token_target) = token_window(registry, &args, snapshot_session.as_deref()) {
+                *context = WindowSpec {
+                    pid: Some(token_target.pid),
+                    window_id: Some(token_target.window_id),
+                    ..Default::default()
+                };
+            }
+        }
         if !window.is_empty() {
             *context = window.clone();
         }
@@ -1781,7 +1803,7 @@ async fn run_step(
         // error instead.
         let background_scope = crate::batch_scope::current()
             .is_some_and(|scope| scope.delivery() == crate::batch_scope::ScopeDelivery::Background);
-        if result.proves_no_input() && tool == "click" && !background_scope {
+        if result.proves_no_input() && tool == "click" && !background_scope && !has_revision {
             if let Some((menu_args, note)) = menu_bar_route(&args, &result) {
                 report["refound"] = json!(note);
                 let Some(next) = dispatch_action(registry, &gate, "invoke_menu", menu_args).await
@@ -1799,7 +1821,7 @@ async fn run_step(
                 refound_note = Some(note);
             }
         }
-        if result.proves_no_input() && refound_note.is_none() {
+        if result.proves_no_input() && refound_note.is_none() && !has_revision {
             if let Some((retry, note)) = refind_stale_target(locator, &args, &result).await {
                 report["refound"] = json!(note);
                 let Some(next) = dispatch_action(registry, &gate, tool, retry).await else {
@@ -1821,7 +1843,7 @@ async fn run_step(
             && args.get("delivery_mode").is_none()
             && accepts(registry, tool, "delivery_mode");
         let mut foreground_hint = None;
-        if wants_foreground && foreground_fallback {
+        if wants_foreground && foreground_fallback && refound_note.is_none() {
             let mut retry = args.clone();
             retry["delivery_mode"] = json!("foreground");
             let Some(next) = dispatch_action(registry, &gate, tool, retry).await else {

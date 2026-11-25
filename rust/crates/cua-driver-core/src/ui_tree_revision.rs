@@ -117,6 +117,27 @@ pub fn record_scoped(
     let ledger = &mut *guard;
     ledger.reads += 1;
     let read = ledger.reads;
+    let changed = ledger.windows.iter().any(|((_, p, w, i), entry)| {
+        *p == pid
+            && *w == window_id
+            && i == instance
+            && entry
+                .views
+                .iter()
+                .any(|(key, previous)| key == view && *previous != hash)
+    });
+    if changed {
+        for ((_, p, w, i), entry) in &mut ledger.windows {
+            if *p == pid && *w == window_id && i == instance {
+                entry.revision = next_revision(&mut ledger.last_revision);
+                for (key, previous) in &mut entry.views {
+                    if key == view {
+                        *previous = hash;
+                    }
+                }
+            }
+        }
+    }
     let last_revision = &mut ledger.last_revision;
     let entry = ledger
         .windows
@@ -489,5 +510,28 @@ mod tests {
                 "{value}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod f4a_tests {
+    use super::*;
+    #[test]
+    fn f4a_changed_read_by_another_session_invalidates_old_revision() {
+        let view = ViewKey {
+            query: None,
+            max_elements: 250,
+            max_depth: None,
+        };
+        let old = record_scoped(Some("f4a-a"), "f4a-instance", 425197, 7, &view, None, "old");
+        record_scoped(Some("f4a-b"), "f4a-instance", 425197, 7, &view, None, "new");
+        assert!(check_scoped(
+            "click",
+            old,
+            &json!({"pid":425197,"window_id":7}),
+            Some("f4a-a"),
+            Some("f4a-instance")
+        )
+        .is_err());
     }
 }

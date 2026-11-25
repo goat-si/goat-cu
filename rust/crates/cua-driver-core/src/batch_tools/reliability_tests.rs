@@ -517,6 +517,7 @@ struct RerenderState {
     incomplete: bool,
     refusal: Option<&'static str>,
     click_calls: usize,
+    menu_calls: usize,
     plain_stale: bool,
     ambiguous_stale: bool,
     read_refusal: Option<&'static str>,
@@ -533,6 +534,17 @@ struct RerenderState {
 impl Tool for Rerender {
     fn def(&self) -> &ToolDef {
         &self.def
+    }
+
+    async fn protected_resource_scope(
+        &self,
+        _: &str,
+        _: &Value,
+    ) -> Result<Option<Value>, crate::tool::ProtectedResourceScopeError> {
+        let pid = self.state.lock().unwrap().pid;
+        Ok(Some(
+            json!({"fingerprint":{"pid":pid,"start_time":7,"executable":null}}),
+        ))
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
@@ -617,7 +629,8 @@ impl Tool for Rerender {
                         "background_unavailable",
                         "the toolkit ignores background mouse events",
                         json!({}),
-                    );
+                    )
+                    .with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED);
                 }
                 if state.foreground_fails && foreground {
                     return ToolResult::error("foreground click did not reach the element");
@@ -626,6 +639,10 @@ impl Tool for Rerender {
                 let label = state.rows[row - 1].1.to_owned();
                 state.clicked.push(label.clone());
                 ToolResult::text(format!("clicked {label}"))
+            }
+            "invoke_menu" => {
+                state.menu_calls += 1;
+                ToolResult::text("menu")
             }
             "list_windows" => ToolResult::text("windows").with_structured(json!({"windows": [{
                 "pid": state.pid, "window_id": 7, "app_name": "Daymark", "title": "Daymark",
@@ -748,7 +765,14 @@ fn rerender_registry(
         ..Default::default()
     }));
     let mut registry = ToolRegistry::new();
-    for name in ["click", "get_window_state", "list_windows", "list_apps"] {
+    for name in [
+        "click",
+        "get_window_state",
+        "list_windows",
+        "list_apps",
+        "kill_app",
+        "invoke_menu",
+    ] {
         registry.register(Box::new(Rerender {
             def: ToolDef {
                 name: name.into(),
@@ -905,4 +929,94 @@ async fn no_delivery_evidence_never_replays_a_foreground_hint() {
         1,
         "an unclassified send must not be replayed"
     );
+}
+
+#[tokio::test]
+async fn f4a_refind_must_not_foreground_replay_original_token() {
+    let (registry, state) = rerender_registry(425199, vec![("AXButton", "Save")]);
+    {
+        let mut s = state.lock().unwrap();
+        s.plain_stale = true;
+        s.refuse_background = true;
+    }
+    crate::window_state_view::remember_for_test(
+        "s0000fa99",
+        425199,
+        7,
+        "- [14] AXButton \"Save\"\n",
+    );
+    let result = registry.invoke(super::super::RUN_STEPS_TOOL, json!({"foreground_fallback":true,"steps":[{"tool":"click","args":{"pid":425199,"window_id":7,"element_token":"s0000fa99:14"}}]})).await;
+    let s = state.lock().unwrap();
+    assert_eq!(s.click_calls, 2, "no third dispatch: {}", text(&result));
+    assert_eq!(result.is_error, Some(true));
+}
+
+#[tokio::test]
+async fn f4a_revision_role_lookup_is_refused_before_reads() {
+    let (registry, state) = rerender_registry(425198, vec![("AXButton", "Save")]);
+    let result = registry.invoke(super::super::RUN_STEPS_TOOL, json!({"steps":[{"tool":"click","args":{"pid":425198,"window_id":7,"role":"AXButton","name":"Save","ui_tree_revision":1}}]})).await;
+    assert_eq!(result.is_error, Some(true), "{}", text(&result));
+    let s = state.lock().unwrap();
+    assert_eq!(s.snapshot, 40);
+    assert_eq!(s.click_calls, 0);
+}
+
+#[tokio::test]
+async fn f4a_revision_stale_never_refinds_or_routes_menu() {
+    for menu in [true, false] {
+        let pid = if menu { 425196 } else { 425195 };
+        let (registry, state) = rerender_registry(pid, vec![("AXButton", "Save")]);
+        state.lock().unwrap().plain_stale = true;
+        let snapshot = if menu { "s0000fa98" } else { "s0000fa97" };
+        let token = format!("{snapshot}:14");
+        let tree = if menu {
+            "- [27] AXMenuBar\n  - [700] AXMenuBarItem \"Sheet\"\n    - [701] AXMenu\n      - [14] AXMenuItem \"Save\"\n"
+        } else {
+            "- [14] AXButton \"Save\"\n"
+        };
+        crate::window_state_view::remember_for_test(snapshot, pid, 7, tree);
+        let auth = super::context(None);
+        let owner = auth.runtime_session_key("f4a-revision");
+        let revision = crate::ui_tree_revision::record_scoped(
+            Some(&owner),
+            "7",
+            pid,
+            7,
+            &crate::window_state_view::ViewKey {
+                query: None,
+                max_elements: 250,
+                max_depth: None,
+            },
+            Some(snapshot),
+            tree,
+        );
+        let result = registry.invoke_with_context(super::super::RUN_STEPS_TOOL, json!({"session":"f4a-revision","steps":[{"tool":"click","args":{"pid":pid,"window_id":7,"element_token":token,"ui_tree_revision":revision}}]}), auth).await;
+        let s = state.lock().unwrap();
+        assert_eq!(s.click_calls, 1, "{}", text(&result));
+        assert_eq!(s.snapshot, 40, "{}", text(&result));
+        assert_eq!(s.menu_calls, 0, "{}", text(&result));
+        assert_eq!(result.is_error, Some(true));
+    }
+}
+
+#[tokio::test]
+async fn f4a_cross_session_observation_refuses_registry_action() {
+    let pid = 425194;
+    let (registry, state) = rerender_registry(pid, vec![("AXButton", "Save")]);
+    let auth = super::context(None);
+    let a = auth.runtime_session_key("f4a-a");
+    let b = auth.runtime_session_key("f4a-b");
+    let view = crate::window_state_view::ViewKey {
+        query: None,
+        max_elements: 250,
+        max_depth: None,
+    };
+    let rev = crate::ui_tree_revision::record_scoped(Some(&a), "7", pid, 7, &view, None, "old");
+    crate::ui_tree_revision::record_scoped(Some(&b), "7", pid, 7, &view, None, "new");
+    let result = registry.invoke_with_context("click", json!({"session":"f4a-a","pid":pid,"window_id":7,"element_token":"s00000028:1","ui_tree_revision":rev}), auth).await;
+    assert_eq!(
+        result.structured_content.unwrap()["refusal"]["code"],
+        "stale_revision"
+    );
+    assert_eq!(state.lock().unwrap().click_calls, 0);
 }
