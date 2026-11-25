@@ -42,3 +42,7 @@ Each crate and exact version from `/private/tmp/goat-cu-sync62/s9-deny-full.log`
 | RUSTSEC-2026-0410 | zstd-sys | 2.0.16+zstd.1.5.7 | yes |
 | RUSTSEC-2026-0370 | zvariant | 5.12.0 | yes |
 | RUSTSEC-2026-0372 | zvariant_derive | 5.12.0 | yes |
+
+## Protocol compatibility against the pinned baseline (0.38.0-goat.3)
+
+`python3 goat/compat/check_protocol.py --candidate rust/target/debug/cua-driver --candidate-version 0.47.24-goat.1 --baseline-key darwin-universal` at c387f7be (debug build from the protocol_schema_test run): 19 incompatible changes before the allowlist entries, 0 after ("protocol-compatible with the baseline in every GOAT launch form"). Added tools vs the baseline: browser_fill_secret, browser_motion_policy, menu_bar_extras, select_text. Removed: escalate_session, get_session_state. Added optional arguments include ui_tree_revision on click, double_click, drag, hotkey, press_key, right_click, scroll, set_value and type_text. Linux and Windows baselines run in CI.
