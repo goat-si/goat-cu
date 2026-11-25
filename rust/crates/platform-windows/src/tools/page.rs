@@ -138,10 +138,18 @@ unsafe fn query_dom_blocking(
             }
         }
 
-        let name = read_string(&elem, |e| {
-            e.CurrentName().map(|b| b.to_string()).map_err(|e| e.into())
-        })
-        .unwrap_or_default();
+        let expose = crate::combo_privacy::may_expose(
+            elem.CurrentIsPassword().ok().map(|v| v.as_bool()),
+            false,
+        );
+        let name = expose
+            .then(|| {
+                read_string(&elem, |e| {
+                    e.CurrentName().map(|b| b.to_string()).map_err(|e| e.into())
+                })
+            })
+            .flatten()
+            .unwrap_or_default();
 
         // attributes the caller asked for. We map a small set of well-known
         // CSS attribute names onto UIA properties.
@@ -154,8 +162,8 @@ unsafe fn query_dom_blocking(
                         .map(|b| b.to_string())
                         .map_err(|e| e.into())
                 }),
-                "value" => read_value_value(&elem),
-                "href" => {
+                "value" if expose => read_value_value(&elem),
+                "href" if expose => {
                     // No native UIA "href" — closest is the AccessibleValue
                     // for hyperlinks (Chromium populates this with the URL).
                     read_value_value(&elem)

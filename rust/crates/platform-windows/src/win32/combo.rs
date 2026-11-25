@@ -195,6 +195,14 @@ fn edit_child(combo: isize) -> Option<isize> {
     .map(|edit| edit.0 as isize)
 }
 
+/// Password-style edit children must never be read or echoed.
+pub fn has_password_edit(combo: Combo) -> bool {
+    edit_child(combo.hwnd).is_some_and(|edit| {
+        let style = unsafe { GetWindowLongW(hwnd(edit), GWL_STYLE) };
+        style == 0 || style & 0x20 != 0
+    })
+}
+
 /// Send a combo notification to the combo's parent, as the control does.
 fn notify_parent(combo: isize, code: u16) -> bool {
     let Ok(parent) = (unsafe { GetParent(hwnd(combo)) }) else {
@@ -277,7 +285,11 @@ pub fn set_value(combo: Combo, value: &str) -> anyhow::Result<ComboWrite> {
             // Replacing the selection is how the edit sees typing: it sends
             // EN_UPDATE / EN_CHANGE and the combo forwards them to the app.
             Some(edit) => {
-                send(edit, EM_SETSEL, 0, -1);
+                if !crate::combo_privacy::selection_acknowledged(send(edit, EM_SETSEL, 0, -1)) {
+                    anyhow::bail!(
+                        "the combo's edit field did not acknowledge selection; no replacement sent"
+                    );
+                }
                 send(edit, EM_REPLACESEL, 1, text.as_ptr() as isize)
                     .ok_or_else(|| anyhow::anyhow!("the combo's edit field did not answer"))?;
             }

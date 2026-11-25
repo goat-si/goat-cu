@@ -25,7 +25,9 @@ use atspi::proxy::accessible::AccessibleProxy;
 use atspi::proxy::proxy_ext::ProxyExt;
 use atspi::{CoordType, Interface, State, StateSet};
 
-use crate::atspi_text::{editable_text_value, is_password_field, text_content_name, RoleRead};
+use crate::atspi_text::{
+    editable_text_value, is_password_field, provider_description, text_content_name, RoleRead,
+};
 use atspi_connection::AccessibilityConnection;
 
 use super::{AtspiIdentity, AtspiNode};
@@ -2003,15 +2005,12 @@ async fn collect_visited_bounded_opts<'a>(
         // GTK4 names role 40 (PASSWORD_TEXT) "text box", so a text widget's
         // numeric role decides whether it is a password field; the role name
         // stays a fallback. One more round trip, only for text widgets.
-        let role_read = if has_text || has_editable {
-            match call(acc.get_role()).await {
-                Some(Ok(role)) => RoleRead::Known(role as u32),
-                _ => RoleRead::Failed,
-            }
-        } else {
-            RoleRead::NotRead
+        let role_read = match call(acc.get_role()).await {
+            Some(Ok(role)) => RoleRead::Known(role as u32),
+            _ if has_text || has_editable => RoleRead::Failed,
+            _ => RoleRead::NotRead,
         };
-        let is_password = is_password_field(role_read, &role_lower);
+        let mut is_password = is_password_field(role_read, &role_lower);
         // Chromium puts the Document interface on nearly every node; only a
         // document's own URI names the rendered page, so read it there alone.
         let has_document = ifaces.contains(Interface::Document)
@@ -2153,6 +2152,21 @@ async fn collect_visited_bounded_opts<'a>(
             if let Some(Ok(text)) = call(acc.description()).await {
                 description = text.trim().to_owned();
             }
+        }
+        is_password |=
+            cua_driver_core::snapshot_compaction::is_secure_text_field(&FieldSecurityMeta {
+                role: &role,
+                subrole: None,
+                title: Some(&name),
+                description: Some(&description),
+                placeholder: None,
+                identifier: None,
+                help: None,
+                is_password_flag: is_password,
+            });
+        description = provider_description(description, is_password);
+        if is_password {
+            value = None;
         }
         // An unnamed value/editable control: its `LABELLED_BY` relation names
         // it (GTK grids, Qt forms with buddies). One relation read plus one
@@ -2715,7 +2729,7 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> Rendered {
             // as its name.
             let mut name = v.name.clone();
             let mut unlabelled_note = None;
-            if name.trim().is_empty() && is_value_control_role(&role_lower) {
+            if !v.is_password && name.trim().is_empty() && is_value_control_role(&role_lower) {
                 if !v.description.trim().is_empty() {
                     // GIMP's spin scales draw their label inside the widget
                     // and publish it as the description.

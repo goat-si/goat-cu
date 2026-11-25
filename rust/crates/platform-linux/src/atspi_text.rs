@@ -9,6 +9,14 @@ pub(crate) const ROLE_PASSWORD_TEXT: u32 = 40;
 /// What a write result shows in place of a value it must not repeat.
 pub(crate) const REDACTED: &str = "[REDACTED]";
 
+pub(crate) fn provider_description(description: String, secure: bool) -> String {
+    if secure {
+        String::new()
+    } else {
+        description
+    }
+}
+
 /// The value a write result may repeat back: the requested value, except for
 /// a password field, whose value would otherwise land in the reply and the
 /// transcript.
@@ -37,9 +45,13 @@ pub(crate) enum RoleRead {
 /// hidden rather than risk showing a password.
 pub(crate) fn is_password_field(role: RoleRead, role_lower: &str) -> bool {
     match role {
-        RoleRead::Known(number) => number == ROLE_PASSWORD_TEXT || role_lower.contains("password"),
+        RoleRead::Known(number) => {
+            number == ROLE_PASSWORD_TEXT
+                || role_lower.contains("password")
+                || role_lower.contains("secure")
+        }
         RoleRead::Failed => true,
-        RoleRead::NotRead => role_lower.contains("password"),
+        RoleRead::NotRead => role_lower.contains("password") || role_lower.contains("secure"),
     }
 }
 
@@ -66,27 +78,17 @@ pub(crate) fn editable_text_value(
 /// A value control (GtkSpinButton implements AtkText with its formatted
 /// number) would otherwise be named after its own value.
 ///
-/// A password field's content is never surfaced, and its own accessible name
-/// may mirror that content. The name is kept only when it came from a
-/// `LABELLED_BY` label (`labelled`), or when the whole content was read
-/// (`text_complete`) and the name shares nothing with it.
+/// A password field's name may mirror its content, so it is always withheld.
 pub(crate) fn text_content_name(
     name: String,
     is_password: bool,
-    labelled: bool,
-    text_complete: bool,
+    _labelled: bool,
+    _text_complete: bool,
     has_value: bool,
     text_content: &str,
 ) -> String {
     if is_password {
-        let label = name.trim();
-        let typed = text_content.trim();
-        let distinct = typed.is_empty() || (!label.contains(typed) && !typed.contains(label));
-        return if labelled || (text_complete && distinct) {
-            name
-        } else {
-            String::new()
-        };
+        return String::new();
     }
     if name.trim().is_empty() && !text_content.trim().is_empty() && !has_value {
         return text_content.to_owned();
@@ -97,6 +99,12 @@ pub(crate) fn text_content_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secure_description_is_withheld_with_nonsecure_control() {
+        assert_eq!(provider_description("sentinel".into(), true), "");
+        assert_eq!(provider_description("label".into(), false), "label");
+    }
 
     #[test]
     fn editable_text_reports_its_content_as_value() {
@@ -205,9 +213,9 @@ mod tests {
             ""
         );
         // A distinct name over fully read content, or a LABELLED_BY label.
-        assert_eq!(name("Password", false, true, "hunter2"), "Password");
-        assert_eq!(name("Password", false, true, ""), "Password");
-        assert_eq!(name("Password", true, false, ""), "Password");
+        assert_eq!(name("Password", false, true, "hunter2"), "");
+        assert_eq!(name("Password", false, true, ""), "");
+        assert_eq!(name("Password", true, false, ""), "");
     }
 
     #[test]

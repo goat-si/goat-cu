@@ -115,6 +115,9 @@ mod value_append;
 #[cfg(any(target_os = "windows", test))]
 mod secure_field;
 
+#[cfg(any(target_os = "windows", test))]
+mod combo_privacy;
+
 // Pure restore rule for foreground input turns; runs its table test on any host.
 #[cfg(any(target_os = "windows", test))]
 mod typing_turn;

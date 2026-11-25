@@ -338,7 +338,7 @@ impl McpDriver {
         let label = recording_label(explicit_label.unwrap_or(&thread_name));
         let output_dir =
             PathBuf::from(root).join(format!("{label}-pid{}-{sequence:03}", std::process::id()));
-        std::fs::create_dir_all(&output_dir).unwrap_or_else(|error| {
+        create_recording_dir(&output_dir).unwrap_or_else(|error| {
             panic!("could not prepare E2E recording directory for {thread_name}: {error}")
         });
         let runner_console = crate::windows_setup::minimize_hosted_runner_console();
@@ -543,6 +543,37 @@ impl McpDriver {
             writeln!(file, "{row}").expect("append tool transcript");
         }
         response
+    }
+}
+
+fn create_recording_dir(path: &std::path::Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+#[cfg(all(test, unix))]
+mod private_recording_tests {
+    use super::create_recording_dir;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn recording_directory_is_private_and_rejects_existing_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("recording");
+        create_recording_dir(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(create_recording_dir(&path).is_err());
     }
 }
 

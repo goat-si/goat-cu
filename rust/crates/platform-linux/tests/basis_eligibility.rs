@@ -61,7 +61,7 @@ fn untrusted_rows_are_removed_before_capture_only_publication() {
         .0;
     let ticket = store.begin_capture(42, 7);
     assert_eq!(
-        discard_untrusted_snapshot(&store, 42, 7, Some(&ticket)),
+        discard_untrusted_snapshot(&store, 42, 7, Some(&ticket), None),
         Some(old)
     );
     let f = frame();
@@ -89,7 +89,7 @@ fn untrusted_rows_are_removed_before_capture_only_publication() {
         store.screenshot_context(42, Some(7), None).unwrap().scale,
         0.25
     );
-    assert!(discard_untrusted_snapshot(&store, 42, 7, None).is_some());
+    assert!(discard_untrusted_snapshot(&store, 42, 7, None, None).is_some());
 }
 
 fn frame() -> LiveFrame {

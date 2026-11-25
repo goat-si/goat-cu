@@ -134,13 +134,6 @@ fn semantic_cursor_showcase_records_session_and_action_states() {
             width,
             height,
         );
-        let screenshot_path = driver
-            .recording_dir()
-            .expect("showcase recording directory")
-            .join("cursor-oracle.png");
-        std::fs::write(&screenshot_path, cursor_png).expect("write cursor oracle screenshot");
-        evidence.screenshot = Some(screenshot_path.display().to_string());
-
         // The cursor and pill keep resting there, yet the capture the Driver
         // hands the agent must not contain them (D-WL5).
         assert_driver_capture_excludes_overlay(
@@ -255,14 +248,6 @@ impl FirstAction {
             Self::Keyboard => "keyboard press_key",
             Self::Semantic => "semantic element_token click",
             Self::Coordinate => "coordinate click",
-        }
-    }
-
-    fn evidence_file(self) -> &'static str {
-        match self {
-            Self::Keyboard => "cursor-oracle-keyboard.png",
-            Self::Semantic => "cursor-oracle-semantic.png",
-            Self::Coordinate => "cursor-oracle-coordinate.png",
         }
     }
 
@@ -439,12 +424,6 @@ fn session_first_actions_show_pointer_and_badge_in_the_video() {
             (screen_width, screen_height),
             places,
         );
-        evidence.screenshot = Some(
-            recording_dir
-                .join(FirstAction::Keyboard.evidence_file())
-                .display()
-                .to_string(),
-        );
         eprintln!("[first-actions] cursor rests start at sampled frames {rests:?}");
         Observation::delivered(vec![OracleKind::Pixels], Evidence::default())
     });
@@ -618,13 +597,11 @@ fn empty_window_point(
 /// indices.
 fn assert_first_actions_in_video(
     video: &Path,
-    recording_dir: &Path,
+    _recording_dir: &Path,
     (screen_width, screen_height): (f64, f64),
     places: [(f64, f64); 3],
 ) -> Vec<usize> {
-    let baseline_path = recording_dir.join("cursor-oracle-baseline.png");
-    extract_last_frame(video, &baseline_path);
-    let baseline = image::open(&baseline_path)
+    let baseline = image::load_from_memory(&extract_last_frame(video))
         .expect("decode the video's last frame")
         .to_rgba8();
     let regions = places.map(|(x, y)| {
@@ -649,15 +626,6 @@ fn assert_first_actions_in_video(
             baseline.width(),
             baseline.height(),
         )
-    });
-    for_each_video_frame(video, baseline.dimensions(), |index, frame| {
-        for (action, rest) in FirstAction::ORDER.iter().zip(&rests) {
-            if *rest == index {
-                frame
-                    .save(recording_dir.join(action.evidence_file()))
-                    .expect("write a cursor oracle frame");
-            }
-        }
     });
     rests
 }
@@ -705,31 +673,33 @@ fn first_action_rests(frames: &[[OverlayPixels; 3]]) -> Result<Vec<usize>, Strin
 }
 
 /// Decode the video's final frame to `frame`, the overlay oracle's baseline.
-fn extract_last_frame(video: &Path, frame: &Path) {
+fn extract_last_frame(video: &Path) -> Vec<u8> {
     // A VFR recording's final frame can precede its duration by more than a
     // seek offset. Decode in order and overwrite one image to keep the last.
     let output = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
         .arg(video)
         .args([
             "-map",
             "0:v:0",
-            "-fps_mode",
-            "passthrough",
-            "-f",
-            "image2",
-            "-update",
+            "-vf",
+            "reverse",
+            "-frames:v",
             "1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "png",
+            "pipe:1",
         ])
-        .arg(frame)
-        .stdout(Stdio::null())
         .output()
         .expect("ffmpeg is required to read the behavioral video");
     assert!(
-        output.status.success() && frame.is_file(),
+        output.status.success() && !output.stdout.is_empty(),
         "could not extract the video's last frame: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    output.stdout
 }
 
 /// Visit the video's frames, sampled at [`VIDEO_SAMPLE_FPS`], in order.

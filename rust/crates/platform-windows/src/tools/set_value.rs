@@ -9,10 +9,10 @@ use cua_driver_core::{
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use super::click::acquire_uia_pattern;
 use super::impl_::{
     element_target_rect, overlay_glide_to_target, pin_overlay_above, resolve_cursor_key, ToolState,
 };
-use super::click::acquire_uia_pattern;
 
 // ── set_value ─────────────────────────────────────────────────────────────────
 
@@ -154,6 +154,10 @@ impl Tool for SetValueTool {
                         let elem = std::mem::ManuallyDrop::new(unsafe {
                             IUIAutomationElement::from_raw(ptr as *mut _)
                         });
+                        let password = unsafe { elem.CurrentIsPassword() }.ok().map(|v| v.as_bool());
+                        if !crate::combo_privacy::may_expose(password, false) {
+                            return Ok(SetValueRoute::AdmissionRefused { reason: "secure or unknown target; use a secret input tool" });
+                        }
                         // A native Win32 combo box (or its edit field): select the
                         // option and notify the app the way the control does. A UIA
                         // value write would only change the displayed text.
@@ -169,6 +173,9 @@ impl Tool for SetValueTool {
                             });
                         }
                         if let Some(combo) = native {
+                            if !crate::combo_privacy::may_expose(password, crate::win32::combo::has_password_edit(combo)) {
+                                return Ok(SetValueRoute::AdmissionRefused { reason: "secure edit child; use a secret input tool" });
+                            }
                             let write = crate::win32::combo::set_value(combo, &value)?;
                             return Ok(SetValueRoute::Win32Combo { combo, write });
                         }
