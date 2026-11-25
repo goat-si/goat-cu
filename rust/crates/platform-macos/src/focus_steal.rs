@@ -622,7 +622,13 @@ pub struct ActivationRecord {
 
 impl ActivationRecord {
     pub fn start(pid: i32) -> Self {
-        FocusStealPreventer::shared();
+        Self::start_with(pid, || {
+            FocusStealPreventer::shared();
+        })
+    }
+
+    fn start_with(pid: i32, install: impl FnOnce()) -> Self {
+        install();
         let id = Uuid::new_v4();
         let seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
         activation_records().push((id, pid, seen.clone()));
@@ -693,7 +699,7 @@ mod tests {
     /// after the pid loses the front again, and stops recording when dropped.
     #[test]
     fn activation_record_drains_queued_notification_before_finish() {
-        let record = ActivationRecord::start(-4820);
+        let record = ActivationRecord::start_with(-4820, || {});
         let (release, queued) = std::sync::mpsc::sync_channel::<()>(0);
         let (done, delivered) = std::sync::mpsc::sync_channel::<()>(0);
         let callback = std::thread::spawn(move || {
@@ -712,15 +718,15 @@ mod tests {
 
     #[test]
     fn activation_record_keeps_a_brief_activation_of_its_pid() {
-        let record = ActivationRecord::start(-4810);
+        let record = ActivationRecord::start_with(-4810, || {});
         note_activation(-4811);
-        assert!(!record.seen());
+        assert!(!record.seen_after(|| true));
         note_activation(-4810);
         note_activation(-4811);
-        assert!(record.seen());
+        assert!(record.seen_after(|| true));
         drop(record);
-        let later = ActivationRecord::start(-4810);
-        assert!(!later.seen());
+        let later = ActivationRecord::start_with(-4810, || {});
+        assert!(!later.seen_after(|| true));
         assert!(!activation_records()
             .iter()
             .any(|(_, pid, seen)| *pid == -4810 && seen.load(std::sync::atomic::Ordering::SeqCst)));

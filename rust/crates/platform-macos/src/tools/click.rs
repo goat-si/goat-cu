@@ -136,9 +136,8 @@ mod sheet_dispatch_tests {
         use std::cell::Cell;
         let sends = Cell::new(0);
         unsafe {
-            let element =
-                crate::ax::bindings::AXUIElementCreateApplication(std::process::id() as i32);
-            assert!(!element.is_null());
+            // Every operation on this opaque handle is injected below.
+            let element = std::ptr::null_mut();
             let admission = Some(false);
             assert_eq!(admission, Some(false));
             for sheet in [Some(true), None] {
@@ -153,11 +152,24 @@ mod sheet_dispatch_tests {
                         crate::ax::bindings::kAXErrorSuccess
                     },
                     &|_| sheet,
+                    &|_, _, _| ClickProbe {
+                        title: None,
+                        toggle: None,
+                        selection: None,
+                        sheet: None,
+                        sheet_press_at: None,
+                        scope: ObservationScope::Nothing,
+                        hit: None,
+                        idle_before: None,
+                        input_from: std::time::Instant::now(),
+                        started: std::time::Instant::now(),
+                        own_post: None,
+                    },
+                    &|_| String::new(),
                 )
                 .unwrap();
                 assert!(matches!(outcome, AxPressOutcome::SheetBlocked));
             }
-            CFRelease(element as _);
         }
         assert_eq!(sends.get(), 0);
     }
@@ -8071,9 +8083,12 @@ unsafe fn ax_press_with_ancestors(
         &|el| crate::ax::bindings::copy_action_names(el),
         &|el, action| AXUIElementPerformAction(el, action),
         &|el| crate::ax::exact_target::element_blocked_by_sheet(el),
+        &|el, toggle, reads| ClickProbe::capture(Some(el), toggle, reads),
+        &|el| copy_string_attr(el, "AXRole").unwrap_or_default(),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn ax_press_with_ancestors_with(
     element: crate::ax::bindings::AXUIElementRef,
     dispatch_guard: &Option<super::window_points::DispatchGuard>,
@@ -8082,6 +8097,8 @@ unsafe fn ax_press_with_ancestors_with(
     read_actions: &dyn Fn(AXUIElementRef) -> Vec<String>,
     perform: &dyn Fn(AXUIElementRef, core_foundation::string::CFStringRef) -> i32,
     sheet: &dyn Fn(AXUIElementRef) -> Option<bool>,
+    capture: &dyn Fn(AXUIElementRef, bool, ClickReads) -> ClickProbe,
+    role: &dyn Fn(AXUIElementRef) -> String,
 ) -> Result<AxPressOutcome, super::window_points::WindowMoved> {
     use crate::ax::bindings::{copy_element_attr, copy_string_attr};
     use core_foundation::base::CFRelease;
@@ -8089,9 +8106,9 @@ unsafe fn ax_press_with_ancestors_with(
 
     let leaf_actions = read_actions(element);
     if leaf_actions.iter().any(|a| a == "AXPress") {
-        let role = copy_string_attr(element, "AXRole").unwrap_or_default();
-        let probe = ClickProbe::capture(
-            Some(element),
+        let role = role(element);
+        let probe = capture(
+            element,
             is_toggle_press("AXPress", &role, &leaf_actions),
             reads,
         );

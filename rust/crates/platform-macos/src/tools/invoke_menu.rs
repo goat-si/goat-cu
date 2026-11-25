@@ -1388,18 +1388,22 @@ pub(super) async fn run_in_background_with_lease(
 
 /// The refusal for a dispatch gate that failed: nothing was dispatched.
 fn gate_refusal(pid: i32, _window_id: u32, error: BackgroundPressError) -> ToolResult {
+    gate_refusal_with(pid, error, |requested| {
+        crate::windows::window_on_current_space_by_id(requested) == Some(false)
+    })
+}
+
+fn gate_refusal_with(
+    pid: i32,
+    error: BackgroundPressError,
+    off_space: impl FnOnce(u32) -> bool,
+) -> ToolResult {
     match error {
         BackgroundPressError::UnboundWindow {
             requested,
             focused,
             main,
-        } => unbound_menu_window(
-            pid,
-            requested,
-            focused,
-            main,
-            crate::windows::window_on_current_space_by_id(requested) == Some(false),
-        ),
+        } => unbound_menu_window(pid, requested, focused, main, off_space(requested)),
         BackgroundPressError::Other(message) => refusal(message),
         _ => refusal("invoke_menu: the dispatch check refused; no menu action was sent".to_owned()),
     }
@@ -1722,14 +1726,14 @@ impl Tool for InvokeMenuTool {
         .await
         .unwrap_or(MenuRoute::Background);
         if route == MenuRoute::Background {
-            return run_in_background(pid, window_id, path, MenuRequest::Path, KeyOwner::Direct).await;
+            return run_in_background(pid, window_id, path, MenuRequest::Path, KeyOwner::Direct)
+                .await;
         }
 
         let outcome = latency::spawn_action_blocking(move || {
             let prior_frontmost = live_frontmost_app().or_else(crate::apps::frontmost_pid);
-            let prior_frontmost_window = prior_frontmost.and_then(|prior| {
-                crate::ax::bindings::focused_window_id_of_pid(prior)
-            });
+            let prior_frontmost_window =
+                prior_frontmost.and_then(crate::ax::bindings::focused_window_id_of_pid);
             let needs_activation = prior_frontmost != Some(pid);
 
             let result = focus_exact_window(pid, window_id)
@@ -1967,13 +1971,16 @@ mod tests {
 
     #[test]
     fn a_failed_scripted_save_gate_is_a_refusal_naming_why() {
-        let unbound = gate_refusal(
+        let unbound = gate_refusal_with(
             1,
-            7,
             BackgroundPressError::UnboundWindow {
                 requested: 7,
                 focused: Some(8),
                 main: Some(8),
+            },
+            |requested| {
+                assert_eq!(requested, 7);
+                false
             },
         );
         assert_eq!(
