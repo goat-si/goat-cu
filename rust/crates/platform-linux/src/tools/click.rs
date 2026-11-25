@@ -209,7 +209,7 @@ mod token_window_scope_tests {
             // Text, focus, value and scroll dispatch address this object.
             assert_eq!(token.object().expect("addressable").path, path);
             let cached = snapshots
-                .with_latest(PID as i32, window, |_, snapshot| snapshot.elements())
+                .with_latest(PID as i32, window, None, |_, snapshot| snapshot.elements())
                 .and_then(|elements| elements.get(&INDEX).cloned())
                 .expect("window snapshot retains its element");
             assert_eq!(cached.object_ref.expect("addressable").path, path);
@@ -1654,6 +1654,10 @@ impl Tool for ClickTool {
         let cursor_id_for_task = cursor_id.clone();
         let modifiers_for_task = modifiers.clone();
         let snapshots_for_task = Arc::clone(&self.state.snapshots);
+        let snapshot_session = args
+            .get("_session_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         // delivery_mode: background (default) = no-focus-steal injection;
         // foreground = activate the target window (EWMH) first, then inject,
         // then restore the prior active window unless the click opened a menu.
@@ -1717,7 +1721,7 @@ impl Tool for ClickTool {
                     let (hit, guard) = crate::input::focus_guard::guarded(Some(pid), || {
                         // Hit-test against this window's runtime snapshot only.
                         let elements = snapshots_for_task
-                            .with_latest(pid as i32, xid, |_, snapshot| snapshot.elements());
+                            .with_latest(pid as i32, xid, snapshot_session.as_deref(), |_, snapshot| snapshot.elements());
                         Ok(crate::atspi::perform_action_at_point_in_with_elements(
                             pid,
                             xid,

@@ -124,7 +124,7 @@ fn def() -> &'static ToolDef {
             "type": "object",
             "required": [],
             "properties": {
-                "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session." },
+                "session": cua_driver_core::tool_schema::session_schema(),
                 "action": { "type": "string", "enum": ["open", "close"], "description": "open right-clicks; close AXCancels only this tool's opener-owned menu." },
                 "opener_id": { "type": "integer", "minimum": 1, "description": "Numeric owner id returned in right_click open text; required for close." },
                 "pid": { "type": "integer", "description": "Target process ID. Optional with element_token (the token carries the pid)." },

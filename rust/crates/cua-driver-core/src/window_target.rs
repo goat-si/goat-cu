@@ -71,7 +71,8 @@ pub type DesktopPointWindowResolver =
 pub type PidFallbackWindowResolver = Arc<dyn Fn(i64) -> Option<u64> + Send + Sync + 'static>;
 
 /// `(pid, snapshot handle)` -> the window that snapshot was taken of.
-pub type SnapshotWindowResolver = Arc<dyn Fn(i64, &str) -> Option<u64> + Send + Sync + 'static>;
+pub type SnapshotWindowResolver =
+    Arc<dyn Fn(i64, &str, Option<&str>) -> Option<u64> + Send + Sync + 'static>;
 
 /// Call arguments -> who their `element_token` belonged to, and that process's
 /// current snapshots (see `SnapshotStore::token_owner`), so a stale refusal can
@@ -231,7 +232,11 @@ impl Tool for PidOnlyWindowTargetGuard {
                         .unwrap_or_else(|| handle.to_owned())
                 }),
         ) {
-            if let Some(window_id) = resolver(pid, &handle) {
+            if let Some(window_id) = resolver(
+                pid,
+                &handle,
+                args.get("_session_id").and_then(Value::as_str),
+            ) {
                 if let Some(object) = args.as_object_mut() {
                     object.insert("window_id".to_owned(), window_id.into());
                 }
@@ -869,8 +874,9 @@ mod visibility_tests {
         }
         let seen = Arc::new(AtomicU64::new(0));
         let candidates: WindowTargetCandidates = Arc::new(|_| vec![]);
-        let resolver: SnapshotWindowResolver =
-            Arc::new(|pid, handle| (pid == 5 && handle == "s00000004").then_some(8395475));
+        let resolver: SnapshotWindowResolver = Arc::new(|pid, handle, _session| {
+            (pid == 5 && handle == "s00000004").then_some(8395475)
+        });
         let guard = PidOnlyWindowTargetGuard::new(Box::new(Echo(seen.clone())), candidates)
             .with_snapshot_resolver(resolver);
         let result = guard

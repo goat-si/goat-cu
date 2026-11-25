@@ -370,7 +370,7 @@ async fn registry_fake_platform_drills_without_replacing_the_full_snapshot() {
             assert_eq!(*live.root_element(), 12);
         }
         assert_eq!(
-            store.with_latest(42, 7, |id, payload| (
+            store.with_latest(42, 7, session.lock().unwrap().as_deref(), |id, payload| (
                 format_snapshot_id(id),
                 payload.0.clone()
             )),
@@ -408,7 +408,9 @@ async fn registry_fake_platform_drills_without_replacing_the_full_snapshot() {
     assert!(output.get("tree_markdown").is_some());
     assert_eq!(
         store
-            .with_latest(42, 7, |id, _| format_snapshot_id(id))
+            .with_latest(42, 7, session.lock().unwrap().as_deref(), |id, _| {
+                format_snapshot_id(id)
+            })
             .as_deref(),
         Some(parent.as_str())
     );

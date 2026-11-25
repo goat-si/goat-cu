@@ -4053,6 +4053,9 @@ fn prune_echo_text_rows(
             continue;
         };
         let parent = &nodes[parent_index];
+        if parent.element_index.is_none() {
+            continue;
+        }
         let displayed_help = parent
             .element_index
             .is_some()
@@ -4608,6 +4611,24 @@ mod lean_row_tests {
                 "- [12] AXStaticText = \"Inbox\"",
             ]
         );
+    }
+
+    #[test]
+    fn echo_text_under_an_unindexed_group_is_kept_as_the_target() {
+        let nodes = vec![
+            node("AXWindow", Some(0), Some("Harness"), None, &[]),
+            node("AXGroup", None, Some("scroll-tall"), None, &[]),
+            node("AXStaticText", Some(33), None, Some("top marker"), &[]),
+            node("AXStaticText", Some(34), None, Some("scroll-tall"), &[]),
+            node("AXStaticText", Some(35), None, Some("line 02"), &[]),
+        ];
+        let mut lines = vec![
+            (0, format_node_line(&nodes[0])), (1, format_node_line(&nodes[1])),
+            (2, format_node_line(&nodes[2])), (2, format_node_line(&nodes[3])),
+            (2, format_node_line(&nodes[4])),
+        ];
+        prune(&mut lines, &nodes);
+        assert_eq!(lines.len(), 5);
     }
 
     #[test]

@@ -89,6 +89,32 @@ where
     super::actionability::dispatch_semantic(clock, budget, context, probe, perform).await
 }
 
+#[derive(Debug)]
+struct ObservedIdentityChanged;
+impl std::fmt::Display for ObservedIdentityChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(cua_driver_core::element_token::STALE_TOKEN_ERROR)
+    }
+}
+impl std::error::Error for ObservedIdentityChanged {}
+
+fn ensure_observed_identity(element: &crate::ax::snapshot::RetainedElement) -> anyhow::Result<()> {
+    if !element.observed_identity_is_current() {
+        anyhow::bail!(ObservedIdentityChanged);
+    }
+    Ok(())
+}
+
+fn identity_refusal(foreground: bool) -> ToolResult {
+    if foreground {
+        return click_task_failure("The target identity changed after foreground activation was attempted; no click was sent, but focus may have changed. Read fresh state before acting again.".into());
+    }
+    let message = cua_driver_core::element_token::STALE_TOKEN_ERROR;
+    ToolResult::error(message).with_structured(serde_json::json!({
+        "status": "refused", "refusal": { "code": "stale_element_token", "message": message }
+    }))
+}
+
 pub struct ClickTool {
     state: Arc<ToolState>,
 }
@@ -1232,7 +1258,7 @@ fn def() -> &'static ToolDef {
             // cua_driver_core::tool_schema.)
             "required": [],
             "properties": {
-                "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it." },
+                "session": cua_driver_core::tool_schema::session_schema(),
                 "pid":           { "type": "integer", "description": "Target process ID. Optional with element_token (it carries the pid)." },
                 "window_id":     { "type": "integer", "description": "Target window ID. Omit with element_token." },
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
@@ -1604,6 +1630,19 @@ impl ClickTool {
         let debug_image_out = args.opt_str("debug_image_out");
         let modifiers: Vec<String> = args.str_array("modifier");
 
+        // The retained token must still name the observed control before any
+        // element route, including simulated and multi-click dispatch.
+        if let Some(element) = element_guard.as_ref() {
+            let identity_guard = element.clone();
+            let identity_current =
+                latency::spawn_blocking(move || identity_guard.observed_identity_is_current())
+                    .await
+                    .unwrap_or(false);
+            if !identity_current {
+                return identity_refusal(false);
+            }
+        }
+
         if !simulated && matches!(super::element_simulate::option(&args), Ok(true)) {
             let (Some(idx), Some(wid), Some(element)) =
                 (element_index, window_id, element_guard.as_ref())
@@ -1893,6 +1932,7 @@ impl ClickTool {
                             pid as libc::pid_t,
                             wid,
                             || {
+                                ensure_observed_identity(&middle_guard)?;
                                 ensure_enabled()?;
                                 crate::input::mouse::click_at_xy_desktop_with_modifiers_preserving_cursor(
                                     prompt, cx, cy, 1, "middle", &m,
@@ -1904,12 +1944,14 @@ impl ClickTool {
                             pid as libc::pid_t,
                             wid,
                             || {
+                                ensure_observed_identity(&middle_guard)?;
                                 ensure_enabled()?;
                                 routed_middle_click()
                             },
                         )
                         .map(|_| ())
                     } else {
+                        ensure_observed_identity(&middle_guard)?;
                         ensure_enabled()?;
                         routed_middle_click()
                     }
@@ -1921,6 +1963,7 @@ impl ClickTool {
                          (background CGEvent; not driver-verified — confirm via screenshot)."
                     ))
                     .with_structured(serde_json::json!({ "path": "cgevent", "verified": false, "effect": "unverifiable" })),
+                    Ok(Err(e)) if e.downcast_ref::<ObservedIdentityChanged>().is_some() => identity_refusal(foreground),
                     Ok(Err(e)) => crate::security_prompt::tool_result(&e)
                         .or_else(|| super::element_disabled_error(pid, wid, &e, foreground))
                         .unwrap_or_else(|| ToolResult::error(format!("Middle-click failed: {e}"))),
@@ -2217,6 +2260,7 @@ impl ClickTool {
                                     let focus_generation = crate::input::skylight::focus_generation();
                                     let has_modifiers = !selection_modifiers.is_empty();
                                     let action = || {
+                                        ensure_observed_identity(&element_guard)?;
                                         outcome = Some(perform_ax_click(
                                             (element_ptr, idx),
                                             (pid, wid),
@@ -2264,6 +2308,7 @@ impl ClickTool {
                                     }
                                     Ok((outcome, fronted))
                                 } else {
+                                    ensure_observed_identity(&element_guard)?;
                                     perform_ax_click(
                                         (element_ptr, idx),
                                         (pid, wid),
@@ -2374,6 +2419,9 @@ impl ClickTool {
                     &changes,
                     web_unchanged,
                 ),
+                Ok(Err(e)) if e.downcast_ref::<ObservedIdentityChanged>().is_some() => {
+                    identity_refusal(delivery_mode.is_foreground())
+                }
                 Ok(Err(e)) => match e.downcast_ref::<crate::input::ax_actions::ElementDisabled>() {
                     Some(disabled) => super::element_disabled_result(
                         pid,
@@ -7900,6 +7948,20 @@ fn validate_click_action(action: &str, element_target: bool) -> anyhow::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changed_identity_after_foreground_attempt_does_not_claim_no_input() {
+        let foreground = identity_refusal(true);
+        assert_eq!(
+            foreground.structured_content.unwrap()["effect"],
+            "unverifiable"
+        );
+        let background = identity_refusal(false);
+        assert_eq!(
+            background.structured_content.unwrap()["refusal"]["code"],
+            "stale_element_token"
+        );
+    }
 
     #[tokio::test]
     async fn capture_precedes_prelude_front_change() {

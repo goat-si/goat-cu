@@ -154,9 +154,12 @@ pub fn element_window_local_xy(
     let (index, window, _) = resolved.into_parts(None);
     let window_id = window?;
     let element_index = u32::try_from(index?).ok()?;
-    let elements = cache.with_latest(i32::try_from(pid).ok()?, window_id, |_, snapshot| {
-        snapshot.elements()
-    });
+    let elements = cache.with_latest(
+        i32::try_from(pid).ok()?,
+        window_id,
+        args.get("_session_id").and_then(serde_json::Value::as_str),
+        |_, snapshot| snapshot.elements(),
+    );
     let point = if !capture_point {
         None
     } else if tokio::runtime::Handle::try_current().is_ok() {

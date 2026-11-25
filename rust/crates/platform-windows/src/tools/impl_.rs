@@ -1512,10 +1512,10 @@ pub fn build_registry_with_provider(
         token_pid_resolver(state.clone()),
         {
             let snapshots = state.snapshots.clone();
-            Arc::new(move |pid, handle| {
+            Arc::new(move |pid, handle, session| {
                 let pid = i32::try_from(pid).ok()?;
                 let id = cua_driver_core::element_token::snapshot_of_handle(handle)?;
-                snapshots.window_for_snapshot(pid, id)
+                snapshots.window_for_snapshot(pid, id, session)
             })
         },
     );

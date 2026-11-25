@@ -302,7 +302,7 @@ pub(crate) async fn basis_click(state: &ToolState, tool: &str, args: &Value) -> 
     let refuse = || basis_refusal("stale_basis", "unknown_snapshot", None, None);
     let hwnd = args.get("window_id").and_then(Value::as_u64).or_else(|| {
         let (id, _) = cua_driver_core::window_basis::parse_basis_id(snapshot_id)?;
-        state.snapshots.window_for_snapshot(pid, id)
+        state.snapshots.window_for_snapshot(pid, id, args.get("_session_id").and_then(Value::as_str))
     });
     let Some(hwnd) = hwnd else {
         return Some(refuse());

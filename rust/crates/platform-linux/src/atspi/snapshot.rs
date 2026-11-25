@@ -202,12 +202,14 @@ mod tests {
         assert!(cache
             .publish_basis_for_session(pid, xid, stale, None, None, None, &older)
             .is_none());
-        let elements = cache.with_latest(pid, xid, |_, s| s.elements()).unwrap();
+        let elements = cache
+            .with_latest(pid, xid, None, |_, s| s.elements())
+            .unwrap();
         assert!(hit_test(&elements, 5, 5).is_none());
         assert_eq!(hit_test(&elements, 105, 105).map(|(idx, _)| idx), Some(2));
-        assert_eq!(cache.remove_for_capture(pid, xid, &older), None);
+        assert_eq!(cache.remove_for_capture(pid, xid, None, &older), None);
         assert!(cache
-            .with_latest(pid, xid, |_, s| hit_test(&s.elements(), 105, 105))
+            .with_latest(pid, xid, None, |_, s| hit_test(&s.elements(), 105, 105))
             .flatten()
             .is_some());
         let ticket = cache.begin_capture(pid, xid);
@@ -223,7 +225,7 @@ mod tests {
             )
             .is_some());
         assert!(cache
-            .with_latest(pid, xid, |_, s| hit_test(&s.elements(), 105, 105))
+            .with_latest(pid, xid, None, |_, s| hit_test(&s.elements(), 105, 105))
             .flatten()
             .is_none());
     }

@@ -330,12 +330,12 @@ fn token_pid_resolver(state: Arc<ToolState>) -> cua_driver_core::window_target::
 fn snapshot_window_resolver(
     state: Arc<ToolState>,
 ) -> cua_driver_core::window_target::SnapshotWindowResolver {
-    Arc::new(move |pid, handle| {
+    Arc::new(move |pid, handle, session| {
         let pid = i32::try_from(pid).ok()?;
         // Accept a plain snapshot id and a window-basis id alike
         // (goat-si/cua-driver#130).
         let id = cua_driver_core::element_token::snapshot_of_handle(handle)?;
-        state.snapshots.window_for_snapshot(pid, id)
+        state.snapshots.window_for_snapshot(pid, id, session)
     })
 }
 
@@ -3645,7 +3645,7 @@ pub(crate) fn spawn_isolated_hyprland(
         snapshot.transport,
         snapshot.client_kind,
     )
-    .map_err(isolated_hyprland_refusal)?;
+    .map_err(|refusal| isolated_hyprland_refusal(refusal.message()))?;
     let (guard, cancellation) = crate::wayland::hyprland_input::ActionCancellation::invocation();
     let dispatch = tokio::task::spawn_blocking(move || {
         let _lifecycle = lifecycle;

@@ -121,19 +121,31 @@ fn generations_sessions_and_tickets() {
     let next = format_basis_id(id, 1);
     assert!(s.basis_for(42, 7, &next, Some("a")).is_ok());
     let t = s.begin_capture(42, 7);
-    s.refresh_basis_for_session(42, 7, Some("b"), 1.0, None, Some(basis()), &t)
-        .unwrap();
+    assert!(s
+        .refresh_basis_for_session(42, 7, Some("b"), 1.0, None, Some(basis()), &t)
+        .is_none());
     assert_eq!(
         reason(s.basis_for(42, 7, &next, Some("b"))),
-        "frame_replaced"
+        "other_session"
     );
+    assert!(s.basis_for(42, 7, &next, Some("a")).is_ok());
+    let t = s.begin_capture(42, 7);
+    let (b_id, _, _) = s
+        .publish_basis_for_session(42, 7, Payload, Some("b"), Some(1.0), Some(basis()), &t)
+        .unwrap();
+    let b_key = format_basis_id(b_id, 0);
     let t = s.begin_capture(42, 7);
     s.refresh_basis_for_session(42, 7, Some("b"), 1.0, None, None, &t)
         .unwrap();
     assert_eq!(
-        reason(s.basis_for(42, 7, &format_basis_id(id, 3), Some("b"))),
+        reason(s.basis_for(42, 7, &b_key, Some("b"))),
+        "frame_replaced"
+    );
+    assert_eq!(
+        reason(s.basis_for(42, 7, &format_basis_id(b_id, 1), Some("b"))),
         "no_basis"
     );
+    assert!(s.basis_for(42, 7, &next, Some("a")).is_ok());
 }
 #[test]
 fn effect_json() {
@@ -288,7 +300,7 @@ fn plain_publish_supersedes_an_older_capture() {
             .map(|(id, _)| id),
         None
     );
-    assert_eq!(s.window_for_snapshot(42, id), Some(7));
+    assert_eq!(s.window_for_snapshot(42, id, Some("a")), Some(7));
     assert_eq!(
         reason(s.basis_for(42, 7, &format_basis_id(id, 0), Some("a"))),
         "no_basis"
@@ -323,7 +335,7 @@ fn plain_capture_publish_and_screenshot_refresh_supersede_older_captures() {
             &first
         )
         .is_none());
-    assert_eq!(s.window_for_snapshot(42, id), Some(7));
+    assert_eq!(s.window_for_snapshot(42, id, Some("a")), Some(7));
 
     let t = s.begin_capture(42, 7);
     let (id, _, _) = s

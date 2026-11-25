@@ -260,7 +260,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         let snapshot = inner
             .get_mut(&pid)?
             .iter_mut()
-            .find(|s| s.window_id == window_id)
+            .find(|s| s.is_for(session, window_id))
             // The ticket must postdate the snapshot and its current frame:
             // an older capture would attach an older frame to newer state.
             .filter(|s| ticket > s.ticket_floor)?;
@@ -352,7 +352,7 @@ mod tests {
         let older = store.begin_capture(1, 2);
         let own = store.begin_capture(1, 2);
         let newer = store.begin_capture(1, 2);
-        assert_eq!(store.remove_for_capture(1, 2, &own), Some(old_id));
+        assert_eq!(store.remove_for_capture(1, 2, None, &own), Some(old_id));
         assert!(store.screenshot_context(1, Some(2), None).is_err());
         assert!(store
             .publish_capture_basis_for_session(
@@ -384,7 +384,7 @@ mod tests {
         assert!(store
             .refresh_basis_for_session(1, 2, None, 3.0, None, Some(frame()), &newer)
             .is_some());
-        assert_eq!(store.remove_for_capture(1, 2, &own), None);
+        assert_eq!(store.remove_for_capture(1, 2, None, &own), None);
         assert_eq!(
             store.screenshot_context(1, Some(2), None).unwrap().scale,
             3.0
@@ -477,7 +477,7 @@ mod tests {
 
         // remove() drops the window's in-flight captures with its snapshot.
         let in_flight = store.begin_capture(1, 2);
-        assert_eq!(store.remove(1, 2), Some(id));
+        assert_eq!(store.remove(1, 2, None), Some(id));
         assert!(store.inner.lock().unwrap().tickets.is_empty());
         assert!(store
             .publish_basis_for_session(1, 2, Payload, None, Some(1.0), Some(frame()), &in_flight)
@@ -576,7 +576,7 @@ mod review_regressions {
             let old = store.begin_capture(1, 2);
             match kind {
                 0 => {
-                    store.remove(1, 2);
+                    store.remove(1, 2, None);
                 }
                 1 => {
                     store.clear();
@@ -765,7 +765,7 @@ mod capture_ticket_tests {
         let store = SnapshotStore::new();
         let old = store.publish(1, 2, Payload);
         let ticket = store.begin_capture(1, 2);
-        assert_eq!(store.remove_for_capture(1, 2, &ticket), Some(old));
+        assert_eq!(store.remove_for_capture(1, 2, None, &ticket), Some(old));
         assert!(store
             .publish_basis_for_session(1, 2, Payload, None, Some(1.0), Some(frame()), &ticket)
             .is_some());
@@ -883,10 +883,10 @@ mod capture_ticket_tests {
             assert!(store
                 .refresh_basis_for_session(1, 2, None, 1.0, None, Some(frame()), wrong)
                 .is_none());
-            assert_eq!(store.remove_for_capture(1, 2, wrong), None);
+            assert_eq!(store.remove_for_capture(1, 2, None, wrong), None);
         }
         assert_eq!(
-            store.window_for_snapshot(1, id),
+            store.window_for_snapshot(1, id, None),
             Some(2),
             "snapshot untouched"
         );
@@ -911,7 +911,7 @@ mod capture_ticket_tests {
         let (done, finished) = std::sync::mpsc::channel();
         let visiting = store.clone();
         std::thread::spawn(move || {
-            visiting.with_latest(1, 2, move |_, _| drop(ticket));
+            visiting.with_latest(1, 2, None, move |_, _| drop(ticket));
             done.send(()).unwrap();
         });
         finished

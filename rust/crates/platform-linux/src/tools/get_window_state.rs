@@ -548,9 +548,11 @@ impl Tool for GetWindowStateTool {
             .map(|v| v.max(1) as usize);
         let timeout_ms = linux_snapshot_timeout_ms(
             args.get("timeout_ms"),
-            self.state
-                .snapshots
-                .contains_semantic_window(pid as i32, xid),
+            self.state.snapshots.contains_semantic_window(
+                pid as i32,
+                xid,
+                args.get("_session_id").and_then(serde_json::Value::as_str),
+            ),
         );
         let walk_timeout = std::time::Duration::from_millis(timeout_ms);
 
@@ -921,6 +923,7 @@ impl Tool for GetWindowStateTool {
                             pid as i32,
                             xid,
                             ticket.as_ref(),
+                            session_id.as_deref(),
                         ));
                     }
                     let (snapshot_id, replaced) = (!observation_only && target_scoped)

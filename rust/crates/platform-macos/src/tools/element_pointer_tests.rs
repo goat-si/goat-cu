@@ -780,6 +780,7 @@ fn tool_with_token(pid: i32) -> (super::super::click::ClickTool, String, Arc<Too
         u64::from(WINDOW),
         crate::ax::snapshot::AxSnapshot {
             elements: vec![element],
+            identities: vec![unsafe { crate::ax::snapshot::ObservedIdentity::read(element) }],
         },
     );
     let token = cua_driver_core::element_token::token_for(snapshot, 0);

@@ -2395,10 +2395,9 @@ impl ToolRegistry {
                 && crate::session::is_session_ended(session)
                 && !crate::session::recreates_on_next_call(session, owner)
             {
-                let message = ended_session_refusal_message(
+                let mut result = session_ended_refusal(
                     args.get("_public_session_label").and_then(Value::as_str),
                 );
-                let mut result = protected_refusal("session_ended", &message);
                 restore_public_runtime_result(&mut result, &runtime_prefix);
                 return result;
             }
@@ -2831,8 +2830,11 @@ impl ToolRegistry {
                 };
                 match admitted {
                     Ok(guard) => Some(guard),
-                    Err(message) => {
-                        return protected_refusal("session_ended", message);
+                    Err(crate::session::DispatchRefusal::OwnedByOtherTransport(holder)) => {
+                        return session_owned_by_other_transport_refusal(public_label, holder);
+                    }
+                    Err(refusal) => {
+                        return protected_refusal("session_ended", refusal.message());
                     }
                 }
             } else {
@@ -4550,6 +4552,7 @@ fn publish_action_result(result: &mut ToolResult, tool_name: &str) -> Result<(),
     let mut public = action
         .public_result()
         .map_err(|error| format!("invalid internal execution record: {error:?}"))?;
+    lead_text_with_effect(&mut result.content, public.effect);
     // Some MCP clients (Claude Code among them) hand the model only
     // `structuredContent` when it is present and drop the text blocks. The
     // producer's text is the only place the resolved points, the element hit,
@@ -4592,6 +4595,30 @@ fn publish_action_result(result: &mut ToolResult, tool_name: &str) -> Result<(),
     // raw content.
     result.structured_content = Some(structured);
     Ok(())
+}
+
+/// Platform tools open their text with a success glyph once input is
+/// delivered, before the dispatch seam knows whether anything changed. A
+/// text-only client reads that glyph as a confirmed outcome (#4723), so a
+/// result whose `effect` is not `confirmed` swaps it for words saying what is
+/// known.
+fn lead_text_with_effect(content: &mut [Content], effect: cua_driver_contract::ActionEffect) {
+    use cua_driver_contract::ActionEffect;
+    const SUCCESS_GLYPH: &str = "✅";
+    let lead = match effect {
+        ActionEffect::Confirmed => return,
+        ActionEffect::Unverifiable => "Sent, effect not verified:",
+        ActionEffect::SuspectedNoop => "Sent, but probably had no effect:",
+        ActionEffect::Partial => "Partly done:",
+        ActionEffect::Refused => "Refused:",
+    };
+    for content in content {
+        if let Content::Text { text, .. } = content {
+            if let Some(rest) = text.strip_prefix(SUCCESS_GLYPH) {
+                *text = format!("{lead} {}", rest.trim_start());
+            }
+        }
+    }
 }
 
 fn restore_public_runtime_result(result: &mut ToolResult, runtime_prefix: &str) {
@@ -8642,6 +8669,96 @@ resources:
         assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
+    fn published_click(text: &str, legacy: serde_json::Value) -> crate::protocol::ToolResult {
+        published_action("click", text, legacy)
+    }
+
+    fn published_action(
+        tool: &str,
+        text: &str,
+        legacy: serde_json::Value,
+    ) -> crate::protocol::ToolResult {
+        let mut result = crate::protocol::ToolResult::text(text).with_structured(legacy.clone());
+        result.action_record = crate::action_record::ActionExecutionRecord::from_legacy(
+            tool,
+            &serde_json::json!({"pid": 42, "window_id": 7}),
+            &legacy,
+        );
+        publish_action_result(&mut result, tool).expect("action should project");
+        result
+    }
+
+    fn first_text(result: &crate::protocol::ToolResult) -> &str {
+        result
+            .content
+            .iter()
+            .find_map(|content| match content {
+                Content::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("result has text")
+    }
+
+    #[test]
+    fn unverifiable_action_text_drops_the_success_glyph() {
+        let result = published_click(
+            "✅ Performed AXPress on [2] AXButton \"\".",
+            serde_json::json!({"path": "ax", "verified": false, "effect": "unverifiable"}),
+        );
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["effect"], "unverifiable");
+        let text = first_text(&result);
+        assert_eq!(
+            text,
+            "Sent, effect not verified: Performed AXPress on [2] AXButton \"\"."
+        );
+        assert_eq!(structured["summary"].as_str(), Some(text));
+    }
+
+    #[test]
+    fn suspected_noop_and_partial_action_text_drop_the_success_glyph() {
+        for (tool, effect, lead) in [
+            (
+                "click",
+                "suspected_noop",
+                "Sent, but probably had no effect: ",
+            ),
+            ("type_text", "partial", "Partly done: "),
+        ] {
+            let result = published_action(
+                tool,
+                "✅ Posted input to pid 42.",
+                serde_json::json!({"path": "ax", "effect": effect, "delivered_chars": 3}),
+            );
+            assert_eq!(
+                result.structured_content.as_ref().unwrap()["effect"],
+                effect
+            );
+            assert_eq!(
+                first_text(&result),
+                format!("{lead}Posted input to pid 42.")
+            );
+        }
+    }
+
+    #[test]
+    fn confirmed_action_text_keeps_the_success_glyph() {
+        let result = published_click(
+            "✅ Selected nearest AXRow for [2] AXCell \"a\"; confirmed AXSelected=true.",
+            serde_json::json!({
+                "path": "ax",
+                "verified": true,
+                "effect": "confirmed",
+                "evidence": [{"kind": "accessibility_readback"}],
+            }),
+        );
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["effect"],
+            "confirmed"
+        );
+        assert!(first_text(&result).starts_with("✅ Selected nearest AXRow"));
+    }
+
     #[test]
     fn action_projection_keeps_browser_refusal_diagnostics_and_closes_structured_content() {
         let legacy = serde_json::json!({
@@ -10186,16 +10303,48 @@ fn protected_scope_error_refusal(error: &ProtectedResourceScopeError) -> ToolRes
     })
 }
 
-/// Recovery text for a call on an ended lifecycle episode. A named session is
-/// restarted by name from its own transport; an unnamed one has no label to
-/// pass, so naming one would only start an unrelated session.
-fn ended_session_refusal_message(public_label: Option<&str>) -> String {
-    match public_label {
+/// The `session_ended` refusal for a call on an ended lifecycle episode, with
+/// the recovery that applies to it. A named session is restarted by name from
+/// its own transport; an unnamed one has no label to pass, so naming one would
+/// only start an unrelated session.
+pub fn session_ended_refusal(public_label: Option<&str>) -> ToolResult {
+    let message = match public_label {
         Some(label) => format!(
             "session '{label}' has ended; call start_session with session '{label}' to start it again, or use a new session label"
         ),
         None => "this transport's unnamed session has ended; call start_session without a session label to start a new one".to_owned(),
+    };
+    protected_refusal("session_ended", &message)
+}
+
+/// The refusal for a call on a session that is live but held by another
+/// transport, such as a label a `cua-driver mcp` process started and a
+/// `cua-driver call` then names. The session has not ended, so the
+/// `session_ended` recovery (`start_session` with the same label) would be
+/// refused too.
+fn session_owned_by_other_transport_refusal(
+    public_label: Option<&str>,
+    holder: crate::session::SessionTransport,
+) -> ToolResult {
+    let holder = holder.as_str();
+    let message = match public_label {
+        Some(label) => format!(
+            "session '{label}' is live on another connection ({holder}); make this call from that connection, or use a new session label here"
+        ),
+        None => format!(
+            "this session is live on another connection ({holder}); make this call from that connection"
+        ),
+    };
+    let mut result = protected_refusal("session_owned_by_other_transport", &message);
+    if let Some(refusal) = result
+        .structured_content
+        .as_mut()
+        .and_then(|structured| structured.get_mut("refusal"))
+        .and_then(Value::as_object_mut)
+    {
+        refusal.insert("owner_transport".to_owned(), Value::from(holder));
     }
+    result
 }
 
 fn check_terminable_process(

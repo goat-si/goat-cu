@@ -470,7 +470,7 @@ mod tests {
     #[test]
     fn topics_return_the_guidance_an_agent_needs() {
         let drag = guide_for("drag", Platform::Macos).unwrap().text;
-        assert!(drag.contains("drag_and_drop_session"));
+        assert!(drag.contains("drag_delivery_uncertain"));
         assert!(drag.contains("`browser_pointer` `action:\"drag\"`"));
         let windows_drag = guide_for("drag", Platform::Windows).unwrap().text;
         assert!(windows_drag.contains("Drag / drag-and-drop"));
