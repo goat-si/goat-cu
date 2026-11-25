@@ -105,6 +105,14 @@ impl Tool for TypeTextTool {
                 Ok(hwnd) => hwnd,
                 Err(error) => return ToolResult::error(error.to_string()),
             };
+            // Follow the user's foreground after the cursor wait.
+            let hwnd = match crate::desktop_target::after_cursor(
+                position_keyboard_cursor(&self.state, &args, hwnd, None),
+                crate::input::mouse::foreground_window,
+            ).await {
+                Ok(hwnd) => hwnd,
+                Err(error) => return ToolResult::error(error.to_string()),
+            };
             let text_len = text.chars().count();
             if args.get("element_token").is_none()
                 && args.get("x").is_none()

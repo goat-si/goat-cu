@@ -23,6 +23,12 @@
 
 use cua_driver_core::tool::ToolRegistry;
 
+#[cfg(any(target_os = "linux", test))]
+mod desktop_capture_guard;
+
+#[cfg(any(target_os = "linux", test))]
+mod uncertain_ax_result;
+
 pub mod basis_eligibility;
 pub mod health_report;
 pub mod overlay;

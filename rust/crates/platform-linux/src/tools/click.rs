@@ -118,7 +118,9 @@ mod token_window_scope_tests {
             selected: None,
             toggle_state: None,
             expanded: None,
+            focused: None,
             description: None,
+            document_uri: None,
             actions: Vec::new(),
             element_key: 0,
             identity: Some(identity(path)),
@@ -1227,14 +1229,7 @@ impl Tool for ClickTool {
                 {
                     Ok(joined) => joined,
                     Err(_elapsed) => {
-                        return ToolResult::error(format!(
-                            "click: the AT-SPI action for element [{idx}] did not complete                              within {ELEMENT_AX_BUDGET:?}; its effect is unknown. Take a                              screenshot, then retry by pixel (x/y) or with                              delivery_mode:\"foreground\"."
-                        ))
-                        .with_structured(json!({
-                            "code": "ax_timeout",
-                            "effect": "unknown",
-                            "escalation": non_ax_escalation(),
-                        }));
+                        return crate::uncertain_ax_result::click_timeout(idx, ELEMENT_AX_BUDGET);
                     }
                 };
                 if let Ok(Ok(((_action, suspected_noop, unacknowledged), guard))) = ax_result {

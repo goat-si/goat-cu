@@ -177,6 +177,7 @@ impl WalkElementBorrow<super::walker_seam_tests::Fake> for ScenarioWalk<'_> {
 }
 
 impl WalkOrchestration<super::walker_seam_tests::Fake> for ScenarioWalk<'_> {
+    fn flush_web_window(&self, _pid: i32, _element: Self::Element) {}
     fn release_application(&self, application: usize) {
         assert_eq!(application, 1);
         self.environment

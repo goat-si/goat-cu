@@ -1443,7 +1443,7 @@ fn set_value_blocking_inner(
                 .iter()
                 .any(|a| a == "AXIncrement" || a == "AXDecrement"),
         };
-        let mut ops = LiveAxValueOps { element };
+        let mut ops = LiveAxValueOps { element, pid };
         let outcome = write_value_ladder_with_prior(&mut ops, value, &ctx, prior);
         finish_ladder_with_mark(
             outcome,
@@ -1512,9 +1512,11 @@ trait AxValueOps {
 
 struct LiveAxValueOps {
     element: AXUIElementRef,
+    pid: i32,
 }
 impl AxValueOps for LiveAxValueOps {
     fn read_typed(&mut self) -> ValueRead {
+        unsafe { crate::ax::enablement::flush_pending_web_updates_for_element(self.pid, self.element) };
         read_value_if_allowed(
             &mut crate::ax::label_reader::NativeLabelReader,
             self.element,

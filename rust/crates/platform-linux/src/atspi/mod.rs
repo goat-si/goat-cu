@@ -47,7 +47,14 @@ pub struct AtspiNode {
     pub toggle_state: Option<cua_driver_contract::ToggleState>,
     /// Expanded or collapsed for an element that can expand; `None` otherwise.
     pub expanded: Option<bool>,
+    /// Keyboard-focus state when the native AT-SPI state set is available.
+    /// Browser consent uses this as structural contradiction evidence; it is
+    /// never inferred from a localized accessible name.
+    pub focused: Option<bool>,
     pub description: Option<String>,
+    /// Exact document URI reported by the AT-SPI Document interface. Unlike a
+    /// localized title or accessible name, this identifies the rendered page.
+    pub document_uri: Option<String>,
     pub actions: Vec<String>,
     /// For AT-SPI: element_key = element_index as u64.
     /// For X11 fallback: element_key = xid.
@@ -852,11 +859,13 @@ fn walk_via_x11_properties(xid: u64, query: Option<&str>) -> AtspiTreeResult {
         selected: None,
         toggle_state: None,
         expanded: None,
+        focused: None,
         description: if wm_class.is_empty() {
             None
         } else {
             Some(wm_class.clone())
         },
+        document_uri: None,
         actions: vec!["activate".into()],
         element_key: xid,
         identity: None,
@@ -998,7 +1007,9 @@ mod budget_tests {
                 selected: None,
                 toggle_state: None,
                 expanded: None,
+                focused: None,
                 description: None,
+                document_uri: None,
                 actions,
                 element_key: idx as u64,
                 depth,
@@ -1160,7 +1171,9 @@ mod token_dispatch_tests {
             selected: None,
             toggle_state: None,
             expanded: None,
+            focused: None,
             description: None,
+            document_uri: None,
             actions: vec!["click".into()],
             element_key: 0,
             identity: Some(AtspiIdentity {

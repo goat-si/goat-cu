@@ -681,6 +681,8 @@ impl Tool for PressKeyTool {
             let key_for_input = key.clone();
             let display_key = pressed_key_display(&input.key, &key, &modifiers);
             let early_front_pid = crate::apps::frontmost_pid();
+            let checked_start = early_front_pid.and_then(|pid|
+                crate::process_identity::process_fingerprint(i64::from(pid)).and_then(|f| f.start_time));
             if printable_request(&key, &modifiers) {
                 // Desktop scope dispatches globally: check the frontmost
                 // app's focused element and fail closed before any key.
@@ -701,8 +703,18 @@ impl Tool for PressKeyTool {
                     }
                 }
             }
-            let checked_pid = early_front_pid.unwrap_or_default();
+            let (Some(checked_pid), Some(checked_start)) = (early_front_pid, checked_start) else {
+                return ToolResult::error("the frontmost process instance could not be proven; no keys were sent");
+            };
             let printable_desktop = printable_request(&key, &modifiers);
+            if let Some(refusal) = super::hotkey::browser_refusal_after_cursor(
+                super::cursor_tools::position_desktop_keyboard_cursor(&self.state, &args),
+                || cua_driver_core::browser::protection::frontmost_app_refusal(
+                    "press_key", early_front_pid.map(i64::from),
+                ),
+            ).await {
+                return refusal;
+            }
             let prompt = PromptInput::from_args(&args);
             let control = Arc::new(crate::input::key_hold::HoldControl::default());
             let result =
@@ -714,7 +726,7 @@ impl Tool for PressKeyTool {
                     crate::security_prompt::refuse_frontmost_keys(prompt)?;
                     let modifier_refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
                     crate::input::key_hold::deliver(
-                        crate::input::key_hold::KeyRoute::Global(None),
+                        crate::input::key_hold::KeyRoute::GuardedGlobal(checked_pid, checked_start),
                         &key_for_input,
                         &modifier_refs,
                         duration,

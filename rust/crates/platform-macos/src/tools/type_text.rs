@@ -200,6 +200,7 @@ impl Tool for TypeTextTool {
             let posted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let posted_ref = posted.clone();
 
+            super::cursor_tools::position_desktop_keyboard_cursor(&self.state, &args).await;
             let prompt = PromptInput::from_args(&args);
             let result = latency::spawn_action_blocking(move || {
                 super::not_editable::desktop_dispatch_guard(checked_pid, true)?;

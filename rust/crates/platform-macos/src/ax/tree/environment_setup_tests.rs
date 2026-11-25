@@ -179,6 +179,7 @@ impl super::WalkElementBorrow<super::walker_seam_tests::Fake> for SingleRoot<'_>
     }
 }
 impl super::WalkOrchestration<super::walker_seam_tests::Fake> for SingleRoot<'_> {
+    fn flush_web_window(&self, _pid: i32, _element: Self::Element) {}
     fn release_application(&self, application: usize) {
         assert_eq!(application, 1);
         self.trace.borrow_mut().push("release-app");

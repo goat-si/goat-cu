@@ -67,6 +67,10 @@ pub const DEFAULT_MAX_ELEMENTS: usize = 2_000;
 /// indefinitely.
 const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 2.0;
 
+/// Most windows of one app a walk brings up to date (see
+/// [`super::enablement::flush_pending_web_updates`]).
+const MAX_WEB_FLUSH_WINDOWS: usize = 4;
+
 pub(crate) unsafe fn set_messaging_timeout(element: AXUIElementRef) {
     let _ = AXUIElementSetMessagingTimeout(element, AX_MESSAGING_TIMEOUT_SECONDS);
 }
@@ -1018,6 +1022,7 @@ type MenuObservation<E> = (E, Option<[f64; 4]>, Option<super::context_menus::Men
 trait WalkOrchestration<S: AxTreeSource>:
     AxWalkEnvironment + WalkElementBorrow<S, Raw = <Self as AxWalkEnvironment>::Element>
 {
+    fn flush_web_window(&self, pid: i32, element: Self::Element);
     fn release_application(&self, application: Self::Application);
     fn menu_frames(&self, pid: i32) -> super::evidence::Observed<Option<Vec<[f64; 4]>>>;
     fn menu_in_window(
@@ -1029,6 +1034,13 @@ trait WalkOrchestration<S: AxTreeSource>:
 }
 
 impl WalkOrchestration<super::tree_source::native::NativeSource> for NativeWalkEnvironment {
+    fn flush_web_window(&self, pid: i32, element: Self::Element) {
+        unsafe {
+            if copy_string_attr(element, "AXRole").as_deref() == Some("AXWindow") {
+                super::enablement::flush_pending_web_updates(pid, element);
+            }
+        }
+    }
     fn release_application(&self, application: Self::Application) {
         unsafe { CFRelease(application as CFTypeRef) }
     }
@@ -1340,6 +1352,16 @@ where
         // Walk each top-level child at depth 0. Its own frame, read only if
         // a large container needs it, bounds what is on screen for children
         // whose app does not list the visible ones.
+
+        // A hidden or covered Chromium window holds back the page changes of
+        // the last action until it is asked something; ask first so the walk
+        // reads the page as it is now.
+        if include_web_content {
+            for &child in walk_these.iter().take(MAX_WEB_FLUSH_WINDOWS) {
+                environment.flush_web_window(pid, child);
+            }
+        }
+
         for child in walk_these {
             environment.with_walk_element(source, child, |source, child| {
                 walk_root(

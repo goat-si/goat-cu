@@ -167,7 +167,9 @@ mod tests {
             selected: None,
             toggle_state: None,
             expanded: None,
+            focused: None,
             description: None,
+            document_uri: None,
             actions: Vec::new(),
             element_key: 999,
             identity: Some(AtspiIdentity {

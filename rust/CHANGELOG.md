@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.49.5](https://github.com/trycua/cua/compare/cua-driver-rs-v0.49.4...cua-driver-rs-v0.49.5) (2026-11-13)
+
+
+### Bug Fixes
+
+* **cua-driver:** do not move Windows windows off their virtual desktop (re-land of [#5782](https://github.com/trycua/cua/issues/5782)) ([#7644](https://github.com/trycua/cua/issues/7644)) ([4665ba1](https://github.com/trycua/cua/commit/4665ba1e5549e36278ed36741eaf778ff64466cc))
+* **cua-driver:** list no tools when a policy layer fails to load ([#7647](https://github.com/trycua/cua/issues/7647)) ([33767af](https://github.com/trycua/cua/commit/33767af439575a41a2a23e30acfdf33311c4a843))
+* **cua-driver:** release the memory of every macOS screenshot ([#7549](https://github.com/trycua/cua/issues/7549)) ([1f037e4](https://github.com/trycua/cua/commit/1f037e43972dc7b1ff1935bd9f3f4eaa63532e25))
+* **cua-driver:** start the Windows daemon's PowerShell and cmd children without a console window ([#6757](https://github.com/trycua/cua/issues/6757)) ([6742beb](https://github.com/trycua/cua/commit/6742beb38fdb9aed27bf2616532d393d01610088))
+* **cua-driver:** Windows consent matcher skips other native bubbles ([#7378](https://github.com/trycua/cua/issues/7378)) ([d55e5e4](https://github.com/trycua/cua/commit/d55e5e4f91cfef741a7dd1c6f8b2f854732670d5))
+
+## [0.49.4](https://github.com/trycua/cua/compare/cua-driver-rs-v0.49.3...cua-driver-rs-v0.49.4) (2026-11-13)
+
+
+### Bug Fixes
+
+* **cua-driver:** let Windows ffmpeg finish shutdown and stop shimmed encoders ([#7628](https://github.com/trycua/cua/issues/7628)) ([6380b25](https://github.com/trycua/cua/commit/6380b253745b3eef976c57e6bc283943f4487086))
+
+## [0.49.3](https://github.com/trycua/cua/compare/cua-driver-rs-v0.49.2...cua-driver-rs-v0.49.3) (2026-11-13)
+
+
+### Bug Fixes
+
+* **cua-driver:** uninstall-local stops app-bundle daemons and removes release markers ([#7615](https://github.com/trycua/cua/issues/7615)) ([b9ed6ae](https://github.com/trycua/cua/commit/b9ed6ae9f755ce69ac24be35b04be869ae5ad259))
+
+## [0.49.2](https://github.com/trycua/cua/compare/cua-driver-rs-v0.49.1...cua-driver-rs-v0.49.2) (2026-11-13)
+
+
+### Bug Fixes
+
+* **cua-driver:** cover foreground typing into a minimized Screen Sharing window ([#7594](https://github.com/trycua/cua/issues/7594)) ([670e6fc](https://github.com/trycua/cua/commit/670e6fc01797bddc5a19c9a414e8585446fc2e28)), closes [#3201](https://github.com/trycua/cua/issues/3201)
+* **cua-driver:** make Linux browser prepare language independent ([#7587](https://github.com/trycua/cua/issues/7587)) ([f95ca03](https://github.com/trycua/cua/commit/f95ca03fa24251c0ad7699145dab4d46ba226246))
+
+## [0.49.1](https://github.com/trycua/cua/compare/cua-driver-rs-v0.49.0...cua-driver-rs-v0.49.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **cua-driver:** capture the Linux desktop on rootless Xwayland instead of failing with GetImage BadMatch ([#7580](https://github.com/trycua/cua/issues/7580)) ([606a66e](https://github.com/trycua/cua/commit/606a66ed13710e19a55798e2c66906c1e34b3592))
+
+## [0.49.0](https://github.com/trycua/cua/compare/cua-driver-rs-v0.48.0...cua-driver-rs-v0.49.0) (2026-11-13)
+
+
+### Features
+
+* **cua-driver:** refusals say what will work instead ([#7539](https://github.com/trycua/cua/issues/7539)) ([63c5eca](https://github.com/trycua/cua/commit/63c5eca8b4d05cf40f7c039c75d760f8fcddc9de))
+
+
+### Bug Fixes
+
+* **cua-driver:** place the session cursor for desktop-scope keyboard actions ([#7527](https://github.com/trycua/cua/issues/7527)) ([a16e8b6](https://github.com/trycua/cua/commit/a16e8b6a1471085462350ccce02919fcff24bab8))
+* **cua-driver:** read hidden Chromium windows as they are now ([#7561](https://github.com/trycua/cua/issues/7561)) ([5debb0d](https://github.com/trycua/cua/commit/5debb0dc570ca8f3002da53c602e4bafa083bf51))
+
 ## [0.48.0](https://github.com/trycua/cua/compare/cua-driver-rs-v0.47.24...cua-driver-rs-v0.48.0) (2026-11-13)
 
 

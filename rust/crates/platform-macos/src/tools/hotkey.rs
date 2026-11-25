@@ -284,6 +284,14 @@ pub(super) fn requested_hotkey(
     Ok((raw_keys, key, modifiers))
 }
 
+pub(crate) async fn browser_refusal_after_cursor<T>(
+    position: impl std::future::Future<Output = ()>,
+    check: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    position.await;
+    check()
+}
+
 #[async_trait]
 impl Tool for HotkeyTool {
     fn def(&self) -> &ToolDef {
@@ -325,6 +333,24 @@ impl Tool for HotkeyTool {
                 );
             };
             let display = raw_keys.join("+");
+            let mut checked_pid = None;
+            let mut checked_start = None;
+            if let Some(refusal) = browser_refusal_after_cursor(
+                super::cursor_tools::position_desktop_keyboard_cursor(&self.state, &args),
+                || {
+                    checked_pid = crate::apps::frontmost_pid();
+                    checked_start = checked_pid.and_then(|pid|
+                        crate::process_identity::process_fingerprint(i64::from(pid)).and_then(|f| f.start_time));
+                    cua_driver_core::browser::protection::frontmost_app_refusal(
+                        "hotkey", checked_pid.map(i64::from),
+                    )
+                },
+            ).await {
+                return refusal;
+            }
+            let (Some(checked_pid), Some(checked_start)) = (checked_pid, checked_start) else {
+                return ToolResult::error("the frontmost process instance could not be proven; no keys were sent");
+            };
             let prompt = PromptInput::from_args(&args);
             let control = Arc::new(crate::input::key_hold::HoldControl::default());
             #[cfg(test)]
@@ -333,6 +359,7 @@ impl Tool for HotkeyTool {
                 if control.is_cancelled() {
                     anyhow::bail!("key delivery cancelled");
                 }
+                super::not_editable::desktop_dispatch_guard(checked_pid, false)?;
                 let modifier_refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
                 #[cfg(test)]
                 if let Some(delivery) = test_delivery {
@@ -340,7 +367,7 @@ impl Tool for HotkeyTool {
                 }
                 crate::security_prompt::refuse_frontmost_keys(prompt)?;
                 crate::input::key_hold::deliver(
-                    crate::input::key_hold::KeyRoute::Global(None),
+                    crate::input::key_hold::KeyRoute::GuardedGlobal(checked_pid, checked_start),
                     &key,
                     &modifier_refs,
                     duration,
@@ -888,6 +915,15 @@ fn delivered_structured(foreground: bool) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn browser_protection_is_checked_after_cursor_positioning() {
+        let frontmost = std::cell::Cell::new(false);
+        let refusal = super::browser_refusal_after_cursor(
+            async { frontmost.set(true) },
+            || frontmost.get().then_some("protected"),
+        ).await;
+        assert_eq!(refusal, Some("protected"));
+    }
     /// #279.1: an AXFocused write the app could not finish (busy, a transient
     /// failure) is retried until the deadline like a write that did not
     /// stick; the hotkey still goes only after the focus read confirms it.

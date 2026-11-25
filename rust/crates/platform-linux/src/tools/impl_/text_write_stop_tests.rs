@@ -25,7 +25,9 @@ fn published_token(state: &ToolState) -> String {
         selected: None,
         toggle_state: None,
         expanded: None,
+        focused: None,
         description: None,
+        document_uri: None,
         actions: Vec::new(),
         element_key: 0,
         identity: Some(AtspiIdentity {
