@@ -80,8 +80,8 @@ fn reason(result: Result<WindowBasis, crate::protocol::ToolResult>) -> String {
 #[test]
 fn generations_sessions_and_tickets() {
     let s = SnapshotStore::new();
-    let a = s.begin_capture(42, 7);
-    let z = s.begin_capture(42, 7);
+    let a = s.begin_capture_for_session(42, 7, Some("a"));
+    let z = s.begin_capture_for_session(42, 7, Some("a"));
     let (id, _, _) = s
         .publish_basis_for_session(42, 7, Payload, Some("a"), Some(1.0), Some(basis()), &z)
         .unwrap();
@@ -95,8 +95,11 @@ fn generations_sessions_and_tickets() {
         "unknown_snapshot"
     );
     assert_eq!(reason(s.basis_for(42, 8, &key, Some("a"))), "other_window");
-    assert_eq!(reason(s.basis_for(42, 7, &key, Some("b"))), "other_session");
-    let t = s.begin_capture(42, 7);
+    assert_eq!(
+        reason(s.basis_for(42, 7, &key, Some("b"))),
+        "unknown_snapshot"
+    );
+    let t = s.begin_capture_for_session(42, 7, Some("a"));
     assert_eq!(
         s.refresh_basis_for_session(42, 7, Some("a"), 1.0, None, Some(basis()), &t),
         Some((
@@ -111,7 +114,7 @@ fn generations_sessions_and_tickets() {
     assert!(s.basis_for(42, 7, &key, Some("a")).is_ok());
     let mut changed = basis();
     changed.scale_x = 0.25;
-    let t = s.begin_capture(42, 7);
+    let t = s.begin_capture_for_session(42, 7, Some("a"));
     s.refresh_basis_for_session(42, 7, Some("a"), 1.0, None, Some(changed), &t)
         .unwrap();
     assert_eq!(
@@ -120,21 +123,21 @@ fn generations_sessions_and_tickets() {
     );
     let next = format_basis_id(id, 1);
     assert!(s.basis_for(42, 7, &next, Some("a")).is_ok());
-    let t = s.begin_capture(42, 7);
+    let t = s.begin_capture_for_session(42, 7, Some("a"));
     assert!(s
         .refresh_basis_for_session(42, 7, Some("b"), 1.0, None, Some(basis()), &t)
         .is_none());
     assert_eq!(
         reason(s.basis_for(42, 7, &next, Some("b"))),
-        "other_session"
+        "unknown_snapshot"
     );
     assert!(s.basis_for(42, 7, &next, Some("a")).is_ok());
-    let t = s.begin_capture(42, 7);
+    let t = s.begin_capture_for_session(42, 7, Some("b"));
     let (b_id, _, _) = s
         .publish_basis_for_session(42, 7, Payload, Some("b"), Some(1.0), Some(basis()), &t)
         .unwrap();
     let b_key = format_basis_id(b_id, 0);
-    let t = s.begin_capture(42, 7);
+    let t = s.begin_capture_for_session(42, 7, Some("b"));
     s.refresh_basis_for_session(42, 7, Some("b"), 1.0, None, None, &t)
         .unwrap();
     assert_eq!(
@@ -165,7 +168,7 @@ fn effect_json() {
 #[test]
 fn first_screenshot_only_publication_and_no_basis_retirement() {
     let s = SnapshotStore::new();
-    let t = s.begin_capture(42, 7);
+    let t = s.begin_capture_for_session(42, 7, Some("a"));
     let id = s
         .publish_capture_basis_for_session(42, 7, Payload, Some("a"), Some(1.0), Some(basis()), &t)
         .unwrap()
@@ -175,7 +178,7 @@ fn first_screenshot_only_publication_and_no_basis_retirement() {
         s.basis_for(42, 7, &first, Some("a")).unwrap().snapshot_id,
         first
     );
-    let t = s.begin_capture(42, 7);
+    let t = s.begin_capture_for_session(42, 7, Some("a"));
     s.refresh_basis_for_session(42, 7, Some("a"), 1.0, None, None, &t)
         .unwrap();
     assert_eq!(
@@ -275,7 +278,7 @@ fn checked_mapping_rejects_stale_frame_before_mapping() {
 #[test]
 fn plain_publish_supersedes_an_older_capture() {
     let s = SnapshotStore::new();
-    let old = s.begin_capture(42, 7);
+    let old = s.begin_capture_for_session(42, 7, Some("a"));
     let (id, _) = s
         .publish_for_session(42, 7, Payload, Some("a"), None)
         .unwrap();
@@ -306,7 +309,7 @@ fn plain_publish_supersedes_an_older_capture() {
         "no_basis"
     );
     // A capture that begins after the publication still lands.
-    let new = s.begin_capture(42, 7);
+    let new = s.begin_capture_for_session(42, 7, Some("a"));
     assert_eq!(
         s.refresh_basis_for_session(42, 7, Some("a"), 1.0, None, Some(basis()), &new)
             .map(|(id, _)| id),
@@ -320,7 +323,7 @@ fn plain_publish_supersedes_an_older_capture() {
 #[test]
 fn plain_capture_publish_and_screenshot_refresh_supersede_older_captures() {
     let s = SnapshotStore::new();
-    let first = s.begin_capture(42, 7);
+    let first = s.begin_capture_for_session(42, 7, Some("a"));
     let (id, _) = s
         .publish_capture_for_session(42, 7, Payload, Some("a"), Some(1.0))
         .unwrap();
@@ -337,11 +340,11 @@ fn plain_capture_publish_and_screenshot_refresh_supersede_older_captures() {
         .is_none());
     assert_eq!(s.window_for_snapshot(42, id, Some("a")), Some(7));
 
-    let t = s.begin_capture(42, 7);
+    let t = s.begin_capture_for_session(42, 7, Some("a"));
     let (id, _, _) = s
         .publish_basis_for_session(42, 7, Payload, Some("a"), Some(1.0), Some(basis()), &t)
         .unwrap();
-    let old = s.begin_capture(42, 7);
+    let old = s.begin_capture_for_session(42, 7, Some("a"));
     assert_eq!(
         s.refresh_screenshot_for_session(42, 7, Some("a"), 1.0, None),
         Some(id)
@@ -362,8 +365,8 @@ fn plain_capture_publish_and_screenshot_refresh_supersede_older_captures() {
 #[test]
 fn old_ticket_refresh_after_a_newer_publication_changes_nothing() {
     let s = SnapshotStore::new();
-    let old = s.begin_capture(42, 7);
-    let newer = s.begin_capture(42, 7);
+    let old = s.begin_capture_for_session(42, 7, Some("a"));
+    let newer = s.begin_capture_for_session(42, 7, Some("a"));
     let (id, _, _) = s
         .publish_basis_for_session(42, 7, Payload, Some("a"), Some(1.0), Some(basis()), &newer)
         .unwrap();
@@ -382,11 +385,11 @@ fn old_ticket_refresh_after_a_newer_publication_changes_nothing() {
     );
 
     // Same after a plain publication, with a newer capture also in flight.
-    let old = s.begin_capture(42, 7);
+    let old = s.begin_capture_for_session(42, 7, Some("a"));
     let (id, _) = s
         .publish_for_session(42, 7, Payload, Some("a"), Some(1.0))
         .unwrap();
-    let new = s.begin_capture(42, 7);
+    let new = s.begin_capture_for_session(42, 7, Some("a"));
     assert_eq!(
         s.refresh_basis_for_session(42, 7, Some("a"), 1.0, None, Some(basis()), &old)
             .map(|(id, _)| id),

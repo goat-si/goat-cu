@@ -917,8 +917,11 @@ impl Tool for GetWindowStateTool {
         let state_for_capture = state.clone();
         // Held to the end of this call: ticketed publications borrow it, and
         // dropping it retires a ticket that never landed (goat-si/cua-driver#133).
-        let ticket = (should_capture && !observation_only)
-            .then(|| state.snapshots.begin_capture(pid as i32, xid));
+        let ticket = (should_capture && !observation_only).then(|| {
+            state
+                .snapshots
+                .begin_capture_for_session(pid as i32, xid, session_id.as_deref())
+        });
         let query_for_walk = query.clone();
 
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {

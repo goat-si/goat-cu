@@ -643,8 +643,11 @@ impl Tool for GetWindowStateTool {
         };
         // Held to the end of this call: ticketed publications borrow it, and
         // dropping it retires a ticket that never landed (#133).
-        let ticket =
-            (do_shot && !observation_only).then(|| state.snapshots.begin_capture(pid as i32, hwnd));
+        let ticket = (do_shot && !observation_only).then(|| {
+            state
+                .snapshots
+                .begin_capture_for_session(pid as i32, hwnd, session_id.as_deref())
+        });
         let blocking = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
             let mut basis_result = None;
             // Capture screenshot AND any error message so the response can

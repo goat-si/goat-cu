@@ -2346,7 +2346,7 @@ async fn f4a_rooted_token_resolves_window_only_for_its_publisher() {
             9,
             &crate::element_token::token_for(parent, 0),
             Some(&owner),
-            InstanceEvidence::Live(fp),
+            InstanceEvidence::Live(fp.clone()),
         )
         .unwrap()
         .validate_root(|_, _, _, _| Ok(()))
@@ -2355,6 +2355,38 @@ async fn f4a_rooted_token_resolves_window_only_for_its_publisher() {
         .commit_scoped_capture(root, ScopedWalk::Complete(Payload))
         .unwrap();
     let token = crate::element_token::token_for(scoped, 0);
+    let foreign_args = json!({"element_token":token, "_session_id":"other", "window_id":99});
+    let unknown_args =
+        json!({"element_token":"sdeadbeef:0", "_session_id":"other", "window_id":99});
+    let foreign = store.resolve(42, &foreign_args).unwrap_err();
+    let unknown = store.resolve(42, &unknown_args).unwrap_err();
+    assert_eq!(foreign.structured_content, unknown.structured_content);
+    assert_eq!(
+        format!("{:?}", foreign.content),
+        format!("{:?}", unknown.content)
+    );
+    let foreign_root = store
+        .begin_scoped_capture(
+            42,
+            99,
+            &token,
+            Some("other"),
+            InstanceEvidence::Live(fp.clone()),
+        )
+        .unwrap_err();
+    let unknown_root = store
+        .begin_scoped_capture(
+            42,
+            99,
+            "sdeadbeef:0",
+            Some("other"),
+            InstanceEvidence::Live(fp),
+        )
+        .unwrap_err();
+    assert_eq!(
+        foreign_root.structured_content,
+        unknown_root.structured_content
+    );
     let harness = Harness::build_with_resolver(
         false,
         Some(Arc::new(move |args| store.window_for_token(args))),

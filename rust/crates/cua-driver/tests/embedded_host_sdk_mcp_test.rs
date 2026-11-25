@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use cua_driver_contract::{CaptureScope, GetSessionInput, StartSessionInput};
+use cua_driver_contract::{CaptureScope, GetDesktopStateInput, GetSessionInput, StartSessionInput};
 use cua_driver_sdk::{
     CuaDriver, DriverError, EmbeddedCuaDriverHost, EmbeddedDriverHostOptions,
     EmbeddedDriverHostState, EmbeddedEnvironmentVariable,
@@ -248,6 +248,20 @@ async fn embedded_host_serves_sdk_and_mcp_with_one_contract() {
     assert_eq!(
         mcp_started["result"]["structuredContent"]["capture_scope"],
         "desktop"
+    );
+
+    let refused = sdk
+        .get_desktop_state(GetDesktopStateInput {
+            session: Some("embedded-sdk-window".into()),
+            screenshot_out_file: None,
+            max_image_dimension: None,
+        })
+        .await
+        .expect("SDK call completed");
+    assert!(refused.is_error, "desktop scope must be refused");
+    assert_eq!(
+        refused.error_code.as_deref(),
+        Some("desktop_scope_disabled")
     );
 
     // Session policy belongs to the session and ordinary lifecycle inspection

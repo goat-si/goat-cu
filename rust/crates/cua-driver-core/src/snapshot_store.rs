@@ -191,8 +191,6 @@ enum MissingFrame {
     /// read skipped the screenshot after the window changed size, or no
     /// screenshot was ever taken of it.
     NoScreenshot,
-    /// The current screenshot frame belongs to another session.
-    OtherSession,
     /// No window was named and the process's snapshots disagree.
     Ambiguous,
 }
@@ -202,7 +200,6 @@ impl MissingFrame {
         match self {
             Self::WindowNeverRead => "window_never_read",
             Self::NoScreenshot => "no_screenshot",
-            Self::OtherSession => "other_session",
             Self::Ambiguous => "ambiguous_window",
         }
     }
@@ -231,10 +228,6 @@ fn screenshot_context_refusal(
             "No screenshot frame for {window}: its latest read had no screenshot and the window \
              changed size since the last one (or it was never captured). Call {read} with the \
              default screenshot and take x,y from that image."
-        ),
-        MissingFrame::OtherSession => format!(
-            "The current screenshot of {window} belongs to another session. Call {read} on \
-             this connection before using pixels."
         ),
         MissingFrame::Ambiguous => format!(
             "Pass window_id: this process has several windows without one shared screenshot \
@@ -493,12 +486,10 @@ struct ReadRecord {
     reads: u32,
 }
 
-/// Capture tickets of one window that are still in flight. `issued` is the
-/// newest ticket handed out and `applied` the newest one that published; tickets
-/// in between may still land. The entry is dropped once nothing is in flight.
+/// In-flight captures for one window and the newest ticket that landed.
 struct TicketState {
-    issued: u64,
     applied: u64,
+    owners: HashMap<u64, Option<String>>,
 }
 /// Everything one runtime remembers about published snapshots: GOAT's
 /// scoped captures, semantic epochs and capture tickets, and upstream's read
@@ -724,7 +715,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         ticket: &CaptureTicket<S>,
         instance: InstanceCapture,
     ) -> Option<(u32, Vec<u32>, Option<crate::window_basis::WindowBasis>)> {
-        if !self.owns(ticket, pid, window_id) {
+        if !self.owns(ticket, pid, window_id, session) {
             return None;
         }
         self.publish_snapshot_with_instance(
@@ -751,7 +742,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         ticket: &CaptureTicket<S>,
         instance: InstanceCapture,
     ) -> Option<(u32, Vec<u32>, Option<crate::window_basis::WindowBasis>)> {
-        if !self.owns(ticket, pid, window_id) {
+        if !self.owns(ticket, pid, window_id, session) {
             return None;
         }
         self.publish_snapshot_with_instance(
@@ -1053,7 +1044,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
             }
             for snapshot in &retired {
                 if snapshot.window_id != window_id {
-                    inner.tickets.remove(&(pid, snapshot.window_id));
+                    inner.retire_owner(pid, snapshot.window_id, snapshot.publisher.as_deref());
                 }
             }
             let scoped_retired: Vec<_> = retired
@@ -1083,15 +1074,11 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
             Some(window_id) => {
                 let Some(snapshot) = lane.iter().find(|snapshot| snapshot.window_id == window_id)
                 else {
-                    let others_have_one = inner.lane(pid).iter().any(|snapshot| {
-                        snapshot.window_id == window_id && snapshot.frame.is_some()
-                    });
-                    let why = if others_have_one {
-                        MissingFrame::OtherSession
-                    } else {
-                        MissingFrame::WindowNeverRead
-                    };
-                    return Err(screenshot_context_refusal(Some(pid), Some(window_id), why));
+                    return Err(screenshot_context_refusal(
+                        Some(pid),
+                        Some(window_id),
+                        MissingFrame::WindowNeverRead,
+                    ));
                 };
                 snapshot.screenshot(session).ok_or_else(|| {
                     screenshot_context_refusal(
@@ -1215,7 +1202,6 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         let (retired, scoped_retired) = {
             let mut inner = self.inner.lock().unwrap();
             let mut retired = Vec::new();
-            let mut retired_keys = Vec::new();
             let mut retired_ids: Vec<(i32, u32)> = Vec::new();
             let mut retired_by_pid: Vec<(i32, Vec<Snapshot<S>>)> = Vec::new();
             for (&pid, lane) in inner.lanes.iter_mut() {
@@ -1234,15 +1220,11 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
                         .iter()
                         .map(|snapshot: &Snapshot<S>| (pid, snapshot.id)),
                 );
-                retired_keys.extend(
-                    owned
-                        .iter()
-                        .map(|snapshot: &Snapshot<S>| (pid, snapshot.window_id)),
-                );
                 retired_by_pid.push((pid, owned));
             }
-            for key in retired_keys {
-                inner.tickets.remove(&key);
+            let keys: Vec<_> = inner.tickets.keys().copied().collect();
+            for (pid, window_id) in keys {
+                inner.retire_owner(pid, window_id, Some(session));
             }
             inner.lanes.retain(|_, lane| !lane.is_empty());
             for (pid, owned) in retired_by_pid {
@@ -1458,14 +1440,19 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
                 let Some(snapshot) = inner
                     .lane(pid)
                     .iter()
-                    .find(|snapshot| snapshot.id == snapshot_id)
+                    .find(|snapshot| {
+                        snapshot.id == snapshot_id && snapshot.publisher.as_deref() == session
+                    })
                     .or_else(|| {
                         inner
                             .scoped
                             .iter()
                             .filter(|((owner, _), _)| *owner == pid)
                             .flat_map(|(_, entries)| entries.iter())
-                            .find(|entry| entry.snapshot.id == snapshot_id)
+                            .find(|entry| {
+                                entry.snapshot.id == snapshot_id
+                                    && entry.snapshot.publisher.as_deref() == session
+                            })
                             .map(|entry| &entry.snapshot)
                     })
                 else {
@@ -1507,19 +1494,13 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         }
         // Membership comes from the payload itself: some platforms key rows
         // by sparse member indices, so len() is not an index bound. Retaining
-        // first keeps out-of-range ahead of the ownership refusal; a foreign
-        // caller's retained element is dropped (released) before refusing.
+        // the publisher was checked before consulting the payload.
         let element = snapshot
             .payload
             .retain(element_index)
             .ok_or_else(|| out_of_range_refusal(snapshot, element_index))?;
         // Both absent is compatible with sessionless embedders; registry
         // dispatch installs a namespaced session for session-requiring tools.
-        let session = args.get("_session_id").and_then(serde_json::Value::as_str);
-        if snapshot.publisher.as_deref() != session {
-            drop(element);
-            return Err(another_session_refusal());
-        }
         if let Some(failure) = snapshot
             .instance
             .as_ref()
@@ -1566,7 +1547,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         session: Option<&str>,
         ticket: &CaptureTicket<S>,
     ) -> Option<u32> {
-        if !self.owns(ticket, pid, window_id) {
+        if !self.owns(ticket, pid, window_id, session) {
             return None;
         }
         let ticket = ticket.ticket();
@@ -1577,6 +1558,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
             }
             let state = inner.tickets.get_mut(&(pid, window_id)).unwrap();
             state.applied = state.applied.max(ticket - 1);
+            state.owners.retain(|number, _| *number >= ticket);
             let retired = inner.get_mut(&pid).and_then(|lane| {
                 let position = lane
                     .iter()
@@ -1828,8 +1810,7 @@ mod tests {
         let err = cache
             .resolve_for_instance(42, &foreign, InstanceEvidence::NotChecked)
             .unwrap_err();
-        assert!(crate::snapshot_test_support::text(&err)
-            .contains("snapshot belongs to another session"));
+        assert!(crate::snapshot_test_support::text(&err).contains("element_token is stale"));
         let conflict =
             serde_json::json!({"element_token": token, "_session_id": "other", "window_id": 8});
         assert_eq!(
@@ -1838,7 +1819,7 @@ mod tests {
                 .unwrap_err()
                 .structured_content
                 .unwrap()["refusal"]["code"],
-            "conflicting_element_target"
+            "stale_element_token"
         );
         let range = serde_json::json!({"element_token": token_for(id, 1), "_session_id": "other"});
         assert_eq!(
@@ -1847,7 +1828,7 @@ mod tests {
                 .unwrap_err()
                 .structured_content
                 .unwrap()["refusal"]["code"],
-            "invalid_element_token"
+            "stale_element_token"
         );
         let missing = serde_json::json!({"element_token": token_for(id.wrapping_add(100000), 0), "_session_id": "other", "window_id": 8});
         assert_eq!(
@@ -1902,7 +1883,7 @@ mod tests {
         }
         let drops = Arc::new(AtomicUsize::new(0));
         let cache = SnapshotStore::new();
-        let ticket = cache.begin_capture(42, 7);
+        let ticket = cache.begin_capture_for_session(42, 7, Some("owner"));
         let fp = fingerprint(Some(5), None);
         let id = cache
             .publish_basis_for_session_with_instance(
@@ -2041,7 +2022,7 @@ mod tests {
         let err = cache.resolve(42, &missing).unwrap_err();
         assert_eq!(
             err.structured_content.unwrap()["refusal"]["code"],
-            "invalid_element_token"
+            "stale_element_token"
         );
     }
 
@@ -2064,7 +2045,6 @@ mod tests {
             let err = cache.resolve(42, &foreign).unwrap_err();
             let content = err.structured_content.unwrap();
             assert_eq!(content["refusal"]["code"], "stale_element_token");
-            assert!(format!("{content}").contains("snapshot belongs to another session"));
         }
         assert_eq!(
             cache.pid_for_token(
@@ -2075,7 +2055,7 @@ mod tests {
         let conflict = cache.resolve(42, &serde_json::json!({"element_token": token, "window_id": 8, "_session_id": "runtime:b"})).unwrap_err();
         assert_eq!(
             conflict.structured_content.unwrap()["refusal"]["code"],
-            "conflicting_element_target"
+            "stale_element_token"
         );
         let range = cache
             .resolve(
@@ -2085,7 +2065,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             range.structured_content.unwrap()["refusal"]["code"],
-            "invalid_element_token"
+            "stale_element_token"
         );
         assert_eq!(
             cache.refresh_screenshot_for_session(42, 7, Some("runtime:b"), 1.0, None),
@@ -2504,6 +2484,41 @@ mod tests {
     }
 
     #[test]
+    fn f4c_foreign_token_matches_unknown_for_all_rows_and_windows() {
+        let cache = SnapshotStore::new();
+        let (id, _) = cache
+            .publish_for_session(10, 20, Payload(vec![7]), Some("a"), None)
+            .unwrap();
+        for (row, window) in [(0, 20), (999, 20), (0, 99)] {
+            let args = |snapshot| serde_json::json!({"element_token": token_for(snapshot, row), "window_id": window, "_session_id": "b"});
+            let foreign = cache.resolve(10, &args(id)).unwrap_err();
+            let unknown = cache.resolve(10, &args(0xdeadbeef)).unwrap_err();
+            assert_eq!(foreign.structured_content, unknown.structured_content);
+            assert_eq!(
+                format!("{:?}", foreign.content),
+                format!("{:?}", unknown.content)
+            );
+        }
+    }
+
+    #[test]
+    fn f4c_foreign_screenshot_is_indistinguishable_from_no_screenshot() {
+        let cache = SnapshotStore::new();
+        let before = cache
+            .screenshot_context(10, Some(20), Some("b"))
+            .unwrap_err();
+        cache.publish_for_session(10, 20, Payload(vec![1]), Some("a"), Some(1.0));
+        let after = cache
+            .screenshot_context(10, Some(20), Some("b"))
+            .unwrap_err();
+        assert_eq!(before.structured_content, after.structured_content);
+        assert_eq!(
+            format!("{:?}", before.content),
+            format!("{:?}", after.content)
+        );
+    }
+
+    #[test]
     fn window_pixels_need_a_session_screenshot_unless_marked_native() {
         let cache = SnapshotStore::new();
         let session = |extra: serde_json::Value| {
@@ -2673,7 +2688,7 @@ mod tests {
         assert_eq!(reason(&cache, 20).0, "no_screenshot");
 
         cache.publish_for_session(10, 21, Payload(vec![1]), Some("b"), Some(1.0));
-        assert_eq!(reason(&cache, 21).0, "other_session");
+        assert_eq!(reason(&cache, 21).0, "window_never_read");
     }
 
     #[test]

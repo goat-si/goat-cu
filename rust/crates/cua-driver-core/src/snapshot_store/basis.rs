@@ -15,6 +15,7 @@ pub struct CaptureTicket<S> {
     pid: i32,
     window_id: u64,
     ticket: u64,
+    session: Option<String>,
 }
 
 impl<S> CaptureTicket<S> {
@@ -51,7 +52,7 @@ impl<S> StoreState<S> {
     pub(super) fn ticket_current(&self, pid: i32, window_id: u64, ticket: u64) -> bool {
         self.tickets
             .get(&(pid, window_id))
-            .is_some_and(|state| ticket != 0 && ticket <= state.issued && ticket > state.applied)
+            .is_some_and(|state| ticket > state.applied && state.owners.contains_key(&ticket))
     }
 
     /// Record `ticket` as landed, dropping the window's entry once no newer
@@ -59,22 +60,42 @@ impl<S> StoreState<S> {
     pub(super) fn apply_ticket(&mut self, pid: i32, window_id: u64, ticket: u64) {
         if let Some(state) = self.tickets.get_mut(&(pid, window_id)) {
             state.applied = ticket;
-            if state.applied >= state.issued {
+            state.owners.retain(|number, _| *number > ticket);
+            if state.owners.is_empty() {
                 self.tickets.remove(&(pid, window_id));
             }
         }
     }
 
-    /// Drop the window's entry when `ticket` is the newest one issued and has
-    /// not landed: nothing can land after it. A newer capture keeps the
-    /// entry, and a landed ticket has already left it.
+    /// Drop this ticket; if it was its owner's newest, retire that owner's
+    /// older captures too. Other owners retain their in-flight tickets.
     pub(super) fn retire_ticket(&mut self, pid: i32, window_id: u64, ticket: u64) {
-        if self
-            .tickets
-            .get(&(pid, window_id))
-            .is_some_and(|state| ticket != 0 && state.issued == ticket && state.applied < ticket)
-        {
-            self.tickets.remove(&(pid, window_id));
+        if let Some(state) = self.tickets.get_mut(&(pid, window_id)) {
+            if let Some(owner) = state.owners.get(&ticket).cloned() {
+                let latest = state
+                    .owners
+                    .iter()
+                    .filter(|(_, o)| **o == owner)
+                    .map(|(n, _)| *n)
+                    .max();
+                if latest == Some(ticket) {
+                    state.owners.retain(|_, o| *o != owner);
+                } else {
+                    state.owners.remove(&ticket);
+                }
+            }
+            if state.owners.is_empty() {
+                self.tickets.remove(&(pid, window_id));
+            }
+        }
+    }
+
+    pub(super) fn retire_owner(&mut self, pid: i32, window_id: u64, session: Option<&str>) {
+        if let Some(state) = self.tickets.get_mut(&(pid, window_id)) {
+            state.owners.retain(|_, owner| owner.as_deref() != session);
+            if state.owners.is_empty() {
+                self.tickets.remove(&(pid, window_id));
+            }
         }
     }
 
@@ -123,11 +144,18 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         inner
     }
 
-    /// Whether `ticket` was issued by this store for this window.
-    pub(super) fn owns(&self, ticket: &CaptureTicket<S>, pid: i32, window_id: u64) -> bool {
+    /// Whether `ticket` belongs to this store, window and session.
+    pub(super) fn owns(
+        &self,
+        ticket: &CaptureTicket<S>,
+        pid: i32,
+        window_id: u64,
+        session: Option<&str>,
+    ) -> bool {
         Arc::ptr_eq(&self.inner, &ticket.state)
             && ticket.pid == pid
             && ticket.window_id == window_id
+            && ticket.session.as_deref() == session
     }
 
     /// Reserve the ordering ticket before starting a capture. Keep it until
@@ -135,13 +163,23 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
     /// never landed. Tickets never wrap: once the store's 64-bit counter is
     /// spent the ticket is 0, which every publication and refresh refuses.
     pub fn begin_capture(&self, pid: i32, window_id: u64) -> CaptureTicket<S> {
-        let ticket = self.reserve_ticket(pid, window_id);
+        self.begin_capture_for_session(pid, window_id, None)
+    }
+
+    pub fn begin_capture_for_session(
+        &self,
+        pid: i32,
+        window_id: u64,
+        session: Option<&str>,
+    ) -> CaptureTicket<S> {
+        let ticket = self.reserve_ticket(pid, window_id, session);
         CaptureTicket {
             state: self.inner.clone(),
             retired: self.retired.clone(),
             pid,
             window_id,
             ticket,
+            session: session.map(str::to_owned),
         }
     }
 
@@ -154,10 +192,11 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
             pid,
             window_id,
             ticket,
+            session: None,
         }
     }
 
-    fn reserve_ticket(&self, pid: i32, window_id: u64) -> u64 {
+    fn reserve_ticket(&self, pid: i32, window_id: u64, session: Option<&str>) -> u64 {
         let mut inner = self.lock_for_tickets();
         let Some(ticket) = inner.last_ticket.checked_add(1) else {
             return 0;
@@ -165,14 +204,14 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         inner.last_ticket = ticket;
         // A new entry starts just below this ticket, so tickets issued before
         // the window's previous entry was dropped stay obsolete.
-        inner
+        let state = inner
             .tickets
             .entry((pid, window_id))
             .or_insert(TicketState {
-                issued: ticket,
                 applied: ticket - 1,
-            })
-            .issued = ticket;
+                owners: Default::default(),
+            });
+        state.owners.insert(ticket, session.map(str::to_owned));
         ticket
     }
 
@@ -188,7 +227,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         basis: Option<WindowBasis>,
         ticket: &CaptureTicket<S>,
     ) -> Option<(u32, Vec<u32>, Option<WindowBasis>)> {
-        if !self.owns(ticket, pid, window_id) {
+        if !self.owns(ticket, pid, window_id, session) {
             return None;
         }
         self.publish_snapshot(
@@ -213,7 +252,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         basis: Option<WindowBasis>,
         ticket: &CaptureTicket<S>,
     ) -> Option<(u32, Vec<u32>, Option<WindowBasis>)> {
-        if !self.owns(ticket, pid, window_id) {
+        if !self.owns(ticket, pid, window_id, session) {
             return None;
         }
         self.publish_snapshot(
@@ -238,7 +277,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         basis: Option<WindowBasis>,
         ticket: &CaptureTicket<S>,
     ) -> Option<(u32, Option<WindowBasis>)> {
-        if !self.owns(ticket, pid, window_id) {
+        if !self.owns(ticket, pid, window_id, session) {
             return None;
         }
         let ticket = ticket.ticket();
@@ -285,16 +324,16 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         let Some((id, generation)) = parse_basis_id(basis_id) else {
             return Err(basis_refusal("stale_basis", "unknown_snapshot", None, None));
         };
-        let Some(snapshot) = inner
-            .get(&pid)
-            .and_then(|lane| lane.iter().find(|s| s.id == id))
-        else {
+        let Some(snapshot) = inner.get(&pid).and_then(|lane| {
+            lane.iter()
+                .find(|s| s.id == id && s.publisher.as_deref() == session)
+        }) else {
             return Err(basis_refusal("stale_basis", "unknown_snapshot", None, None));
         };
         let reason = if snapshot.window_id != window_id {
             Some("other_window")
         } else if snapshot.screenshot_owner.as_deref() != session {
-            Some("other_session")
+            Some("unknown_snapshot")
         } else if snapshot.basis_exhausted {
             Some("no_basis")
         } else if snapshot.frame_generation != generation {
@@ -571,10 +610,10 @@ mod review_regressions {
             store
                 .publish_for_session(1, 2, Payload, Some("review-session"), Some(1.0))
                 .unwrap();
-            let old = store.begin_capture(1, 2);
+            let old = store.begin_capture_for_session(1, 2, Some("review-session"));
             match kind {
                 0 => {
-                    store.remove(1, 2, None);
+                    store.remove(1, 2, Some("review-session"));
                 }
                 1 => {
                     store.clear();
@@ -584,13 +623,29 @@ mod review_regressions {
                 }
             }
             assert!(!store.inner.lock().unwrap().tickets.contains_key(&(1, 2)));
-            let fresh = store.begin_capture(1, 2);
+            let fresh = store.begin_capture_for_session(1, 2, Some("review-session"));
             assert_ne!(old.ticket(), fresh.ticket());
             assert!(store
-                .publish_basis_for_session(1, 2, Payload, None, Some(1.0), Some(frame()), &old)
+                .publish_basis_for_session(
+                    1,
+                    2,
+                    Payload,
+                    Some("review-session"),
+                    Some(1.0),
+                    Some(frame()),
+                    &old
+                )
                 .is_none());
             assert!(store
-                .publish_basis_for_session(1, 2, Payload, None, Some(1.0), Some(frame()), &fresh)
+                .publish_basis_for_session(
+                    1,
+                    2,
+                    Payload,
+                    Some("review-session"),
+                    Some(1.0),
+                    Some(frame()),
+                    &fresh
+                )
                 .is_some());
         }
     }
@@ -693,6 +748,81 @@ mod boundary_tests {
         assert!(store
             .publish_basis_for_session(1, 2, Payload, None, Some(1.0), Some(frame()), &fresh)
             .is_some());
+    }
+
+    #[test]
+    fn f4c_retiring_session_preserves_foreign_capture() {
+        let store = SnapshotStore::new();
+        store
+            .publish_for_session(1, 2, Payload, Some("a"), Some(1.0))
+            .unwrap();
+        let ticket = store.begin_capture_for_session(1, 2, Some("b"));
+        let retired = store.begin_capture_for_session(1, 2, Some("a"));
+        store.retire_session_screenshots("a");
+        assert!(store
+            .publish_basis_for_session(1, 2, Payload, Some("a"), Some(1.0), Some(frame()), &retired)
+            .is_none());
+        assert!(store
+            .publish_basis_for_session(1, 2, Payload, Some("b"), Some(1.0), Some(frame()), &ticket)
+            .is_some());
+    }
+
+    #[test]
+    fn f4c_lru_eviction_preserves_foreign_capture() {
+        let store = SnapshotStore::new();
+        store
+            .publish_for_session(1, 2, Payload, Some("a"), Some(1.0))
+            .unwrap();
+        let ticket = store.begin_capture_for_session(1, 2, Some("b"));
+        let evicted = store.begin_capture_for_session(1, 2, Some("a"));
+        for window in 3..3 + crate::element_token::LRU_CAP_PER_PID as u64 {
+            store
+                .publish_for_session(1, window, Payload, Some("a"), Some(1.0))
+                .unwrap();
+        }
+        assert!(store
+            .publish_basis_for_session(1, 2, Payload, Some("a"), Some(1.0), Some(frame()), &evicted)
+            .is_none());
+        assert!(store
+            .publish_basis_for_session(1, 2, Payload, Some("b"), Some(1.0), Some(frame()), &ticket)
+            .is_some());
+    }
+
+    #[test]
+    fn f4c_foreign_basis_is_indistinguishable_from_unknown() {
+        let store = SnapshotStore::new();
+        let ticket = store.begin_capture_for_session(1, 2, Some("a"));
+        let (_, _, basis) = store
+            .publish_basis_for_session(1, 2, Payload, Some("a"), Some(1.0), Some(frame()), &ticket)
+            .unwrap();
+        let id = basis.unwrap().snapshot_id;
+        for window in [2, 3] {
+            let foreign = store.basis_for(1, window, &id, Some("b")).unwrap_err();
+            let unknown = store
+                .basis_for(1, window, "sdeadbeef", Some("b"))
+                .unwrap_err();
+            assert_eq!(foreign.structured_content, unknown.structured_content);
+            assert_eq!(
+                format!("{:?}", foreign.content),
+                format!("{:?}", unknown.content)
+            );
+        }
+    }
+
+    #[test]
+    fn f4c_newer_foreign_capture_supersedes_older_owner_and_cannot_be_forged() {
+        let store = SnapshotStore::new();
+        let older = store.begin_capture_for_session(1, 2, Some("a"));
+        let newer = store.begin_capture_for_session(1, 2, Some("b"));
+        assert!(store
+            .publish_basis_for_session(1, 2, Payload, Some("a"), Some(1.0), Some(frame()), &newer)
+            .is_none());
+        assert!(store
+            .publish_basis_for_session(1, 2, Payload, Some("b"), Some(1.0), Some(frame()), &newer)
+            .is_some());
+        assert!(store
+            .publish_basis_for_session(1, 2, Payload, Some("a"), Some(1.0), Some(frame()), &older)
+            .is_none());
     }
 }
 
@@ -819,7 +949,7 @@ mod capture_ticket_tests {
         let store = SnapshotStore::new();
         let session = "drv-133-ended-session";
         crate::session::end_session(session);
-        let ticket = store.begin_capture(1, 2);
+        let ticket = store.begin_capture_for_session(1, 2, Some(session));
         let _keep = store.begin_capture(1, 3);
         assert!(store
             .publish_basis_for_session(
@@ -833,7 +963,7 @@ mod capture_ticket_tests {
             )
             .is_none());
         assert_eq!(entries(&store), 1, "window 2 retired, window 3 kept");
-        let ticket = store.begin_capture(1, 2);
+        let ticket = store.begin_capture_for_session(1, 2, Some(session));
         assert!(store
             .refresh_basis_for_session(1, 2, Some(session), 1.0, None, Some(frame()), &ticket)
             .is_none());
@@ -858,7 +988,7 @@ mod capture_ticket_tests {
             .lock()
             .unwrap()
             .ticket_current(1, 2, foreign.ticket()));
-        assert!(store
+        assert!(!store
             .inner
             .lock()
             .unwrap()

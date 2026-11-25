@@ -3095,12 +3095,12 @@ mod tests {
     #[test]
     fn a_rewritten_tree_falls_back_to_full() {
         let window = 7005;
-        let (mut c1, mut s1) = payload("s000000c4", OLD);
+        let (mut c1, mut s1) = payload("sffff00c4", OLD);
         apply(&opts(json!({})), &ctx(window), &mut c1, &mut s1);
         let other = "- [0] AXWindow \"Other\"\n  - [1] AXList \"x\"\n  - [2] AXButton \"Q\"\n  - [3] AXButton \"R\"\n  - [4] AXButton \"S\"";
-        let (mut c2, mut s2) = payload("s000000c5", other);
+        let (mut c2, mut s2) = payload("sffff00c5", other);
         apply(
-            &opts(json!({"since": "s000000c4"})),
+            &opts(json!({"since": "sffff00c4"})),
             &ctx(window),
             &mut c2,
             &mut s2,
