@@ -73,6 +73,7 @@ pub(super) struct FixtureState {
     completed_key_pairs: usize,
     /// The Enter `char` event fails after its `keyDown` landed.
     fail_enter_char: bool,
+    fail_enter_phase: Option<&'static str>,
     /// The single-line field probe errors instead of answering.
     single_line_probe_fails: bool,
     /// A synthetic `this.click()` opens a confirm() dialog: the mock emits
@@ -237,6 +238,7 @@ impl Default for FixtureState {
             fail_mouse_event: None,
             completed_key_pairs: 0,
             fail_enter_char: false,
+            fail_enter_phase: None,
             single_line_probe_fails: false,
             click_opens_dialog: false,
             dialog_vanished: false,
@@ -965,6 +967,13 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                 } else {
                     MockReply::err(-32000, "No node with given id")
                 }
+            }
+            "Input.dispatchKeyEvent"
+                if call.params["key"] == "Enter"
+                    && call.params["type"].as_str() == st.fail_enter_phase
+                    && st.fail_enter_phase.is_some() =>
+            {
+                MockReply::err(-32000, "fixture Enter phase failure")
             }
             "Input.dispatchKeyEvent"
                 if st.fail_enter_char
@@ -6183,6 +6192,32 @@ async fn keystrokes_newline_in_a_multiline_field_carries_the_enter_key_code() {
 }
 
 #[tokio::test]
+async fn each_failed_enter_phase_is_unknown_in_both_typing_modes() {
+    for mode in ["insert_text", "keystrokes"] {
+        for phase in ["keyDown", "char", "keyUp"] {
+            let f = fixture_with(|state| state.fail_enter_phase = Some(phase)).await;
+            let (target, tab) = bind(&f).await;
+            let snap = snapshot(&f, &target, &tab).await;
+            let input_ref = ref_of(&snap, "main", "Shadow Input");
+            let result = BrowserTypeTool::new(f.engine.clone())
+                .invoke(json!({"target_id": target, "tab_id": tab, "ref": input_ref,
+                    "text": "hi\n", "mode": mode, "session": SESSION}))
+                .await;
+            let s = structured(&result);
+            assert_eq!(
+                s["refusal"]["detail"]["enter_pressed"],
+                Value::Null,
+                "{mode} {phase}: {s}"
+            );
+            assert_eq!(
+                s["refusal"]["detail"]["enter_uncertain"], true,
+                "{mode} {phase}: {s}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_failed_enter_after_insert_text_is_reported_not_counted() {
     let f = fixture_with(|state| state.fail_key_down_after = Some(0)).await;
     let (target, tab) = bind(&f).await;
@@ -6202,7 +6237,7 @@ async fn a_failed_enter_after_insert_text_is_reported_not_counted() {
     assert_eq!(refusal["code"], "browser_input_incomplete", "{refusal}");
     assert_eq!(refusal["detail"]["requested_chars"], 2);
     assert_eq!(refusal["detail"]["delivered_chars"], 2);
-    assert_eq!(refusal["detail"]["enter_pressed"], false);
+    assert_eq!(refusal["detail"]["enter_pressed"], Value::Null);
     assert_eq!(refusal["detail"]["effect"], "unverifiable");
     assert!(!result.content.iter().any(
         |c| matches!(c, Content::Text { text, .. } if text.contains("Enter was not delivered"))
@@ -6252,7 +6287,7 @@ async fn an_enter_that_fails_partway_is_reported_as_uncertain() {
     assert_eq!(s["status"], "refused", "{s}");
     let refusal = &s["refusal"];
     assert_eq!(refusal["code"], "browser_input_incomplete", "{refusal}");
-    assert_eq!(refusal["detail"]["enter_pressed"], false, "{refusal}");
+    assert_eq!(refusal["detail"]["enter_pressed"], Value::Null, "{refusal}");
     assert_eq!(refusal["detail"]["enter_uncertain"], true, "{refusal}");
     let message = refusal["message"].as_str().unwrap_or_default();
     assert!(!message.contains("not delivered"), "{refusal}");

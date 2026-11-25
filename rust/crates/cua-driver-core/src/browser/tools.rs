@@ -2540,7 +2540,7 @@ impl BrowserTypeTool {
                 to it; pass replace=true to set the field instead, or to clear it by \
                 typing an empty string. On a single-line input, a trailing newline \
                 is pressed as a real Enter (key, code, keyCode 13) after the text and \
-                the result reports enter_pressed; a textarea or contenteditable keeps \
+                the result reports enter_pressed (null if delivery is uncertain); a textarea or contenteditable keeps \
                 it as content. Pass a ref to an editable element from the \
                 latest snapshot. A ref is required; heuristic bindings are refused."
                 .into(),
@@ -3165,7 +3165,11 @@ impl Tool for BrowserTypeTool {
             .with_detail(json!({
                 "requested_chars": requested_chars,
                 "delivered_chars": delivered_chars,
-                "enter_pressed": enter_pressed,
+                "enter_pressed": match enter {
+                    EnterDelivery::NotSent => Some(false),
+                    EnterDelivery::Uncertain => None,
+                    EnterDelivery::Pressed => Some(true),
+                },
                 "enter_uncertain": enter == EnterDelivery::Uncertain,
                 "retryable": false,
                 "effect": "unverifiable",
