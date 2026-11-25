@@ -55,6 +55,9 @@ pub mod text_write_policy;
 mod libei_route;
 
 #[cfg(any(target_os = "linux", test))]
+mod inject_sequence;
+
+#[cfg(any(target_os = "linux", test))]
 mod token_action_policy;
 
 #[cfg(target_os = "linux")]

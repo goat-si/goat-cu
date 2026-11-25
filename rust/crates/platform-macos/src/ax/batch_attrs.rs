@@ -181,6 +181,34 @@ pub(crate) unsafe fn copy_attrs_batch(element: AXUIElementRef, names: &[&str]) -
     finish_batch(error, values as CFTypeRef, names.len())
 }
 
+/// Identity and scope reads require an answered, well-typed slot for every
+/// requested attribute. An explicit absent attribute is distinct from a failed
+/// or malformed read, which must never compare equal to an earlier identity.
+pub(crate) unsafe fn copy_string_attrs<const N: usize>(
+    element: AXUIElementRef,
+    names: [&str; N],
+) -> Option<[Option<String>; N]> {
+    let BatchRead::Slots(slots) = copy_attrs_batch(element, &names) else {
+        return None;
+    };
+    strings_from_slots(&slots)
+}
+
+fn strings_from_slots<const N: usize>(slots: &BatchSlots) -> Option<[Option<String>; N]> {
+    if slots.slots.len() != N {
+        return None;
+    }
+    let mut values = Vec::with_capacity(N);
+    for index in 0..N {
+        match slots.slots[index] {
+            Slot::Absent => values.push(None),
+            Slot::Missing => return None,
+            Slot::Value(value) => values.push(Some(unsafe { string_from_cf(value) }?)),
+        }
+    }
+    values.try_into().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +302,30 @@ mod tests {
         assert!(!slots.answered(0));
         assert!(slots.answered(1));
         assert!(slots.answered(2));
+    }
+
+    #[test]
+    fn identity_batch_rejects_missing_and_malformed_slots() {
+        let null = unsafe { CFType::wrap_under_get_rule(kCFNull) };
+        let BatchRead::Slots(missing) = finish(&[null]) else {
+            panic!("missing slot decodes")
+        };
+        assert_eq!(strings_from_slots::<1>(&missing), None);
+        let BatchRead::Slots(wrong) = finish(&[CFNumber::from(8).as_CFType()]) else {
+            panic!("number decodes")
+        };
+        assert_eq!(strings_from_slots::<1>(&wrong), None);
+        let BatchRead::Slots(valid) = finish(&[
+            CFString::new("AXButton").as_CFType(),
+            ax_error(kAXErrorNoValue),
+        ]) else {
+            panic!("strings decode")
+        };
+        assert_eq!(
+            strings_from_slots::<2>(&valid),
+            Some([Some("AXButton".into()), None])
+        );
+        assert_eq!(strings_from_slots::<1>(&valid), None);
     }
 
     #[test]

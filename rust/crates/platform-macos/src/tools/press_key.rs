@@ -3616,6 +3616,29 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn the_oracle_returns_unverified_after_one_dispatch() {
+        let sends = std::cell::Cell::new(0);
+        let confirmed = dispatch_with_ax_oracle(1, Some(2), Some(3), || {
+            sends.set(sends.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert!(!confirmed);
+        assert_eq!(sends.get(), 1);
+    }
+
+    #[test]
+    fn the_oracle_propagates_a_dispatch_failure_without_retry() {
+        let sends = std::cell::Cell::new(0);
+        let result = dispatch_with_ax_oracle(1, Some(2), Some(3), || {
+            sends.set(sends.get() + 1);
+            anyhow::bail!("not delivered")
+        });
+        assert!(result.is_err());
+        assert_eq!(sends.get(), 1);
+    }
+
+    #[test]
     fn targeted_key_requires_focus_readback_before_dispatch() {
         use std::cell::RefCell;
         let events = RefCell::new(Vec::new());

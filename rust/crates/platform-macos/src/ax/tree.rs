@@ -1232,10 +1232,54 @@ impl AxWalkEnvironment for NativeWalkEnvironment {
         &self,
         element: Self::Element,
     ) -> super::evidence::Observed<TopLevelCandidate> {
-        unsafe {
-            super::tree_source::native::with_borrowed(element, |source, child| {
-                scope_candidate_with(source, child, || ax_get_window_id(element))
-            })
+        use super::evidence::{EvidenceStatus, Observed, ReadEvidence, ReadSite};
+        unsafe { set_messaging_timeout(element) };
+        let values = unsafe {
+            super::batch_attrs::copy_string_attrs(element, ["AXRole", "AXSubrole", "AXIdentifier"])
+        };
+        let Some([Some(role), subrole, identifier]) = values else {
+            return Observed {
+                legacy: TopLevelCandidate::new("", None),
+                evidence: vec![ReadEvidence {
+                    owner: Some(element as usize),
+                    site: ReadSite::ScopeCandidate("AXBatch"),
+                    status: EvidenceStatus::Unknown(super::tree_source::ReadFailure::WrongType),
+                    attempt: 0,
+                    listing: None,
+                }],
+            };
+        };
+        let ax_window_id = if is_window_like_role(&role) {
+            unsafe { ax_get_window_id(element) }
+        } else {
+            None
+        };
+        let evidence = [
+            ("AXRole", true),
+            ("AXSubrole", subrole.is_some()),
+            ("AXIdentifier", identifier.is_some()),
+        ]
+        .into_iter()
+        .map(|(name, present)| ReadEvidence {
+            owner: Some(element as usize),
+            site: ReadSite::ScopeCandidate(name),
+            status: if present {
+                EvidenceStatus::Known
+            } else {
+                EvidenceStatus::Absent
+            },
+            attempt: 0,
+            listing: None,
+        })
+        .collect();
+        Observed {
+            legacy: TopLevelCandidate {
+                role,
+                subrole,
+                identifier,
+                ax_window_id,
+            },
+            evidence,
         }
     }
     fn window_owner(&self, pid: i32, window_id: u32) -> crate::windows::WindowOwner {
@@ -1362,7 +1406,9 @@ where
             }
         }
 
-        for child in walk_these {
+        let shares = SiblingShares::reserve(&mut budget, false, walk_these.len());
+        for (position, child) in walk_these.into_iter().enumerate() {
+            budget.release(shares.of(position));
             environment.with_walk_element(source, child, |source, child| {
                 walk_root(
                     source,
@@ -1928,8 +1974,9 @@ fn resolve_top_level_with<E: AxWalkEnvironment>(
             let walk = top_level.clone();
             return (top_level, walk, None);
         };
-        let mut decision = scope_top_level_with(environment, &top_level, pid, wid);
-        if matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
+        let (mut decision, incomplete_scope) =
+            scope_top_level_with(environment, &top_level, pid, wid);
+        if !incomplete_scope && matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
             if let Some((parent_window_id, sheet)) =
                 window_holding_sheet_with(environment, &top_level, wid)
             {
@@ -2190,16 +2237,49 @@ fn scope_top_level_with<E: AxWalkEnvironment>(
     top_level: &[E::Element],
     pid: i32,
     wid: u32,
-) -> ScopeDecision {
-    let candidates: Vec<TopLevelCandidate> = top_level
+) -> (ScopeDecision, bool) {
+    let observations: Vec<_> = top_level
         .iter()
-        .map(|&child| environment.scope_candidate(child).into_walk_legacy())
+        .map(|&child| environment.scope_candidate(child))
+        .collect();
+    let incomplete = observations.iter().any(|o| {
+        o.evidence.iter().any(|e| {
+            e.site == super::evidence::ReadSite::ScopeCandidate("AXBatch")
+                && matches!(
+                    e.status,
+                    super::evidence::EvidenceStatus::Unknown(_)
+                        | super::evidence::EvidenceStatus::Unavailable
+                        | super::evidence::EvidenceStatus::DeadlineExpired
+                )
+        })
+    });
+    let candidates: Vec<TopLevelCandidate> = observations
+        .into_iter()
+        .map(|o| o.into_walk_legacy())
         .collect();
     // GOAT's walk keeps the AXWindows read in its evidence; the AX error
     // name (upstream #7192) is not threaded into the scope decision.
-    decide_window_scope(&candidates, wid, None, || environment.window_owner(pid, wid))
+    if incomplete {
+        return (
+            ScopeDecision {
+                scope: WindowScope::AxUnresolved {
+                    ax_window_count: 0,
+                    ax_windows_error: None,
+                },
+                walk: Vec::new(),
+            },
+            true,
+        );
+    }
+    (
+        decide_window_scope(&candidates, wid, None, || {
+            environment.window_owner(pid, wid)
+        }),
+        false,
+    )
 }
 
+#[cfg(test)]
 fn scope_candidate_with<S: AxTreeSource>(
     source: &S,
     element: &S::Element,
@@ -3153,7 +3233,9 @@ fn walk_children<S: AxTreeSource>(
     } else {
         None
     };
+    let shares = SiblingShares::reserve(budget, in_web_content, children.len());
     for (index, child) in children.into_iter().enumerate() {
+        budget.release(shares.of(index));
         if let Some(ref tp) = tab_plan {
             if index == tp.first_omitted_index {
                 lines.push((depth, format_omitted_tabs_line(tp.omitted_count)));
@@ -3698,6 +3780,50 @@ fn display_node(
     }
 }
 
+/// Most children a node holds nodes for (see [`SiblingShares`]). A pane,
+/// toolbar or button row is this small; a list or table is not.
+const MAX_RESERVED_SIBLINGS: usize = 16;
+
+/// Most nodes held for one sibling: enough for a later container's own row
+/// and a few controls nested in it (a button bar inside an unnamed group).
+const MAX_SHARE_PER_SIBLING: usize = 8;
+
+/// Nodes of the budget held for a native node's children before the first is
+/// walked, so a deep early child cannot use up `max_elements` before the
+/// children after it get rows. An Open panel's file browser holds hundreds of
+/// rows and took the whole default budget ahead of the panel's Cancel and Open
+/// buttons, so a read of the panel showed no way to answer it (#3351).
+///
+/// Each child's share is at most [`MAX_SHARE_PER_SIBLING`], spread evenly
+/// over what is free. Lists and tables (more than [`MAX_RESERVED_SIBLINGS`]
+/// children) and web content keep their depth-first order, so their first
+/// rows still show their cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SiblingShares {
+    held: usize,
+    children: usize,
+}
+
+impl SiblingShares {
+    fn reserve(budget: &mut WalkBudget, in_web_content: bool, children: usize) -> Self {
+        let held = if in_web_content || children > MAX_RESERVED_SIBLINGS {
+            0
+        } else {
+            budget.reserve(children * MAX_SHARE_PER_SIBLING)
+        };
+        Self { held, children }
+    }
+
+    /// The nodes held for the child at `position`; the walker releases them
+    /// just before walking it. The shares add up to `held`.
+    fn of(self, position: usize) -> usize {
+        if self.children == 0 {
+            return 0;
+        }
+        self.held / self.children + usize::from(position < self.held % self.children)
+    }
+}
+
 fn is_web_content_role(role: &str) -> bool {
     let normalized = role
         .chars()
@@ -3705,6 +3831,54 @@ fn is_web_content_role(role: &str) -> bool {
         .flat_map(char::to_lowercase)
         .collect::<String>();
     normalized.contains("webarea") || normalized.contains("documentweb") || normalized == "document"
+}
+
+#[cfg(test)]
+mod sibling_reservation_tests {
+    use super::{SiblingShares, MAX_RESERVED_SIBLINGS, MAX_SHARE_PER_SIBLING};
+    use cua_driver_core::walk_budget::WalkBudget;
+
+    #[test]
+    fn a_pane_holds_nodes_for_each_child_but_a_list_does_not() {
+        let mut budget = WalkBudget::nodes_only(250);
+        let pane = SiblingShares::reserve(&mut budget, false, 5);
+        assert_eq!(pane.of(0), MAX_SHARE_PER_SIBLING);
+        let list = SiblingShares::reserve(&mut budget, false, MAX_RESERVED_SIBLINGS + 1);
+        assert_eq!(list.of(0), 0);
+        let web = SiblingShares::reserve(&mut budget, true, 5);
+        assert_eq!(web.of(0), 0);
+    }
+
+    #[test]
+    fn a_short_budget_is_spread_evenly_and_fully_released() {
+        let mut budget = WalkBudget::nodes_only(8);
+        assert!(budget.admit());
+        // 7 free nodes over 3 children: 3, 2, 2.
+        let shares = SiblingShares::reserve(&mut budget, false, 3);
+        assert_eq!((0..3).map(|i| shares.of(i)).collect::<Vec<_>>(), [3, 2, 2]);
+    }
+
+    /// A deep first child, then a group whose two buttons sit one level down:
+    /// the group's share leaves room for both buttons.
+    #[test]
+    fn a_later_group_keeps_rows_for_its_nested_controls() {
+        let mut budget = WalkBudget::nodes_only(40);
+        assert!(budget.admit(), "sheet");
+        let sheet = SiblingShares::reserve(&mut budget, false, 2);
+        budget.release(sheet.of(0));
+        let mut deep = 0;
+        while budget.admit() {
+            deep += 1;
+        }
+        assert!(deep > 0, "the file list still gets the free nodes");
+        budget.release(sheet.of(1));
+        assert!(budget.admit(), "button group");
+        let group = SiblingShares::reserve(&mut budget, false, 2);
+        for button in 0..2 {
+            budget.release(group.of(button));
+            assert!(budget.admit(), "button {button}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4137,7 +4311,15 @@ fn filter_tree(markdown: &str, query: &str) -> String {
 }
 
 fn filter_tree_pair(markdown: &str, search_markdown: &str, query: &str) -> String {
-    let needle = query.to_lowercase();
+    let lowercase = query.to_lowercase();
+    let mut alternatives: Vec<&str> = lowercase
+        .split('|')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if alternatives.is_empty() {
+        alternatives.push(&lowercase);
+    }
     let lines: Vec<&str> = markdown.lines().collect();
     let search_lines: Vec<&str> = search_markdown.lines().collect();
 
@@ -4161,7 +4343,10 @@ fn filter_tree_pair(markdown: &str, search_markdown: &str, query: &str) -> Strin
         current_ancestor[depth] = line;
 
         let search_line = search_lines.get(index).copied().unwrap_or(line);
-        if search_line.to_lowercase().contains(&needle) {
+        if alternatives
+            .iter()
+            .any(|needle| search_line.to_lowercase().contains(needle))
+        {
             for ancestor_depth in 0..depth {
                 let ancestor = current_ancestor[ancestor_depth];
                 if ancestor.is_empty() {

@@ -17,6 +17,11 @@ pub struct ObservedIdentity {
 }
 
 impl ObservedIdentity {
+    #[cfg(test)]
+    pub(crate) fn register_test_element(ptr: usize) {
+        test_elements().lock().unwrap().insert(ptr);
+    }
+
     fn from_node(node: &AXNode) -> Self {
         Self {
             role: node.role.clone(),
@@ -26,16 +31,34 @@ impl ObservedIdentity {
         }
     }
 
-    pub(crate) unsafe fn read(ptr: usize) -> Self {
-        use super::bindings::copy_string_attr;
-        let element = ptr as AXUIElementRef;
-        Self {
-            role: copy_string_attr(element, "AXRole").unwrap_or_else(|| "AXUnknown".into()),
-            title: normalized_label(copy_string_attr(element, "AXTitle")),
-            description: normalized_label(copy_string_attr(element, "AXDescription")),
-            identifier: copy_string_attr(element, "AXIdentifier"),
+    pub(crate) unsafe fn read(ptr: usize) -> Option<Self> {
+        #[cfg(test)]
+        if test_elements().lock().unwrap().contains(&ptr) {
+            return Some(Self {
+                role: "AXTestFixture".into(),
+                title: None,
+                description: None,
+                identifier: None,
+            });
         }
+        let [role, title, description, identifier] = super::batch_attrs::copy_string_attrs(
+            ptr as AXUIElementRef,
+            ["AXRole", "AXTitle", "AXDescription", "AXIdentifier"],
+        )?;
+        Some(Self {
+            role: role?,
+            title: normalized_label(title),
+            description: normalized_label(description),
+            identifier,
+        })
     }
+}
+
+#[cfg(test)]
+fn test_elements() -> &'static std::sync::Mutex<std::collections::HashSet<usize>> {
+    static ELEMENTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<usize>>> =
+        std::sync::OnceLock::new();
+    ELEMENTS.get_or_init(Default::default)
 }
 
 fn normalized_label(value: Option<String>) -> Option<String> {
@@ -54,7 +77,7 @@ impl RetainedElement {
     /// not prove that a button still represents the observed action.
     pub fn observed_identity_is_current(&self) -> bool {
         self.1.as_ref().is_some_and(|expected| {
-            self.0 != 0 && unsafe { ObservedIdentity::read(self.0) } == *expected
+            self.0 != 0 && unsafe { ObservedIdentity::read(self.0) }.as_ref() == Some(expected)
         })
     }
 
@@ -128,6 +151,8 @@ impl SnapshotPayload for AxSnapshot {
 impl Drop for AxSnapshot {
     fn drop(&mut self) {
         for ptr in &self.elements {
+            #[cfg(test)]
+            test_elements().lock().unwrap().remove(ptr);
             if *ptr != 0 {
                 unsafe { CFRelease(*ptr as AXUIElementRef as CFTypeRef) };
             }

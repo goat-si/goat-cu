@@ -775,12 +775,16 @@ fn tool_with_token(pid: i32) -> (super::super::click::ClickTool, String, Arc<Too
     // A real AX element (of an app that does not exist), owned by the
     // snapshot; the registered fake answers for it.
     let element = unsafe { crate::ax::bindings::AXUIElementCreateApplication(pid) } as usize;
+    crate::ax::snapshot::ObservedIdentity::register_test_element(element);
     let snapshot = state.snapshots.publish(
         pid,
         u64::from(WINDOW),
         crate::ax::snapshot::AxSnapshot {
             elements: vec![element],
-            identities: vec![unsafe { crate::ax::snapshot::ObservedIdentity::read(element) }],
+            identities: vec![
+                unsafe { crate::ax::snapshot::ObservedIdentity::read(element) }
+                    .expect("the fixture must provide a complete observed identity"),
+            ],
         },
     );
     let token = cua_driver_core::element_token::token_for(snapshot, 0);

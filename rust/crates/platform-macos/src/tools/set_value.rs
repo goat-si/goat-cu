@@ -396,6 +396,7 @@ impl Tool for SetValueTool {
         // child option which can trigger app activation in some setups.
         let prior_front = apps::frontmost_pid();
         let snapshot = WindowChangeDetector::snapshot(prior_front);
+        let settle_guard = element_guard.clone();
 
         let post_guard = element_guard.clone();
         let document_key = move || unsafe {
@@ -430,7 +431,25 @@ impl Tool for SetValueTool {
                     },
                 )
                 .await;
-                let changes = snapshot.detect_async().await;
+                let changes = match &result {
+                    Ok(Ok(outcome))
+                        if !ax_echo_surface
+                            && outcome.verified == Some(true)
+                            && !outcome.maybe_landed
+                            && !outcome.verification_withheld =>
+                    {
+                        snapshot
+                            .detect_async_until(watch_field_settle(
+                                settle_guard,
+                                outcome.value.clone(),
+                            ))
+                            .await
+                    }
+                    _ => {
+                        drop(settle_guard);
+                        snapshot.detect_async().await
+                    }
+                };
                 let write_not_applied = matches!(&result, Ok(Ok(outcome)) if outcome.not_applied);
                 let maybe_landed = matches!(&result, Ok(Ok(outcome)) if outcome.maybe_landed);
                 let verification_withheld =
@@ -1276,6 +1295,8 @@ fn file_name_needs_rename(pid: i32, window_id: u32, reason: &str) -> ToolResult 
 /// it — the same trap `type_text` already documents.
 struct SetValueOutcome {
     detail: String,
+    /// The field's value as read back after the write, when readable.
+    value: Option<String>,
     verified: Option<bool>,
     /// `Some(false)` when the element already held the requested value, so the
     /// write was a no-op. Lets callers distinguish "idempotent" from "applied".
@@ -1407,6 +1428,7 @@ fn set_value_blocking_inner(
         )
         .map(|detail| SetValueOutcome {
             detail,
+            value: None,
             verified: None,
             changed: None,
             not_applied: false,
@@ -1592,6 +1614,7 @@ struct LadderContext<'a> {
 }
 #[derive(Debug)]
 struct LadderOutcome {
+    value: Option<String>,
     verified: Option<bool>,
     changed: Option<bool>,
     not_applied: bool,
@@ -1614,6 +1637,7 @@ struct ValueWriteError {
 impl LadderOutcome {
     fn new() -> Self {
         Self {
+            value: None,
             verified: None,
             changed: None,
             not_applied: false,
@@ -1743,6 +1767,7 @@ fn write_value_ladder_with_prior(
             let after = ladder_read(ops, &mut out);
             let before_s = obs_string(&before);
             let after_s = obs_string(&after);
+            out.value = after_s.clone();
             if !out.verification_withheld {
                 (out.verified, out.changed) =
                     classify_write(before_s.as_deref(), after_s.as_deref(), value, true);
@@ -1809,6 +1834,7 @@ fn write_value_ladder_with_prior(
             && (numeric_role || (!matches!(before, ValueObs::Text(_)) && target.is_some()));
         let after = ladder_read(ops, &mut out);
         let after_s = obs_string(&after);
+        out.value = after_s.clone();
         if !out.verification_withheld {
             (out.verified, out.changed) =
                 classify_write(before_s.as_deref(), after_s.as_deref(), value, numeric);
@@ -1820,6 +1846,7 @@ fn write_value_ladder_with_prior(
             ops.settle_pause();
             let after = ladder_read(ops, &mut out);
             let after_s = obs_string(&after);
+            out.value = after_s.clone();
             if out.verification_withheld {
                 (out.verified, out.changed) = (None, None);
                 break;
@@ -1923,6 +1950,7 @@ fn finish_ladder_with_document_readers(
             crate::document_edit::DocumentEdited::NotADocument
         };
         return Ok(SetValueOutcome {
+            value: out.value.clone(),
             detail: format!(
                 "✅ Set AXValue on [{element_index}] {role} via AXIncrement/AXDecrement stepping.{}", document.note()
             ),
@@ -1953,6 +1981,7 @@ fn finish_ladder_with_document_readers(
         ""
     };
     Ok(SetValueOutcome {
+        value: out.value.clone(),
         detail: format!(
             "✅ Set AXValue on [{element_index}] {role}.{suffix}{}{warning}",
             document.note()
@@ -2023,6 +2052,77 @@ fn text_value_role_requires_exact_focus(role: &str) -> bool {
         "AXTextField" | "AXTextArea" | "AXSearchField" | "AXSecureTextField" | "AXComboBox"
     )
 }
+
+/// How long a written field must keep its read-back value before the result
+/// returns without waiting out the window-change report window.
+const FIELD_QUIET: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Whether a written field has settled: it has held the value its read-back
+/// confirmed for [`FIELD_QUIET`] since the write. A field that reads anything
+/// else even once (a later change, a rejection, an unreadable or lost element)
+/// never settles, and the result waits the usual report window instead.
+struct FieldSettle {
+    expected: Option<String>,
+    written_at: std::time::Instant,
+}
+
+impl FieldSettle {
+    fn new(expected: Option<String>, written_at: std::time::Instant) -> Self {
+        Self {
+            expected,
+            written_at,
+        }
+    }
+
+    /// False once a read has ruled settling out.
+    fn can_settle(&self) -> bool {
+        self.expected.is_some()
+    }
+
+    /// Record one read of the field at `now`; true once it has settled.
+    fn observe(&mut self, now: std::time::Instant, current: Option<&str>) -> bool {
+        if self.expected.is_none() || current != self.expected.as_deref() {
+            self.expected = None;
+            return false;
+        }
+        now.duration_since(self.written_at) >= FIELD_QUIET
+    }
+}
+
+/// Watch a written field on its own thread and return a check that is true
+/// once it has settled. The detector's poll loop only reads the flag, so an
+/// app that stops answering accessibility calls stalls this thread, never the
+/// window-change watch or its focus-steal lease. The thread ends when the
+/// field settles or reads anything else, or when the detector drops the check.
+fn watch_field_settle(
+    element: crate::ax::snapshot::RetainedElement,
+    expected: Option<String>,
+) -> impl FnMut() -> bool + Send + 'static {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let settled = Arc::new(AtomicBool::new(false));
+    let flag = Arc::downgrade(&settled);
+    let mut settle = FieldSettle::new(expected, std::time::Instant::now());
+    let _ = std::thread::Builder::new()
+        .name("cua-field-settle".into())
+        .spawn(move || loop {
+            std::thread::sleep(FIELD_POLL);
+            if flag.strong_count() == 0 {
+                return;
+            }
+            let current =
+                unsafe { copy_string_attr(element.as_ptr() as AXUIElementRef, "AXValue") };
+            let done = settle.observe(std::time::Instant::now(), current.as_deref());
+            match flag.upgrade() {
+                Some(flag) if done => return flag.store(true, Ordering::Release),
+                Some(_) if settle.can_settle() => {}
+                _ => return,
+            }
+        });
+    move || settled.load(Ordering::Acquire)
+}
+
+/// How often [`watch_field_settle`] re-reads the field.
+const FIELD_POLL: std::time::Duration = std::time::Duration::from_millis(25);
 
 /// Re-reads (100 ms apart) before an unchanged value counts as not applied.
 const NOT_APPLIED_REREADS: usize = 3;
@@ -2787,11 +2887,13 @@ fn hex_digit(n: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::{
-        address_field_refusal, apply_surface_trust, apply_verification_label, calc_cell_record, classify_write,
-        file_name_needs_rename, is_file_name_cell, is_get_info_name_field, is_safari_address_field,
-        not_applied_result, text_value_role_requires_exact_focus, write_not_applied,
-        SetValueOutcome, GET_INFO_RENAME_ROUTE, LIST_RENAME_ROUTE,
+        address_field_refusal, apply_surface_trust, apply_verification_label, calc_cell_record,
+        classify_write, file_name_needs_rename, is_file_name_cell, is_get_info_name_field,
+        is_safari_address_field, not_applied_result, text_value_role_requires_exact_focus,
+        write_not_applied, FieldSettle, SetValueOutcome, FIELD_QUIET, GET_INFO_RENAME_ROUTE,
+        LIST_RENAME_ROUTE,
     };
+    use std::time::Duration;
 
     #[test]
     fn autosubmit_schema_matches_shared_contract() {
@@ -3106,9 +3208,40 @@ mod tests {
     }
 
     #[test]
+    fn a_field_that_keeps_its_value_settles_after_the_quiet_period() {
+        let t0 = std::time::Instant::now();
+        let mut settle = FieldSettle::new(Some("hello".into()), t0);
+        assert!(!settle.observe(t0 + Duration::from_millis(25), Some("hello")));
+        assert!(!settle.observe(t0 + Duration::from_millis(125), Some("hello")));
+        assert!(settle.can_settle());
+        assert!(settle.observe(t0 + FIELD_QUIET, Some("hello")));
+    }
+
+    #[test]
+    fn a_field_that_changes_after_the_write_never_settles() {
+        let t0 = std::time::Instant::now();
+        let mut settle = FieldSettle::new(Some("hello".into()), t0);
+        assert!(!settle.observe(t0 + Duration::from_millis(50), Some("HELLO")));
+        // Changing back does not restart the clock: the field is not quiet.
+        assert!(!settle.observe(t0 + Duration::from_millis(400), Some("hello")));
+    }
+
+    #[test]
+    fn an_unreadable_or_unknown_field_never_settles() {
+        let t0 = std::time::Instant::now();
+        let mut lost = FieldSettle::new(Some("hello".into()), t0);
+        assert!(!lost.observe(t0 + Duration::from_millis(50), None));
+        assert!(!lost.observe(t0 + Duration::from_millis(400), Some("hello")));
+        assert!(!lost.can_settle());
+        let mut unknown = FieldSettle::new(None, t0);
+        assert!(!unknown.observe(t0 + Duration::from_millis(400), None));
+    }
+
+    #[test]
     fn web_content_ax_echo_is_never_reported_as_verified() {
         let mut outcome = SetValueOutcome {
             detail: "Set value.".to_owned(),
+            value: None,
             verified: Some(true),
             changed: Some(true),
             not_applied: false,
@@ -3130,6 +3263,7 @@ mod tests {
         let result = super::set_value_tool_result(
             Ok(Ok(SetValueOutcome {
                 detail: "✅ Set value.".to_owned(),
+                value: None,
                 verified: Some(false),
                 changed: Some(false),
                 not_applied: write_not_applied,
@@ -3189,6 +3323,7 @@ mod tests {
     fn native_read_back_remains_trusted() {
         let mut outcome = SetValueOutcome {
             detail: "Set value.".to_owned(),
+            value: None,
             verified: Some(true),
             changed: Some(true),
             not_applied: false,
@@ -3222,6 +3357,7 @@ mod tests {
     fn unverified_result_does_not_keep_a_success_checkmark() {
         let mut outcome = SetValueOutcome {
             detail: "✅ Set AXValue on [4] AXTextField.".to_owned(),
+            value: None,
             verified: Some(false),
             changed: Some(false),
             not_applied: false,
@@ -3732,6 +3868,7 @@ mod ladder_tests {
         assert_eq!(doc.structured(), Some(true));
         let value = SetValueOutcome {
             detail: "set".into(),
+            value: None,
             verified: out.verified,
             changed: out.changed,
             not_applied: out.not_applied,
@@ -4039,6 +4176,7 @@ mod secure_read_tests {
         );
         let outcome = SetValueOutcome {
             detail: format!("set{}", doc.note()),
+            value: None,
             verified: out.verified,
             changed: out.changed,
             not_applied: out.not_applied,

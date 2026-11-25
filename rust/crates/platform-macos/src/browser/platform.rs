@@ -1060,10 +1060,17 @@ impl BrowserPlatform for MacOsBrowserPlatform {
 
     async fn classify_browser(&self, pid: i64) -> Result<BrowserClassification, BrowserRefusal> {
         let app_identity = self.app_identity;
-        let (app, fallback_name, fallback_bundle_id) =
-            tokio::task::spawn_blocking(move || app_identity(pid))
-                .await
-                .unwrap_or((None, None, None));
+        let (app, fallback_name, fallback_bundle_id, electron_app) =
+            tokio::task::spawn_blocking(move || {
+                let (app, fallback_name, fallback_bundle_id) = app_identity(pid);
+                // Electron apps ship under their own name and bundle id
+                // (Obsidian is md.obsidian), so the bundled Electron Framework
+                // is what identifies them.
+                let electron_app = super::ElectronJs::is_electron_for_binding(pid as i32);
+                (app, fallback_name, fallback_bundle_id, electron_app)
+            })
+            .await
+            .unwrap_or((None, None, None, false));
         let name = app
             .as_ref()
             .map(|app| app.name.as_str())
@@ -1074,10 +1081,18 @@ impl BrowserPlatform for MacOsBrowserPlatform {
             .and_then(|app| app.bundle_id.as_deref())
             .or(fallback_bundle_id.as_deref())
             .unwrap_or("");
-        let chromium = is_chromium(name, bundle_id);
         let webkit = bundle_id == "com.apple.Safari" || name.eq_ignore_ascii_case("Safari");
         let gecko = is_firefox(&format!("{name} {bundle_id}"));
-        let product_kind = browser_product(name, bundle_id);
+        let product_kind = cua_driver_core::browser::classify_electron_runtime(
+            browser_product(name, bundle_id),
+            cua_driver_core::browser::is_consumer_browser_name(name)
+                || (browser_product(name, bundle_id) != BrowserProduct::Other
+                    && browser_product(name, bundle_id) != BrowserProduct::Electron),
+            electron_app,
+        );
+        let chromium = !webkit
+            && !gecko
+            && (product_kind == BrowserProduct::Electron || is_chromium(name, bundle_id));
         let helper = name.to_ascii_lowercase().contains("helper")
             || bundle_id.to_ascii_lowercase().contains(".helper")
             || process_arguments(pid).ok().is_some_and(|args| {

@@ -10,7 +10,34 @@ use super::cdp_client::{listening_ports, CdpClient};
 
 pub struct ElectronJs;
 
+#[cfg(test)]
+mod identity_tests {
+    use super::executable_bundle_has_electron_framework;
+
+    #[test]
+    fn another_bundles_matching_name_cannot_authorize_electron() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target/App.app/Contents/MacOS/App");
+        let other = temp.path().join("other/App.app/Contents/MacOS/App");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(
+            temp.path()
+                .join("other/App.app/Contents/Frameworks/Electron Framework.framework"),
+        )
+        .unwrap();
+        assert!(!executable_bundle_has_electron_framework(&target));
+        assert!(executable_bundle_has_electron_framework(&other));
+    }
+}
+
 impl ElectronJs {
+    /// Binding authority requires evidence from this PID's executable, not a
+    /// same-named application found elsewhere on disk.
+    pub(crate) fn is_electron_for_binding(pid: i32) -> bool {
+        crate::apps::path_of_pid(pid)
+            .is_some_and(|exe| executable_bundle_has_electron_framework(std::path::Path::new(&exe)))
+    }
     /// Returns true if the process at `pid` is an Electron app.
     pub fn is_electron(pid: i32) -> bool {
         // The executable check below is cheap and decides most apps, so it
@@ -126,8 +153,11 @@ fn exe_has_electron_framework(pid: i32) -> bool {
         return false;
     };
     // e.g. /Applications/Slack.app/Contents/MacOS/Slack → look for Frameworks sibling
-    std::path::Path::new(&exe)
-        .parent()
+    executable_bundle_has_electron_framework(std::path::Path::new(&exe))
+}
+
+fn executable_bundle_has_electron_framework(exe: &std::path::Path) -> bool {
+    exe.parent()
         .and_then(std::path::Path::parent)
         .is_some_and(|contents| {
             contents

@@ -91,7 +91,8 @@ fn def() -> &'static ToolDef {
             `<snapshot_id>:N`, with `snapshot_id` in the header and structuredContent; \
             `tree_format:\"elements\"` returns the structured `elements` array instead, `\"both\"` both. A \
             read walks at most 250 nodes by default and says `truncated:true` when cut; raise \
-            `max_elements`, or narrow with `query` and `max_depth`. Long lists and tables are read last, \
+            `max_elements`, or narrow with `query` and `max_depth`. Query accepts `a|b` for either \
+            alternative and reports zero matches. Long lists and tables are read last, \
             on-screen rows first; skipped off-screen rows show as one \"(offscreen rows: N ...)\" line \
             unless `query` is set. `verbose:true` adds `_note` and the full `background_input` report; \
             `full_output:true` restores the full response (both forms, all metadata, ≤2 000 nodes).\n\
@@ -122,7 +123,7 @@ fn def() -> &'static ToolDef {
                 "session": cua_driver_core::tool_schema::session_schema(),
                 "pid": { "type": "integer", "description": "Target process ID." },
                 "window_id": { "type": "integer", "description": "Target window ID from list_windows." },
-                "query": { "type": "string", "description": "Case-insensitive substring filter: returns matching rows plus ancestors; element_index values are not renumbered. Try this before a full read." },
+                "query": { "type": "string", "description": "Case-insensitive substring filter; `a|b` matches rows containing either. Returns matching rows plus ancestors, or says `0 of N elements match` when none does; element_index values are not renumbered. Try this before a full read." },
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
                 "include_accessibility_tree": {
                     "type": "boolean",

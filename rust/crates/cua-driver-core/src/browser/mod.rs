@@ -68,8 +68,9 @@ pub mod types;
 mod v2_tests;
 
 pub use adapter_support::{
-    fetch_json_version_ws_url, is_firefox, loopback_websocket_port, parse_devtools_active_port,
-    BrowserCursorTracker,
+    classify_electron_runtime, fetch_json_version_ws_url, is_consumer_browser_name,
+    is_electron_app_layout, is_firefox, loopback_websocket_port, parse_devtools_active_port,
+    resolve_consumer_product, BrowserCursorTracker,
 };
 pub use engine::BrowserEngine;
 pub use platform::{

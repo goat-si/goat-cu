@@ -1404,8 +1404,7 @@ pub(crate) async fn focus_by_pixel(
     let landed = if ax_focus_sent {
         // AXFocused is non-destructive: unlike a second real click, it keeps a
         // Cmd+A selection intact before a follow-up type_text or Cmd+V.
-        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-        Some(pixel_focus_landed(pid, window_id, native_x, native_y).await)
+        Some(await_pixel_focus(pid, window_id, native_x, native_y).await)
     } else {
         None
     };
@@ -1510,8 +1509,12 @@ pub(crate) async fn focus_by_pixel(
             },
         ));
     }
-    // Brief settle so the renderer registers focus before the keystrokes.
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    if !await_pixel_focus(pid, window_id, native_x, native_y).await {
+        return Err(not_editable::account_focus_receipt(
+            pixel_focus_unconfirmed(pid, window_id, x, y),
+            Some(not_editable::FocusDispatch::SentClick),
+        ));
+    }
     Ok(not_editable::FocusDispatch::SentClick)
 }
 
@@ -1624,6 +1627,26 @@ fn pixel_focus_unconfirmed(
             "message": message,
         }),
     )
+}
+
+/// Longest a pixel focus-click waits for the focused element to cover its
+/// point before the keystrokes go out.
+const PX_FOCUS_SETTLE: std::time::Duration = std::time::Duration::from_millis(120);
+const PX_FOCUS_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Wait up to [`PX_FOCUS_SETTLE`] for the focus-click to land on the point;
+/// whether it did.
+async fn await_pixel_focus(pid: i32, window_id: Option<u32>, x: f64, y: f64) -> bool {
+    let deadline = std::time::Instant::now() + PX_FOCUS_SETTLE;
+    loop {
+        tokio::time::sleep(PX_FOCUS_POLL).await;
+        if pixel_focus_landed(pid, window_id, x, y).await {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+    }
 }
 
 /// Confirm that a focus pixel-click actually moved the application's focused

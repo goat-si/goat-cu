@@ -696,7 +696,7 @@ unsafe fn walk_tree_unsafe(
     nodes.retain(|n| n.control_type != "UiaTabStripSummary");
     let raw_md = render_lines(&lines);
     let tree_markdown = if let Some(q) = query {
-        filter_tree(&raw_md, q)
+        cua_driver_core::element_query::filter_tree(&raw_md, q)
     } else {
         raw_md
     };
@@ -810,7 +810,10 @@ unsafe fn walk_list_view_window(
     fold_actionless_text_subtrees(&mut lines, &mut nodes);
     let raw = render_lines(&lines);
     UiaTreeResult {
-        tree_markdown: query.map_or_else(|| raw.clone(), |q| filter_tree(&raw, q)),
+        tree_markdown: query.map_or_else(
+            || raw.clone(),
+            |q| cua_driver_core::element_query::filter_tree(&raw, q),
+        ),
         nodes,
         elements_complete: state.finish(),
     }
@@ -2168,55 +2171,6 @@ fn render_lines(lines: &[(usize, String)]) -> String {
         out.push('\n');
     }
     out
-}
-
-fn filter_tree(markdown: &str, query: &str) -> String {
-    let needle = query.to_lowercase();
-    let lines: Vec<&str> = markdown.lines().collect();
-    let mut ancestors: Vec<&str> = Vec::new();
-    let mut last_emitted: Vec<Option<&str>> = Vec::new();
-    let mut output: Vec<&str> = Vec::new();
-
-    for line in &lines {
-        if is_compaction_summary_line(line) {
-            continue;
-        }
-        let depth = line.chars().take_while(|c| *c == ' ').count() / 2;
-        while ancestors.len() <= depth {
-            ancestors.push("");
-            last_emitted.push(None);
-        }
-        for slot in last_emitted
-            .iter_mut()
-            .take(ancestors.len())
-            .skip(depth + 1)
-        {
-            *slot = None;
-        }
-        ancestors[depth] = line;
-
-        if line.to_lowercase().contains(&needle) {
-            for d in 0..depth {
-                if ancestors[d].is_empty() {
-                    continue;
-                }
-                if last_emitted[d] == Some(ancestors[d]) {
-                    continue;
-                }
-                last_emitted[d] = Some(ancestors[d]);
-                output.push(ancestors[d]);
-            }
-            last_emitted[depth] = Some(line);
-            output.push(line);
-        }
-    }
-
-    if output.is_empty() {
-        return String::new();
-    }
-    let mut r = output.join("\n");
-    r.push('\n');
-    r
 }
 
 #[cfg(test)]

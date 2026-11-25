@@ -293,6 +293,7 @@ impl Tool for ScrollTool {
             );
             let display = direction.clone();
             let wayland = crate::wayland::is_wayland();
+            let inject = wayland && crate::wayland::is_inject_mode();
             let path = if wayland { "wayland_desktop" } else { "xtest" };
             let space = match desktop_input_space().await {
                 Ok(space) => space,
@@ -326,6 +327,18 @@ impl Tool for ScrollTool {
                     .with_structured(
                         json!({"scope":"desktop","path":path,"effect":"unverifiable"}),
                     ),
+                Ok(Err(error)) if error.downcast_ref::<crate::inject_sequence::DeliveryUncertain>().is_some() => {
+                    let acknowledged = error.downcast_ref::<crate::inject_sequence::DeliveryUncertain>().unwrap().acknowledged;
+                    ToolResult::error(error.to_string()).with_structured(json!({
+                        "code": "scroll_delivery_uncertain", "effect": "unverifiable",
+                        "acknowledged_ticks": acknowledged, "retryable": false
+                    }))
+                }
+                Ok(Err(error)) if inject && crate::input::foreground::error_code(&error) == Some(crate::input::foreground::CODE_TIMEOUT) => {
+                    ToolResult::error(format!("Desktop scroll delivery may be incomplete: {error}. Read state before retrying.")).with_structured(json!({
+                        "code": "scroll_delivery_uncertain", "effect": "unverifiable", "retryable": false
+                    }))
+                }
                 Ok(Err(error)) if crate::input::foreground::error_code(&error).is_some() => {
                     input_error_result(error)
                 }

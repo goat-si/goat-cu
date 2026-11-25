@@ -454,7 +454,7 @@ fn paste_text_preserving_clipboard(
 }
 
 /// Default key down→up gap and inter-key pacing.
-const DEFAULT_KEY_GAP: std::time::Duration = std::time::Duration::from_millis(8);
+pub(crate) const DEFAULT_KEY_GAP: std::time::Duration = std::time::Duration::from_millis(8);
 
 /// Key down→up gap and inter-key pacing: `DEFAULT_KEY_GAP`, or the
 /// host's `CUA_DRIVER_KEY_GAP_MS` clamped by `cua_driver_core::key_pacing`.

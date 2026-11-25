@@ -155,6 +155,7 @@ pub(super) enum Scenario {
     ProviderRecovered,
     ScopeRecovered,
     ScopeUnresolved,
+    BatchFailure,
 }
 
 pub(super) struct Environment {
@@ -438,6 +439,18 @@ impl super::AxWalkEnvironment for Environment {
             99
         };
         let candidate = crate::ax::window_scope::TopLevelCandidate::new("AXWindow", Some(id));
+        if matches!(self.scenario, Scenario::BatchFailure) && element == 3 {
+            return crate::ax::evidence::Observed {
+                legacy: candidate,
+                evidence: vec![crate::ax::evidence::ReadEvidence {
+                    owner: Some(element),
+                    site: ReadSite::ScopeCandidate("AXBatch"),
+                    status: EvidenceStatus::Unknown(crate::ax::tree_source::ReadFailure::WrongType),
+                    attempt: 0,
+                    listing: None,
+                }],
+            };
+        }
         if matches!(
             self.scenario,
             Scenario::ScopeRecovered | Scenario::ScopeUnresolved
@@ -511,6 +524,20 @@ impl super::AxWalkEnvironment for Environment {
             .push(format!("pause {}", duration.as_millis()));
         self.now.set(self.now.get() + duration);
     }
+}
+
+#[test]
+fn failed_scope_batch_refuses_even_when_another_candidate_matches() {
+    let env = Environment::new(Scenario::BatchFailure);
+    let evidence = crate::ax::evidence::EvidenceScope::start();
+    let (decision, failed) = super::scope_top_level_with(&env, &[2, 3], 42, 99);
+    let _ = evidence.finish(());
+    assert!(failed);
+    assert!(matches!(
+        decision.scope,
+        crate::ax::window_scope::WindowScope::AxUnresolved { .. }
+    ));
+    assert!(decision.walk.is_empty());
 }
 
 #[test]

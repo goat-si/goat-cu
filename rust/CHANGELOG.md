@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.52.6](https://github.com/trycua/cua/compare/cua-driver-rs-v0.52.5...cua-driver-rs-v0.52.6) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cua-driver:** deliver desktop click and scroll on the nested cua-compositor ([#7926](https://github.com/trycua/cua/issues/7926)) ([d88757e](https://github.com/trycua/cua/commit/d88757e613c6a5f60508533bd3bb71fb383140cf))
+
+## [0.52.5](https://github.com/trycua/cua/compare/cua-driver-rs-v0.52.4...cua-driver-rs-v0.52.5) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cua-driver:** capture occluded windows on the nested cua-compositor ([#7918](https://github.com/trycua/cua/issues/7918)) ([a1cd154](https://github.com/trycua/cua/commit/a1cd1542f3a42043a5e56b546045608ebbfb98f9))
+
+
+### Performance Improvements
+
+* **cua-driver:** replace fixed settles with read-backs and name shared pacing values ([#7032](https://github.com/trycua/cua/issues/7032)) ([5d7340a](https://github.com/trycua/cua/commit/5d7340a6605c851931beadb25b2273be79bbfb99))
+
+## [0.52.4](https://github.com/trycua/cua/compare/cua-driver-rs-v0.52.3...cua-driver-rs-v0.52.4) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cua-driver:** bound private-worker shutdown from admission through exit ([#7646](https://github.com/trycua/cua/issues/7646)) ([5bc00e5](https://github.com/trycua/cua/commit/5bc00e554e3e8a2f4feaba92524547492a6e4161))
+* **cua-driver:** keep a native sheet's buttons in a budget-limited macOS read ([#7614](https://github.com/trycua/cua/issues/7614)) ([bc6e85d](https://github.com/trycua/cua/commit/bc6e85dae4fc94740b85c890a707d90399721482))
+
+## [0.52.3](https://github.com/trycua/cua/compare/cua-driver-rs-v0.52.2...cua-driver-rs-v0.52.3) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cua-driver:** bind window screenshots on the nested cua-compositor ([#7890](https://github.com/trycua/cua/issues/7890)) ([5fa8992](https://github.com/trycua/cua/commit/5fa899214e263835c90bd1b1850b590639e57345))
+
+## [0.52.2](https://github.com/trycua/cua/compare/cua-driver-rs-v0.52.1...cua-driver-rs-v0.52.2) (2026-11-15)
+
+
+### Bug Fixes
+
+* **cua-driver:** let users admit apps past Hyprland background input quirks ([#7867](https://github.com/trycua/cua/issues/7867)) ([cee9e81](https://github.com/trycua/cua/commit/cee9e81613149b96c85362803f63ad6d4882cc66))
+* **cua-driver:** return a native set_value once its field settles ([#7874](https://github.com/trycua/cua/issues/7874)) ([9dc5dc7](https://github.com/trycua/cua/commit/9dc5dc7e3543f44f234e2db6635749903e82a511))
+
+## [0.52.1](https://github.com/trycua/cua/compare/cua-driver-rs-v0.52.0...cua-driver-rs-v0.52.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **cua-driver:** await Wayland cursor arrival before desktop clicks ([#5613](https://github.com/trycua/cua/issues/5613)) ([3797d53](https://github.com/trycua/cua/commit/3797d538fbd7d4bf43fe32d3843b5e2ce8ca04c6))
+* **cua-driver:** batch the macOS identity and window-scope string reads ([#7854](https://github.com/trycua/cua/issues/7854)) ([907bbaf](https://github.com/trycua/cua/commit/907bbaf79c450ab149b50823184c2c2e228b59c1))
+* **cua-driver:** cursor overlay no longer takes the front app (re-land of [#7268](https://github.com/trycua/cua/issues/7268)) ([#7645](https://github.com/trycua/cua/issues/7645)) ([55e1ae9](https://github.com/trycua/cua/commit/55e1ae9c6a1b88b9c5e2a078020e9a966c0a78d8))
+* **cua-driver:** expose snapshot identity in full window-state text ([#7844](https://github.com/trycua/cua/issues/7844)) ([9e5e151](https://github.com/trycua/cua/commit/9e5e15130c8058d9421af7baa9e2639ea59470c2))
+* **cua-driver:** pin that the desktop lane frees before the detached window watch ([#7858](https://github.com/trycua/cua/issues/7858)) ([1f9b318](https://github.com/trycua/cua/commit/1f9b3184d3978c11ca06b121aee27e4b284275f9)), closes [#4771](https://github.com/trycua/cua/issues/4771)
+* **cua-driver:** skip the glide wait for a cursor turned off at runtime ([#7860](https://github.com/trycua/cua/issues/7860)) ([9780148](https://github.com/trycua/cua/commit/9780148ff4c5413645a5e41f7bbff39d86928809))
+
+## [0.52.0](https://github.com/trycua/cua/compare/cua-driver-rs-v0.51.6...cua-driver-rs-v0.52.0) (2026-11-15)
+
+
+### Features
+
+* **cua-driver:** add deepseek-harness to mcp-config and skills install ([#7826](https://github.com/trycua/cua/issues/7826)) ([b99b2bf](https://github.com/trycua/cua/commit/b99b2bf2c078ff794e2dd31381c4b16b6a839c40)), closes [#4727](https://github.com/trycua/cua/issues/4727)
+
+
+### Bug Fixes
+
+* **cua-driver-rs:** refuse the stale-transform probes from a client that never read the window ([#7831](https://github.com/trycua/cua/issues/7831)) ([a21cc64](https://github.com/trycua/cua/commit/a21cc640c57340321b891017edd98c2bd971295b))
+* **cua-driver:** bind Electron apps by their runtime and name the isolated launch ([#7818](https://github.com/trycua/cua/issues/7818)) ([dbd817a](https://github.com/trycua/cua/commit/dbd817a617ddfb7342f32dfd907daa84f8ef8550))
+* **cua-driver:** revive an idle-reaped named session on its owner's next call ([#7832](https://github.com/trycua/cua/issues/7832)) ([e3a1e11](https://github.com/trycua/cua/commit/e3a1e1158183cbf2c87332f1910d7e84b74be532))
+* **cua-driver:** state zero-match get_window_state queries and match a|b alternatives ([#7819](https://github.com/trycua/cua/issues/7819)) ([8551265](https://github.com/trycua/cua/commit/8551265453ae1851a4cdbafc8338800d0f00e79f))
+
 ## [0.51.6](https://github.com/trycua/cua/compare/cua-driver-rs-v0.51.5...cua-driver-rs-v0.51.6) (2026-11-15)
 
 
