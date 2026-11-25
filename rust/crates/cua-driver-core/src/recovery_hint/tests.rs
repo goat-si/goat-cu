@@ -1048,7 +1048,12 @@ fn a_confirmed_result_keeps_its_text_unchanged() {
 
 #[test]
 fn ax_timeout_does_not_recommend_an_unconfirmed_resend() {
-    let hint = hint_for("click", &window_seed(), true, json!({ "code": "ax_timeout" }));
+    let hint = hint_for(
+        "click",
+        &window_seed(),
+        true,
+        json!({ "code": "ax_timeout" }),
+    );
     assert!(hint.hint.contains("do not resend"), "{}", hint.hint);
     assert!(!hint.hint.contains("retry"), "{}", hint.hint);
     assert!(!hint.hint.contains("aim by pixel"), "{}", hint.hint);

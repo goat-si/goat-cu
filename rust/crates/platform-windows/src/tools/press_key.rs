@@ -86,7 +86,9 @@ impl Tool for PressKeyTool {
             let hwnd = match crate::desktop_target::after_cursor(
                 position_keyboard_cursor(&self.state, &args, hwnd, None),
                 crate::input::mouse::foreground_window,
-            ).await {
+            )
+            .await
+            {
                 Ok(hwnd) => hwnd,
                 Err(error) => return ToolResult::error(error.to_string()),
             };

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::{
     authorization::PermissionMode,
@@ -303,12 +303,10 @@ async fn incomplete_observation_never_proves_gone_and_preserves_result_shape() {
         result["steps"][0]["code"], "incomplete_observation",
         "{result}"
     );
-    assert!(
-        result["steps"][0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("node_budget")
-    );
+    assert!(result["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("node_budget"));
     for key in ["total", "executed", "failed_step", "steps"] {
         assert!(result.get(key).is_some(), "{result}");
     }
@@ -425,12 +423,10 @@ async fn excluded_menu_scope_never_proves_absence() {
         result["steps"][0]["code"], "incomplete_observation",
         "{result}"
     );
-    assert!(
-        result["steps"][0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("closed_menus_not_expanded")
-    );
+    assert!(result["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("closed_menus_not_expanded"));
 }
 
 #[tokio::test]
@@ -990,12 +986,10 @@ async fn gone_is_not_satisfied_by_a_read_error_on_a_listed_window() {
     let result = harness.run(json!({"steps": [{"expect": {"pid": 42, "window_id": 7, "name": "Save", "gone": true, "timeout_ms": 0}}]})).await;
     let result = result.structured_content.unwrap();
     assert_eq!(result["steps"][0]["code"], "gone_unconfirmed", "{result}");
-    assert!(
-        result["steps"][0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("accessibility unavailable")
-    );
+    assert!(result["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("accessibility unavailable"));
     assert_eq!(harness.hits("get_window_state"), 1);
     assert_eq!(harness.hits("list_windows"), 1);
     let args = harness.last("list_windows");
@@ -1157,12 +1151,10 @@ async fn list_apps_error_never_proves_gone() {
     let result = harness.run(json!({"steps": [{"expect": {"app": "Demo", "name": "Save", "gone": true, "timeout_ms": 0}}]})).await;
     let result = result.structured_content.unwrap();
     assert_eq!(result["steps"][0]["code"], "lookup_failed", "{result}");
-    assert!(
-        result["steps"][0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("app enumeration failed")
-    );
+    assert!(result["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("app enumeration failed"));
     assert_eq!(harness.hits("list_windows"), 0);
     assert_eq!(harness.hits("list_apps"), 1);
     assert_eq!(harness.hits("get_window_state"), 0);
@@ -1179,12 +1171,10 @@ async fn gone_listing_error_does_not_prove_absence() {
     let result = harness.run(json!({"steps": [{"expect": {"pid": 42, "window_id": 7, "name": "Save", "gone": true, "timeout_ms": 0}}]})).await;
     let result = result.structured_content.unwrap();
     assert_eq!(result["steps"][0]["code"], "lookup_failed", "{result}");
-    assert!(
-        result["steps"][0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("window enumeration failed")
-    );
+    assert!(result["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("window enumeration failed"));
     assert_eq!(harness.hits("get_window_state"), 1);
     assert_eq!(harness.hits("list_windows"), 1);
 }
@@ -1298,12 +1288,10 @@ async fn stops_at_the_first_failure_and_still_observes() {
     assert_eq!(structured["failed_step"], 1);
     assert_eq!(structured["executed"], 2);
     assert_eq!(structured["steps"][1]["ok"], false);
-    assert!(
-        structured["steps"][1]["message"]
-            .as_str()
-            .unwrap()
-            .contains("probe asked to fail")
-    );
+    assert!(structured["steps"][1]["message"]
+        .as_str()
+        .unwrap()
+        .contains("probe asked to fail"));
     assert_eq!(
         harness.hits("press_key"),
         0,
@@ -1671,12 +1659,10 @@ async fn preflight_uses_the_parsed_action_after_rewrites() {
             json!({"step": 0, "tool": expected}),
             "{result}"
         );
-        assert!(
-            harness
-                .calls
-                .values()
-                .all(|calls| calls.lock().unwrap().is_empty())
-        );
+        assert!(harness
+            .calls
+            .values()
+            .all(|calls| calls.lock().unwrap().is_empty()));
     }
 }
 
@@ -1745,13 +1731,13 @@ async fn the_batch_is_advertised_with_its_schema() {
         .get_def(super::RUN_STEPS_TOOL)
         .expect("registered");
     assert_eq!(def.input_schema["required"], json!(["steps"]));
-    let listed: Vec<_> =
-        def.input_schema["properties"]["steps"]["items"]["properties"]["tool"]["enum"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|value| value.as_str().unwrap())
-            .collect();
+    let listed: Vec<_> = def.input_schema["properties"]["steps"]["items"]["properties"]["tool"]
+        ["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
     assert_eq!(listed, super::BATCHABLE_TOOLS);
 }
 
@@ -1759,12 +1745,10 @@ async fn the_batch_is_advertised_with_its_schema() {
 async fn the_old_name_run_actions_still_runs_but_is_not_listed() {
     let harness = Harness::new();
     assert!(harness.registry.get_def("run_actions").is_none());
-    assert!(
-        !harness
-            .registry
-            .tool_names()
-            .any(|name| name == "run_actions")
-    );
+    assert!(!harness
+        .registry
+        .tool_names()
+        .any(|name| name == "run_actions"));
 
     let result = harness
         .registry
@@ -1889,11 +1873,9 @@ async fn scroll_steps_accept_dx_dy_like_a_direct_call() {
         (calls[1]["direction"].clone(), calls[1]["amount"].clone()),
         (json!("left"), json!(4))
     );
-    assert!(
-        calls
-            .iter()
-            .all(|c| c.get("dy").is_none() && c.get("dx").is_none())
-    );
+    assert!(calls
+        .iter()
+        .all(|c| c.get("dy").is_none() && c.get("dx").is_none()));
 
     let refused = harness
         .run(json!({"steps": [{"tool": "scroll", "args": {"pid": 1, "dx": 1, "dy": 1}}]}))
@@ -2064,12 +2046,10 @@ async fn non_scalar_set_value_is_rejected_before_any_batch_action() {
         assert_eq!(structured["code"], "invalid_batch");
         assert_eq!(structured["executed"], 0);
         assert_eq!(structured["failed_step"], 1);
-        assert!(
-            structured["detail"]
-                .as_str()
-                .unwrap()
-                .starts_with("set_value: invalid arguments at /value:")
-        );
+        assert!(structured["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("set_value: invalid arguments at /value:"));
         assert_eq!(harness.hits("set_value"), 0);
     }
 }

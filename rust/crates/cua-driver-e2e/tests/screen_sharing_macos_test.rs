@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cua_driver_testkit::e2e::{
-    CaseSpec, Delivery, DriverRoute, Observation, OracleKind, Scope, Targeting, execute_case,
-    recording_evidence,
+    execute_case, recording_evidence, CaseSpec, Delivery, DriverRoute, Observation, OracleKind,
+    Scope, Targeting,
 };
 use cua_driver_testkit::{Driver, McpDriver};
 

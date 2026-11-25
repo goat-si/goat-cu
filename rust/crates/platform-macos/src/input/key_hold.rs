@@ -124,7 +124,10 @@ pub(crate) fn deliver(
         modifiers,
         duration.unwrap_or_else(keyboard::key_gap),
         (
-            matches!(route, KeyRoute::Global(_) | KeyRoute::GuardedGlobal(..) | KeyRoute::BareGlobal(_)),
+            matches!(
+                route,
+                KeyRoute::Global(_) | KeyRoute::GuardedGlobal(..) | KeyRoute::BareGlobal(_)
+            ),
             matches!(route, KeyRoute::BareGlobal(_)),
         ),
         |key, modifiers| keyboard::target_key_code(target, key, modifiers),
@@ -137,8 +140,19 @@ pub(crate) fn deliver(
                 flags,
             ),
             KeyRoute::GuardedGlobal(pid, start) => post_if_foreground(
-                (pid, start), current_frontmost_instance, code, down, &mut guarded_down,
-                || keyboard::post_global_key(source.as_ref().expect("global source"), code, down, flags),
+                (pid, start),
+                current_frontmost_instance,
+                code,
+                down,
+                &mut guarded_down,
+                || {
+                    keyboard::post_global_key(
+                        source.as_ref().expect("global source"),
+                        code,
+                        down,
+                        flags,
+                    )
+                },
             ),
             KeyRoute::BareGlobal(_) => {
                 let event = keyboard::create_bare_keyboard_event(code, down)?;
@@ -198,7 +212,10 @@ fn current_frontmost_instance() -> Option<(i32, u64)> {
 /// The app whose keyboard layout resolves a chord's key on `route`.
 fn layout_target(route: KeyRoute, frontmost: impl FnOnce() -> Option<i32>) -> Option<i32> {
     match route {
-        KeyRoute::Pid(pid) | KeyRoute::BareGlobal(pid) | KeyRoute::Global(Some(pid)) | KeyRoute::GuardedGlobal(pid, _) => Some(pid),
+        KeyRoute::Pid(pid)
+        | KeyRoute::BareGlobal(pid)
+        | KeyRoute::Global(Some(pid))
+        | KeyRoute::GuardedGlobal(pid, _) => Some(pid),
         KeyRoute::Global(None) => frontmost(),
     }
 }
@@ -414,13 +431,27 @@ mod tests {
         let events = std::cell::RefCell::new(Vec::new());
         let mut posted_down = std::collections::HashMap::new();
         let result = deliver_with(
-            "a", &["cmd"], Duration::ZERO,
-            |code, down, _| post_if_foreground((7, 11), || Some((frontmost.get(), 11)), code, down, &mut posted_down, || {
-                events.borrow_mut().push((code, down));
-                if code == 55 && down { frontmost.set(8); }
-                Ok(())
-            }),
-            || false, |_| false,
+            "a",
+            &["cmd"],
+            Duration::ZERO,
+            |code, down, _| {
+                post_if_foreground(
+                    (7, 11),
+                    || Some((frontmost.get(), 11)),
+                    code,
+                    down,
+                    &mut posted_down,
+                    || {
+                        events.borrow_mut().push((code, down));
+                        if code == 55 && down {
+                            frontmost.set(8);
+                        }
+                        Ok(())
+                    },
+                )
+            },
+            || false,
+            |_| false,
         );
         assert!(result.is_err());
         assert_eq!(*events.borrow(), vec![(55, true), (55, false)]);
@@ -433,20 +464,37 @@ mod tests {
             let events = std::cell::RefCell::new(Vec::new());
             let mut posted_down = std::collections::HashMap::new();
             let result = deliver_with(
-                "shift", &["shift"], Duration::ZERO,
-                |code, down, _| post_if_foreground((7, 11), || Some((frontmost.get(), 11)), code, down, &mut posted_down, || {
-                    events.borrow_mut().push((code, down));
-                    if switch_before_base && down { frontmost.set(8); }
-                    Ok(())
-                }),
-                || false, |_| false,
+                "shift",
+                &["shift"],
+                Duration::ZERO,
+                |code, down, _| {
+                    post_if_foreground(
+                        (7, 11),
+                        || Some((frontmost.get(), 11)),
+                        code,
+                        down,
+                        &mut posted_down,
+                        || {
+                            events.borrow_mut().push((code, down));
+                            if switch_before_base && down {
+                                frontmost.set(8);
+                            }
+                            Ok(())
+                        },
+                    )
+                },
+                || false,
+                |_| false,
             );
             if switch_before_base {
                 assert!(result.is_err());
                 assert_eq!(*events.borrow(), vec![(56, true), (56, false)]);
             } else {
                 assert!(result.is_ok());
-                assert_eq!(*events.borrow(), vec![(56, true), (56, true), (56, false), (56, false)]);
+                assert_eq!(
+                    *events.borrow(),
+                    vec![(56, true), (56, true), (56, false), (56, false)]
+                );
             }
         }
     }
@@ -459,10 +507,17 @@ mod tests {
         assert!(!instance_matches(None, None));
         let mut sent = false;
         let mut posted_down = std::collections::HashMap::new();
-        let result = post_if_foreground((7, 11), || Some((7, 12)), 0, true, &mut posted_down, || {
-            sent = true;
-            Ok(())
-        });
+        let result = post_if_foreground(
+            (7, 11),
+            || Some((7, 12)),
+            0,
+            true,
+            &mut posted_down,
+            || {
+                sent = true;
+                Ok(())
+            },
+        );
         assert!(result.is_err());
         assert!(!sent, "a reused PID must not receive a key-down");
     }
@@ -473,19 +528,41 @@ mod tests {
         let mut posted_down = std::collections::HashMap::new();
         let mut failed_ups = 0;
         let result = deliver_with(
-            "shift", &["shift"], Duration::ZERO,
-            |code, down, flags| post_if_foreground((7, 11), || Some((7, 11)), code, down, &mut posted_down, || {
-                events.borrow_mut().push((code, down, flags));
-                if !down && failed_ups < 2 { failed_ups += 1; anyhow::bail!("base release failed"); }
-                Ok(())
-            }),
-            || false, |_| false,
+            "shift",
+            &["shift"],
+            Duration::ZERO,
+            |code, down, flags| {
+                post_if_foreground(
+                    (7, 11),
+                    || Some((7, 11)),
+                    code,
+                    down,
+                    &mut posted_down,
+                    || {
+                        events.borrow_mut().push((code, down, flags));
+                        if !down && failed_ups < 2 {
+                            failed_ups += 1;
+                            anyhow::bail!("base release failed");
+                        }
+                        Ok(())
+                    },
+                )
+            },
+            || false,
+            |_| false,
         );
         assert!(result.is_err());
         let events = events.borrow();
         assert_eq!(events.len(), 5);
-        assert_eq!(events.last().map(|event| (event.0, event.1)), Some((56, false)));
-        assert!(!events.last().unwrap().2.contains(CGEventFlags::CGEventFlagShift));
+        assert_eq!(
+            events.last().map(|event| (event.0, event.1)),
+            Some((56, false))
+        );
+        assert!(!events
+            .last()
+            .unwrap()
+            .2
+            .contains(CGEventFlags::CGEventFlagShift));
     }
 
     /// A bare-global key reaches the HID queue: it must be in the HID history,

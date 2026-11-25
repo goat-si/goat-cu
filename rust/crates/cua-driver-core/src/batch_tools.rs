@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 use crate::{
     protocol::{Content, ToolResult},
@@ -2597,10 +2597,8 @@ fn parse_step(
                 })
             })
             .collect::<Result<_, _>>()?,
-        Some(raw) => vec![
-            Check::parse(raw, locate::DEFAULT_EXPECT_TIMEOUT_MS)
-                .map_err(|message| PlanError::step(index, format!("expect: {message}")))?,
-        ],
+        Some(raw) => vec![Check::parse(raw, locate::DEFAULT_EXPECT_TIMEOUT_MS)
+            .map_err(|message| PlanError::step(index, format!("expect: {message}")))?],
     };
 
     let action = match name {
@@ -3357,13 +3355,11 @@ mod timeout_tests {
                 .with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED);
             assert_eq!(result.proves_no_input(), expected, "{effect:?}");
         }
-        assert!(
-            !ToolResult::error("untyped")
-                .with_structured(json!({
-                    "disposition":{"delivery":"not_delivered", "retry":"safe"}
-                }))
-                .proves_no_input()
-        );
+        assert!(!ToolResult::error("untyped")
+            .with_structured(json!({
+                "disposition":{"delivery":"not_delivered", "retry":"safe"}
+            }))
+            .proves_no_input());
     }
 
     #[test]
@@ -3546,11 +3542,9 @@ mod timeout_tests {
         gate.timeout();
         let registry = ToolRegistry::new();
         for tool in ["invoke_menu", "click", "type_text"] {
-            assert!(
-                dispatch_action(&registry, &gate, tool, json!({}))
-                    .await
-                    .is_none()
-            );
+            assert!(dispatch_action(&registry, &gate, tool, json!({}))
+                .await
+                .is_none());
         }
     }
 

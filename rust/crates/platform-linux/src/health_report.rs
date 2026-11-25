@@ -809,7 +809,9 @@ mod tests {
         assert_eq!(unreadable.status, CheckStatus::Fail);
         assert!(
             unreadable.message.contains("root window cannot be read")
-                && unreadable.message.contains("complete desktop capture is unavailable"),
+                && unreadable
+                    .message
+                    .contains("complete desktop capture is unavailable"),
             "{}",
             unreadable.message
         );

@@ -9,7 +9,7 @@ use cua_driver_core::{
 use serde_json::Value;
 use std::sync::Arc;
 
-use super::{ConfigOverrides, ToolState, write_driver_config_key};
+use super::{write_driver_config_key, ConfigOverrides, ToolState};
 
 pub struct SetConfigTool {
     state: Arc<ToolState>,
@@ -112,7 +112,9 @@ impl Tool for SetConfigTool {
             Some(dim) => match u32::try_from(dim) {
                 Ok(d) => Some(d),
                 Err(_) => {
-                    return ToolResult::error(format!("max_image_dimension {dim} exceeds u32::MAX"));
+                    return ToolResult::error(format!(
+                        "max_image_dimension {dim} exceeds u32::MAX"
+                    ));
                 }
             },
             None => None,

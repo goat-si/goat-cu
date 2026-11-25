@@ -6,7 +6,7 @@
 #![cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 
 use cua_driver_testkit::RawDriver;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 fn call(driver: &mut RawDriver, id: u64, name: &str, arguments: Value) -> Value {
     driver.send(&json!({

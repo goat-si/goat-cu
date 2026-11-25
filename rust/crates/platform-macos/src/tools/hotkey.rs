@@ -339,17 +339,24 @@ impl Tool for HotkeyTool {
                 super::cursor_tools::position_desktop_keyboard_cursor(&self.state, &args),
                 || {
                     checked_pid = crate::apps::frontmost_pid();
-                    checked_start = checked_pid.and_then(|pid|
-                        crate::process_identity::process_fingerprint(i64::from(pid)).and_then(|f| f.start_time));
+                    checked_start = checked_pid.and_then(|pid| {
+                        crate::process_identity::process_fingerprint(i64::from(pid))
+                            .and_then(|f| f.start_time)
+                    });
                     cua_driver_core::browser::protection::frontmost_app_refusal(
-                        "hotkey", checked_pid.map(i64::from),
+                        "hotkey",
+                        checked_pid.map(i64::from),
                     )
                 },
-            ).await {
+            )
+            .await
+            {
                 return refusal;
             }
             let (Some(checked_pid), Some(checked_start)) = (checked_pid, checked_start) else {
-                return ToolResult::error("the frontmost process instance could not be proven; no keys were sent");
+                return ToolResult::error(
+                    "the frontmost process instance could not be proven; no keys were sent",
+                );
             };
             let prompt = PromptInput::from_args(&args);
             let control = Arc::new(crate::input::key_hold::HoldControl::default());
@@ -918,10 +925,10 @@ mod tests {
     #[tokio::test]
     async fn browser_protection_is_checked_after_cursor_positioning() {
         let frontmost = std::cell::Cell::new(false);
-        let refusal = super::browser_refusal_after_cursor(
-            async { frontmost.set(true) },
-            || frontmost.get().then_some("protected"),
-        ).await;
+        let refusal = super::browser_refusal_after_cursor(async { frontmost.set(true) }, || {
+            frontmost.get().then_some("protected")
+        })
+        .await;
         assert_eq!(refusal, Some("protected"));
     }
     /// #279.1: an AXFocused write the app could not finish (busy, a transient

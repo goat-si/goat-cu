@@ -6,7 +6,7 @@ use cua_driver_core::{
     protocol::ToolResult,
     tool::{Tool, ToolDef},
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::impl_::ToolState;

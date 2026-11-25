@@ -1115,7 +1115,10 @@ fn screenshot_display_bytes_with_dispatch(
 /// fallback without re-entering [`screenshot_display_bytes`] (which would
 /// loop forever once we're on Wayland).
 pub(crate) fn screenshot_display_bytes_x11() -> Result<Vec<u8>> {
-    crate::desktop_capture_guard::complete_capture(x11_root_unreadable, screenshot_display_bytes_x11_inner)
+    crate::desktop_capture_guard::complete_capture(
+        x11_root_unreadable,
+        screenshot_display_bytes_x11_inner,
+    )
 }
 
 fn screenshot_display_bytes_x11_inner() -> Result<Vec<u8>> {
@@ -2542,12 +2545,20 @@ mod tests {
         if x11_root_unreadable().expect("probe root") {
             let pixels = PixelCatalog::from_setup(conn.setup());
             let composite = compose_top_level_windows(
-                &conn, &pixels, screen.root,
-                (u32::from(screen.width_in_pixels), u32::from(screen.height_in_pixels)),
-            ).expect("X11-only composition");
+                &conn,
+                &pixels,
+                screen.root,
+                (
+                    u32::from(screen.width_in_pixels),
+                    u32::from(screen.height_in_pixels),
+                ),
+            )
+            .expect("X11-only composition");
             assert!(!composite.is_empty());
-            assert!(screenshot_display_bytes_x11().is_err(),
-                "an incomplete rootless desktop must not be published as a full capture");
+            assert!(
+                screenshot_display_bytes_x11().is_err(),
+                "an incomplete rootless desktop must not be published as a full capture"
+            );
             conn.destroy_window(top).unwrap();
             conn.destroy_window(bottom).unwrap();
             conn.sync().unwrap();

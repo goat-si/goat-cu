@@ -18,7 +18,7 @@ thread_local! {
 
 use crate::{
     protocol::{Content, ToolResult},
-    recording::{RecordingSession, now_ms},
+    recording::{now_ms, RecordingSession},
     recording_tools::{
         GetRecordingStateTool, ReplayRegistrySlot, ReplayTrajectoryTool, StartRecordingTool,
         StopRecordingTool,
@@ -61,8 +61,8 @@ impl std::fmt::Display for DispatchContextError {
 
 impl std::error::Error for DispatchContextError {}
 
-pub(crate) fn capture_dispatch_context()
--> Result<Option<CapturedDispatchContext>, DispatchContextError> {
+pub(crate) fn capture_dispatch_context(
+) -> Result<Option<CapturedDispatchContext>, DispatchContextError> {
     let authorization = DISPATCH_AUTHORIZATION_CONTEXT.try_with(Arc::clone).ok();
     let evidence = DISPATCH_TRUSTED_INVOCATION_EVIDENCE
         .try_with(Clone::clone)
@@ -102,8 +102,8 @@ impl CapturedDispatchContext {
 /// Resource adapters use this instead of consulting process-global
 /// compatibility configuration. The value exists only while the canonical
 /// registry chokepoint is executing a tool, including nested dispatch.
-pub(crate) fn current_dispatch_authorization_context()
--> Option<Arc<crate::session_authorization::EffectiveAuthorizationContext>> {
+pub(crate) fn current_dispatch_authorization_context(
+) -> Option<Arc<crate::session_authorization::EffectiveAuthorizationContext>> {
     DISPATCH_AUTHORIZATION_CONTEXT.try_with(Arc::clone).ok()
 }
 
@@ -288,7 +288,7 @@ impl DesktopCall {
 
 impl Drop for DesktopCall {
     fn drop(&mut self) {
-        let held = &self.0.0;
+        let held = &self.0 .0;
         // Checked under the holder lock that the last clone's drop takes,
         // so a worker stopping now cannot leave its mark behind.
         let mut holder = lock_holder(&held.holder);
@@ -4477,12 +4477,10 @@ fn preserve_linux_mpx_popups(
     let values = match producer.get("popups") {
         Some(Value::Array(values)) if !values.is_empty() => values.clone(),
         Some(_) => return Err("popups must be a non-empty array".into()),
-        None => vec![
-            producer
-                .get("popup")
-                .cloned()
-                .ok_or("popup evidence omitted its entries")?,
-        ],
+        None => vec![producer
+            .get("popup")
+            .cloned()
+            .ok_or("popup evidence omitted its entries")?],
     };
     if count.is_some_and(|count| count != values.len() as u64) {
         return Err("popup count does not match entries".into());
@@ -4645,10 +4643,10 @@ fn restore_public_runtime_value(value: &mut Value, runtime_prefix: &str) -> bool
 #[cfg(test)]
 mod runtime_isolation_tests {
     use super::{
-        DISPATCH_AUTHORIZATION_CONTEXT, DISPATCH_RUNTIME_SCOPE,
-        DISPATCH_TRUSTED_INVOCATION_EVIDENCE, DesktopCall, DesktopLane, DesktopLease,
-        TrustedInvocationEvidence, canonical_proposed_path, namespace_runtime_args,
-        publish_action_result, restore_public_runtime_result, try_admit_text_input,
+        canonical_proposed_path, namespace_runtime_args, publish_action_result,
+        restore_public_runtime_result, try_admit_text_input, DesktopCall, DesktopLane,
+        DesktopLease, TrustedInvocationEvidence, DISPATCH_AUTHORIZATION_CONTEXT,
+        DISPATCH_RUNTIME_SCOPE, DISPATCH_TRUSTED_INVOCATION_EVIDENCE,
     };
     use crate::{
         authorization::PermissionMode,
@@ -4659,8 +4657,8 @@ mod runtime_isolation_tests {
     #[cfg(feature = "yaml")]
     use std::io::Write;
     use std::sync::{
-        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
     };
     use std::time::Duration;
 
@@ -4832,16 +4830,12 @@ mod runtime_isolation_tests {
             wire["structuredContent"]["opened_surfaces_status"],
             "partial"
         );
-        assert!(
-            wire["structuredContent"]["opened_surfaces"][0]
-                .get("target")
-                .is_none()
-        );
-        assert!(
-            wire["structuredContent"]["opened_surfaces"][0]
-                .get("owner_pid")
-                .is_none()
-        );
+        assert!(wire["structuredContent"]["opened_surfaces"][0]
+            .get("target")
+            .is_none());
+        assert!(wire["structuredContent"]["opened_surfaces"][0]
+            .get("owner_pid")
+            .is_none());
         let empty = json!({"path":"mpx_pointer", "effect":"unverifiable", "delivery_mode":"background", "popups_appeared":0});
         let wire = crate::mcp_result::conforming_tool_result(
             "click",
@@ -4852,11 +4846,9 @@ mod runtime_isolation_tests {
             )
             .unwrap(),
         );
-        assert!(
-            wire["structuredContent"]
-                .get("opened_surfaces_status")
-                .is_none()
-        );
+        assert!(wire["structuredContent"]
+            .get("opened_surfaces_status")
+            .is_none());
         let malformed = json!({"path":"mpx_pointer", "effect":"unverifiable", "delivery_mode":"background", "popups_appeared":1});
         let result = registry
             .invoke_with_context("click", malformed, unrestricted_context())
@@ -6592,7 +6584,7 @@ allow:
     /// platform. A public caller cannot claim that origin.
     #[tokio::test]
     async fn trusted_human_origin_suppresses_the_agent_cursor_and_is_not_forgeable() {
-        use crate::agent_cursor::{InputOrigin, input_origin, overlay_suppressed};
+        use crate::agent_cursor::{input_origin, overlay_suppressed, InputOrigin};
         let hits = Arc::new(AtomicUsize::new(0));
         let last_args = Arc::new(Mutex::new(None));
         let mut registry = super::ToolRegistry::new();
@@ -6722,11 +6714,9 @@ allow:
 
     #[tokio::test]
     async fn dispatch_context_capture_supports_legacy_absence_and_rejects_partial_state() {
-        assert!(
-            super::capture_dispatch_context()
-                .expect("legacy absence")
-                .is_none()
-        );
+        assert!(super::capture_dispatch_context()
+            .expect("legacy absence")
+            .is_none());
         DISPATCH_RUNTIME_SCOPE
             .scope("partial-runtime".to_owned(), async {
                 assert!(super::capture_dispatch_context().is_err());
@@ -6793,12 +6783,10 @@ allow:
             .await;
         let received = last_args.lock().unwrap().clone();
         assert!(marked(&received));
-        assert!(
-            received.unwrap()["_session_id"]
-                .as_str()
-                .unwrap()
-                .ends_with("native-pixels-viewer")
-        );
+        assert!(received.unwrap()["_session_id"]
+            .as_str()
+            .unwrap()
+            .ends_with("native-pixels-viewer"));
 
         // A nested call (replay) does not inherit the outer call's claim.
         // (The outer probe's result is not a list_windows payload; only the
@@ -7014,12 +7002,10 @@ allow:
             let listed = registry.tools_list();
             let listed = &listed["tools"][0];
             assert_eq!(listed["deprecated"]["removal_after"], "2026-11-26");
-            assert!(
-                listed["description"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("DEPRECATED, removed in the first release after 26 Nov 2026")
-            );
+            assert!(listed["description"]
+                .as_str()
+                .unwrap()
+                .starts_with("DEPRECATED, removed in the first release after 26 Nov 2026"));
         }
 
         let hits = Arc::new(AtomicUsize::new(0));
@@ -7049,11 +7035,9 @@ allow:
             Content::Text { text, .. } => !text.starts_with("Deprecated: "),
             _ => true,
         }));
-        assert!(
-            registry.tools_list()["tools"][0]
-                .get("deprecated")
-                .is_none()
-        );
+        assert!(registry.tools_list()["tools"][0]
+            .get("deprecated")
+            .is_none());
     }
 
     #[tokio::test]
@@ -7103,7 +7087,7 @@ allow:
     #[tokio::test]
     async fn dispatch_runs_the_action_under_its_post_action_wait() {
         use crate::post_action_wait::{
-            POST_ACTION_WAIT_ARG, POST_ACTION_WAIT_TOOLS, PostActionWait, SKIP_SUPPORTED, current,
+            current, PostActionWait, POST_ACTION_WAIT_ARG, POST_ACTION_WAIT_TOOLS, SKIP_SUPPORTED,
         };
         use serde_json::json;
         let schema = json!({"type": "object", "properties": {}, "additionalProperties": false});
@@ -7248,10 +7232,9 @@ allow:
                 .as_object_mut()
                 .and_then(|object| object.remove("hint"))
                 .expect("a desktop background refusal carries a hint");
-            assert!(
-                hint.as_str()
-                    .is_some_and(|hint| hint.contains("target {kind:\"window\""))
-            );
+            assert!(hint
+                .as_str()
+                .is_some_and(|hint| hint.contains("target {kind:\"window\"")));
             assert_eq!(
                 structured,
                 serde_json::json!({
@@ -7381,7 +7364,7 @@ allow:
     /// stamps it, and a caller cannot forge the stamp.
     #[tokio::test]
     async fn only_unrestricted_dispatch_lets_input_reach_an_os_security_prompt() {
-        use crate::security_prompt::{ALLOW_ARG, PromptInput};
+        use crate::security_prompt::{PromptInput, ALLOW_ARG};
         let hits = Arc::new(AtomicUsize::new(0));
         let last_args = Arc::new(Mutex::new(None));
         let mut registry = super::ToolRegistry::new();
@@ -8191,11 +8174,9 @@ resources:
             );
         }
         assert_eq!(hits.load(Ordering::SeqCst), 0);
-        assert!(
-            refusal_codes
-                .iter()
-                .all(|code| code.as_deref() == Some("foreign_process_termination_denied"))
-        );
+        assert!(refusal_codes
+            .iter()
+            .all(|code| code.as_deref() == Some("foreign_process_termination_denied")));
         assert_eq!(
             crate::session::list_session_snapshots_with_prefix(
                 &runtime_prefix,
@@ -8349,12 +8330,10 @@ resources:
         assert_eq!(result.is_error, Some(true));
         assert_eq!(hits.load(Ordering::SeqCst), 0);
         assert_eq!(provider.requests.load(Ordering::SeqCst), 0);
-        assert!(
-            result
-                .content
-                .iter()
-                .any(|item| format!("{item:?}").contains("live top-level origin"))
-        );
+        assert!(result
+            .content
+            .iter()
+            .any(|item| format!("{item:?}").contains("live top-level origin")));
     }
 
     #[tokio::test]
@@ -8394,12 +8373,11 @@ resources:
             "files": ["/does/not/matter"]
         });
         let evidence = TrustedInvocationEvidence::extract_from_adapter_args(&mut args);
-        assert!(
-            args.as_object()
-                .unwrap()
-                .keys()
-                .all(|key| !key.starts_with('_'))
-        );
+        assert!(args
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|key| !key.starts_with('_')));
 
         let result = registry
             .invoke_with_context_and_evidence(
@@ -8412,18 +8390,14 @@ resources:
         assert_ne!(result.is_error, Some(true));
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         let received = last_args.lock().unwrap().clone().unwrap();
-        assert!(
-            received
-                .get("_session_id")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| value.ends_with(":trusted-owner"))
-        );
-        assert!(
-            received
-                .get("_transport_session_id")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| value.ends_with(":transport-a"))
-        );
+        assert!(received
+            .get("_session_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value.ends_with(":trusted-owner")));
+        assert!(received
+            .get("_transport_session_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value.ends_with(":transport-a")));
         assert_eq!(
             received["_cua_browser_download_mcp_host_approved"],
             serde_json::Value::Bool(true)
@@ -8578,12 +8552,10 @@ resources:
             action.effect,
             crate::action_record::ActionEffect::Unverifiable
         );
-        assert!(
-            action
-                .debug_json()
-                .get("requested_delivery")
-                .is_some_and(|value| value == "background")
-        );
+        assert!(action
+            .debug_json()
+            .get("requested_delivery")
+            .is_some_and(|value| value == "background"));
         assert_eq!(hits.load(Ordering::SeqCst), 1);
 
         crate::session::fire_session_end(&runtime_session);
@@ -9314,7 +9286,7 @@ resources:
         retain: bool,
         hits: Arc<AtomicUsize>,
     ) -> super::ToolRegistry {
-        use crate::desktop_lease::{LeaseManager, test_support::TestClock};
+        use crate::desktop_lease::{test_support::TestClock, LeaseManager};
         let mut registry = super::ToolRegistry::new();
         registry.desktop_lease = LeaseManager::new(backend, Arc::new(TestClock::default()));
         registry.desktop_coordinator = Box::leak(Box::new(tokio::sync::Mutex::new(())));
@@ -9427,12 +9399,10 @@ resources:
         let body = result.structured_content.unwrap();
         assert_eq!(body["effect"], "refused");
         assert_eq!(body["code"], "desktop_lease_unavailable");
-        assert!(
-            body["refusal"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("synthetic failure")
-        );
+        assert!(body["refusal"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("synthetic failure"));
         assert_eq!(hits.load(Ordering::SeqCst), 0);
     }
 
@@ -9497,8 +9467,8 @@ resources:
     #[tokio::test]
     async fn desktop_busy_after_deadline() {
         use crate::desktop_lease::{
-            LeaseManager,
             test_support::{TestBackend, TestClock},
+            LeaseManager,
         };
         let backend = Arc::new(TestBackend::default());
         backend.hold();
@@ -9537,8 +9507,8 @@ resources:
     #[tokio::test]
     async fn admission_scope_menu_mutations_and_reads() {
         use crate::desktop_lease::{
-            LeaseManager,
             test_support::{TestBackend, TestClock},
+            LeaseManager,
         };
         let backend = Arc::new(TestBackend::default());
         backend.hold();
@@ -9633,8 +9603,8 @@ resources:
     #[tokio::test]
     async fn composite_dispatch_acquires_the_lease_only_for_nested_mutations() {
         use crate::desktop_lease::{
-            LeaseManager,
             test_support::{TestBackend, TestClock},
+            LeaseManager,
         };
         let backend = Arc::new(TestBackend::default());
         let hits = Arc::new(AtomicUsize::new(0));
@@ -9673,13 +9643,11 @@ resources:
         .expect("busy nested action must finish");
         assert_eq!(hits.load(Ordering::SeqCst), 1, "{result:?}");
         assert_eq!(backend.attempts.load(Ordering::SeqCst), 502, "{result:?}");
-        assert!(
-            result
-                .structured_content
-                .unwrap()
-                .to_string()
-                .contains("desktop_busy")
-        );
+        assert!(result
+            .structured_content
+            .unwrap()
+            .to_string()
+            .contains("desktop_busy"));
     }
 
     #[test]
@@ -10421,11 +10389,9 @@ mod capability_tests {
             }),
         );
         assert_eq!(download["destination_root"], "[redacted]");
-        assert!(
-            download
-                .get("_cua_browser_download_mcp_host_approved")
-                .is_none()
-        );
+        assert!(download
+            .get("_cua_browser_download_mcp_host_approved")
+            .is_none());
 
         let serialized = serde_json::json!([dialog, upload, download]).to_string();
         for forbidden in [
@@ -10857,22 +10823,18 @@ mod capability_tests {
             }
         });
         let accepting_entry = accepting.to_list_entry();
-        assert!(
-            accepting_entry["capabilities"]
-                .as_array()
-                .expect("capabilities array")
-                .iter()
-                .any(|capability| capability == "input.delivery_mode")
-        );
+        assert!(accepting_entry["capabilities"]
+            .as_array()
+            .expect("capabilities array")
+            .iter()
+            .any(|capability| capability == "input.delivery_mode"));
 
         let rejecting_entry = dummy_def("press_key").to_list_entry();
-        assert!(
-            !rejecting_entry["capabilities"]
-                .as_array()
-                .expect("capabilities array")
-                .iter()
-                .any(|capability| capability == "input.delivery_mode")
-        );
+        assert!(!rejecting_entry["capabilities"]
+            .as_array()
+            .expect("capabilities array")
+            .iter()
+            .any(|capability| capability == "input.delivery_mode"));
     }
 
     #[test]
@@ -11105,15 +11067,13 @@ mod capability_tests {
         }
         .to_list_entry();
         // anyOf[0] is the success variant; anyOf[1] is the refusal envelope.
-        let z_index = &entry["outputSchema"]["anyOf"][0]["properties"]["windows"]["items"]["properties"]
-            ["z_index"];
+        let z_index = &entry["outputSchema"]["anyOf"][0]["properties"]["windows"]["items"]
+            ["properties"]["z_index"];
         assert_eq!(z_index["type"], serde_json::json!(["integer", "null"]));
-        assert!(
-            z_index["description"]
-                .as_str()
-                .expect("description")
-                .contains("Higher values are closer to the front")
-        );
+        assert!(z_index["description"]
+            .as_str()
+            .expect("description")
+            .contains("Higher values are closer to the front"));
     }
 
     #[test]
@@ -11165,24 +11125,21 @@ mod capability_tests {
             v["enforcement_adapters"].is_array(),
             "permission enforcement inventory must be available before tools register"
         );
-        assert!(
-            v["enforcement_adapters"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|adapter| {
-                    adapter["id"] == "browser_prepare.existing_profile"
-                        && adapter["state"] == "active"
-                })
-        );
+        assert!(v["enforcement_adapters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|adapter| {
+                adapter["id"] == "browser_prepare.existing_profile" && adapter["state"] == "active"
+            }));
     }
 }
 
 #[cfg(test)]
 mod argument_shape_tests {
     use super::{
-        ToolDef, coerce_string_scalars, normalize_argument_aliases, normalize_zoom_args,
-        unknown_argument,
+        coerce_string_scalars, normalize_argument_aliases, normalize_zoom_args, unknown_argument,
+        ToolDef,
     };
     use serde_json::json;
 

@@ -668,7 +668,8 @@ fn on_current_task_view_desktop(root: HWND) -> Result<bool, String> {
         let manager: IVirtualDesktopManager =
             CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_ALL)
                 .map_err(|error| error.to_string())?;
-        manager.IsWindowOnCurrentVirtualDesktop(root)
+        manager
+            .IsWindowOnCurrentVirtualDesktop(root)
             .map(|on| on.as_bool())
             .map_err(|error| error.to_string())
     }
@@ -1205,7 +1206,10 @@ mod task_view_desktop_tests {
             // Hold the guard across a pumped interval, as an actuation does, so
             // Explorer observes the style while it is set.
             let guard = NoActivateGuard::arm(hwnd);
-            assert!(guard.is_err(), "a background action without its guard must refuse");
+            assert!(
+                guard.is_err(),
+                "a background action without its guard must refuse"
+            );
             pump_until(HOLD, || false);
             drop(guard);
             pump_until(SETTLE, || false);

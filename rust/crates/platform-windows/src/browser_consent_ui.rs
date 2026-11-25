@@ -914,8 +914,12 @@ mod tests {
             button("C", 13, (-5549, 343, -5452, 399)),
         ];
 
-        assert_eq!(exact_allow_button_with(&nodes, properties).unwrap_err().code,
-                   BrowserRefusalCode::BrowserWrongTargetRefused);
+        assert_eq!(
+            exact_allow_button_with(&nodes, properties)
+                .unwrap_err()
+                .code,
+            BrowserRefusalCode::BrowserWrongTargetRefused
+        );
     }
 
     /// Edge 156 on a page in another language: the translate bubble is a sibling native surface.
@@ -981,7 +985,8 @@ mod tests {
                     element_ptr == 13,
                 ))
             })
-            .unwrap_err().code,
+            .unwrap_err()
+            .code,
             BrowserRefusalCode::BrowserWrongTargetRefused
         );
     }
