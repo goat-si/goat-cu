@@ -10,7 +10,7 @@ use std::{
 };
 
 use cua_driver_core::browser::{
-    BrowserProduct, BrowserRefusal, BrowserRefusalCode, BrowserSetupDescriptor,
+    BrowserRefusal, BrowserRefusalCode, BrowserSetupDescriptor,
     EXISTING_PROFILE_SETUP_READY_TIMEOUT,
 };
 

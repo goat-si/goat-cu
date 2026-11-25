@@ -1600,6 +1600,7 @@ pub(crate) fn atspi_click_outcome_unknown(
 
 /// [`atspi_outcome_unknown`] for an `EditableText` write that failed after it
 /// was sent ([`crate::atspi::InputMayHaveLanded`]).
+#[cfg(test)]
 pub(crate) fn atspi_text_outcome_unknown(
     delivery: crate::input::delivery::DeliveryMode,
     error: &anyhow::Error,

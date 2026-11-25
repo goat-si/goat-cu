@@ -1217,6 +1217,7 @@ struct Rect {
     h: u32,
 }
 
+#[cfg(test)]
 impl Rect {
     fn intersect(self, other: Rect) -> Option<Rect> {
         let x0 = self.x.max(other.x);

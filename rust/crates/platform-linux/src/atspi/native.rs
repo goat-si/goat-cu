@@ -5540,10 +5540,10 @@ mod input_dispatch_tests {
                 length: i32,
             ) -> crate::text_write_policy::MutationReply {
                 use crate::text_write_policy::{CallClass, MutationResult};
-                match runtime().block_on(tokio::time::timeout(
-                    self.budget,
-                    self.field.insert_text(offset, text, length),
-                )) {
+                match runtime().block_on(async {
+                    tokio::time::timeout(self.budget, self.field.insert_text(offset, text, length))
+                        .await
+                }) {
                     Ok(Ok(true)) => Ok(MutationResult::Acknowledged),
                     Ok(Ok(false)) => Ok(MutationResult::Refused),
                     Ok(Err(e)) => Err(super::classify_mutator_error(&e)),
