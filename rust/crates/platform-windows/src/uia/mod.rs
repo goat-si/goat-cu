@@ -19,10 +19,10 @@ use crate::walk_completeness::{
 };
 use cua_driver_core::snapshot_compaction::{
     compact_tab_strip, fold_actionless_text_subtrees, format_omitted_tabs_line,
-    format_uncounted_offscreen_rows_line, is_compaction_summary_line, is_uia_dense_collection,
-    is_uia_offscreen_exempt, plan_uia_collection_children, renumber_indexed_tree,
-    splice_deferred_chunks, CompactableNode, DeferredChunk, RenumberableNode, TabChildMeta,
-    UiaChildCandidate, UiaChildPlan, TAB_STRIP_COMPACTION_THRESHOLD,
+    format_uncounted_offscreen_rows_line, is_uia_dense_collection, is_uia_offscreen_exempt,
+    plan_uia_collection_children, renumber_indexed_tree, splice_deferred_chunks, CompactableNode,
+    DeferredChunk, RenumberableNode, TabChildMeta, UiaChildCandidate, UiaChildPlan,
+    TAB_STRIP_COMPACTION_THRESHOLD,
 };
 use cua_driver_core::walk_budget::WalkBudget;
 use windows::core::{Interface, HRESULT};
@@ -735,7 +735,8 @@ fn native_list_view_class(class: &str) -> bool {
 }
 
 unsafe fn contains_native_list_view(hwnd: windows::Win32::Foundation::HWND) -> bool {
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
     unsafe extern "system" fn visit(hwnd: HWND, param: LPARAM) -> BOOL {
         let mut class = [0u16; 256];
@@ -750,7 +751,7 @@ unsafe fn contains_native_list_view(hwnd: windows::Win32::Foundation::HWND) -> b
     let param = LPARAM(&mut found as *mut bool as isize);
     let _ = visit(hwnd, param);
     if !found {
-        let _ = EnumChildWindows(hwnd, Some(visit), param);
+        let _ = EnumChildWindows(Some(hwnd), Some(visit), param);
     }
     found
 }

@@ -475,6 +475,8 @@ fn walker_node(element_index: Option<usize>, element_ptr: usize) -> crate::uia::
         actions: Vec::new(),
         enabled: Some(true),
         selected: None,
+        checked: None,
+        expanded: None,
         is_password: None,
         element_ptr,
         center_x: 0,

@@ -179,7 +179,7 @@ fn window_owner(hwnd: u64) -> Result<u32, String> {
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
     unsafe {
         let window = HWND(hwnd as usize as *mut _);
-        if !IsWindow(window).as_bool() {
+        if !IsWindow(Some(window)).as_bool() {
             return Err("the window no longer exists".into());
         }
         let mut pid = 0;

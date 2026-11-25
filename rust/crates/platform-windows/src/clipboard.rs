@@ -163,7 +163,7 @@ fn absolute_existing_file(path: &str) -> Result<String, String> {
 mod win32_exclusion {
     use super::{apply_clipboard_exclusion_formats, ClipboardExclusionSink};
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND};
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
     };
@@ -176,7 +176,7 @@ mod win32_exclusion {
     impl OpenClipboardGuard {
         fn open() -> Result<Self, String> {
             for attempt in 0..5 {
-                if unsafe { OpenClipboard(HWND::default()) }.is_ok() {
+                if unsafe { OpenClipboard(None) }.is_ok() {
                     return Ok(Self);
                 }
                 if attempt < 4 {
@@ -198,13 +198,13 @@ mod win32_exclusion {
             .map_err(|e| format!("GlobalAlloc failed for format {format_id}: {e}"))?;
         let ptr = GlobalLock(hmem);
         if ptr.is_null() {
-            let _ = GlobalFree(hmem);
+            let _ = GlobalFree(Some(hmem));
             return Err(format!("GlobalLock returned null for format {format_id}"));
         }
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
         let _ = GlobalUnlock(hmem);
-        if let Err(err) = SetClipboardData(format_id, HANDLE(hmem.0)) {
-            let _ = GlobalFree(hmem);
+        if let Err(err) = SetClipboardData(format_id, Some(HANDLE(hmem.0))) {
+            let _ = GlobalFree(Some(hmem));
             return Err(format!(
                 "SetClipboardData failed for format {format_id}: {err}"
             ));
@@ -526,9 +526,9 @@ mod tests {
                 0,
                 0,
                 0,
-                HWND_MESSAGE,
+                Some(HWND_MESSAGE),
                 None,
-                instance,
+                Some(instance.into()),
                 None,
             )
             .unwrap();
@@ -550,7 +550,7 @@ mod tests {
 
             let _ = RemoveClipboardFormatListener(hwnd);
             let _ = DestroyWindow(hwnd);
-            let _ = UnregisterClassW(class.lpszClassName, instance);
+            let _ = UnregisterClassW(class.lpszClassName, Some(instance.into()));
 
             // The file write first: it succeeds on every build, so its count
             // shows the transaction split even where an image write errors.

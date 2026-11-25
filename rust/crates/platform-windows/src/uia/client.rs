@@ -34,7 +34,7 @@ pub(crate) fn new_uia_client() -> windows::core::Result<IUIAutomation> {
 }
 
 pub(crate) fn probe_root(hwnd: HWND) -> RootVerdict {
-    probe_with(unsafe { IsWindow(hwnd).as_bool() }, || {
+    probe_with(unsafe { IsWindow(Some(hwnd)).as_bool() }, || {
         crate::input::inject::window_thread_responds(hwnd, 1_000)
     })
 }
