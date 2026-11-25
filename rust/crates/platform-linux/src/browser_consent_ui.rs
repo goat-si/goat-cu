@@ -3,12 +3,14 @@
 
 //! Exact Linux AT-SPI handling for Chromium's browser-owned debugging consent.
 
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use cua_driver_core::browser::platform::BrowserConsentAction;
-use cua_driver_core::browser::{
-    BrowserConsentOutcome, BrowserConsentRequest, BrowserRefusal, BrowserRefusalCode,
-};
+#[cfg(target_os = "linux")]
+use cua_driver_core::browser::{BrowserConsentOutcome, BrowserConsentRequest};
+use cua_driver_core::browser::{BrowserRefusal, BrowserRefusalCode};
 
 use crate::atspi::AtspiNode;
 
@@ -272,6 +274,26 @@ fn exact_consent_actions(
     let Some(prompt_root) = exact_native_prompt_root(nodes)? else {
         return Ok(None);
     };
+    let prompt = nodes
+        .iter()
+        .find(|node| node.element_index == Some(prompt_root))
+        .expect("root is from the same walk");
+    let body = trusted_prompt_nodes(nodes)
+        .filter(|node| is_descendant_of(nodes, node, prompt_root))
+        .flat_map(|node| {
+            [
+                node.name.as_deref(),
+                node.value.as_deref(),
+                node.description.as_deref(),
+            ]
+        })
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    crate::browser_consent_presence::require_prompt_identity(
+        prompt.name.as_deref().unwrap_or_default(),
+        &body,
+    )?;
     let mut candidates = Vec::new();
     for node in trusted_prompt_nodes(nodes).filter(|node| {
         is_descendant_of(nodes, node, prompt_root)
@@ -337,6 +359,7 @@ fn exact_cancel_button(
     Ok(exact_consent_actions(nodes, bounds)?.map(|actions| actions.cancel))
 }
 
+#[cfg(target_os = "linux")]
 fn prove_window_owner(pid: u32, window_id: u64) -> Result<(), BrowserRefusal> {
     let owned = crate::wayland::list_windows_dispatch(Some(pid))
         .into_iter()
@@ -383,6 +406,7 @@ fn walked_node(nodes: &[AtspiNode], index: usize) -> Result<AtspiNode, BrowserRe
         })
 }
 
+#[cfg(target_os = "linux")]
 pub fn dismiss(pid: u32, window_id: u64) -> Result<bool, BrowserRefusal> {
     prove_window_owner(pid, window_id)?;
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -435,6 +459,7 @@ pub fn dismiss(pid: u32, window_id: u64) -> Result<bool, BrowserRefusal> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn check_deadline(deadline: Instant) -> Result<(), BrowserRefusal> {
     if Instant::now() >= deadline {
         return Err(BrowserRefusal::new(
@@ -445,6 +470,7 @@ fn check_deadline(deadline: Instant) -> Result<(), BrowserRefusal> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 async fn consent_action<T: Send + 'static>(
     action: &BrowserConsentAction,
     deadline: Instant,
@@ -483,6 +509,7 @@ async fn consent_action<T: Send + 'static>(
     Ok(result)
 }
 
+#[cfg(target_os = "linux")]
 pub async fn handle(
     request: BrowserConsentRequest,
 ) -> Result<BrowserConsentOutcome, BrowserRefusal> {
@@ -562,6 +589,7 @@ pub async fn handle(
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn an_unanswered_allow_stops_after_one_semantic_action() {
         use std::sync::{
@@ -588,6 +616,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn expired_action_never_enters_native_helper() {
         let result = consent_action(&BrowserConsentAction::default(), Instant::now(), || {
@@ -602,6 +631,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn queued_action_checks_deadline_before_native_helper() {
         use std::future::Future;
@@ -641,6 +671,7 @@ mod tests {
         });
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn running_action_is_joined_and_late_success_refused() {
         use std::sync::{
@@ -766,8 +797,8 @@ mod tests {
 
     fn prompt() -> Vec<AtspiNode> {
         prompt_with([
-            "opaque title",
-            "opaque body",
+            "Allow remote debugging?",
+            "An external app wants full control over this session, including your saved data, cookies and site data; it can navigate to any URL.",
             "opaque extra",
             "opaque cancel",
             "opaque allow",
@@ -804,11 +835,11 @@ mod tests {
     }
 
     #[test]
-    fn allow_and_cancel_are_distinct_in_every_captured_locale() {
+    fn known_prompt_is_accepted_and_unknown_locales_are_refused() {
         for (locale, names, row) in [
             (
                 "en-US",
-                ["Allow remote debugging?", "An external app wants full control over this Chrome session to debug it.", "Turn off in settings", "Cancel", "Allow"],
+                ["Allow remote debugging?", "An external app wants full control over this session, including your saved data, cookies and site data; it can navigate to any URL.", "Turn off in settings", "Cancel", "Allow"],
                 EN_US_ROW,
             ),
             (
@@ -827,12 +858,29 @@ mod tests {
                 JA_ROW,
             ),
         ] {
-            assert_eq!(
-                actions(&prompt_with(names), &row_bounds(row)),
-                Ok(Some((ALLOW, CANCEL))),
-                "{locale}"
-            );
+            let expected = if locale == "en-US" { Ok(Some((ALLOW, CANCEL))) } else { Err(BrowserRefusalCode::BrowserWrongTargetRefused) };
+            assert_eq!(actions(&prompt_with(names), &row_bounds(row)), expected, "{locale}");
         }
+    }
+
+    #[test]
+    fn unrelated_three_button_alert_is_refused_for_allow_and_cancel() {
+        let nodes = prompt_with([
+            "Delete account?",
+            "Confirm your choice",
+            "Help",
+            "Cancel",
+            "Confirm",
+        ]);
+        let bounds = row_bounds(EN_US_ROW);
+        assert_eq!(
+            exact_allow_button(&nodes, &bounds).unwrap_err().code,
+            BrowserRefusalCode::BrowserWrongTargetRefused
+        );
+        assert_eq!(
+            exact_cancel_button(&nodes, &bounds).unwrap_err().code,
+            BrowserRefusalCode::BrowserWrongTargetRefused
+        );
     }
 
     #[test]

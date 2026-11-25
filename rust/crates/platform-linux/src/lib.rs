@@ -84,7 +84,7 @@ pub mod browser_platform;
 #[cfg(target_os = "linux")]
 mod browser_setup_ui;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 mod browser_consent_ui;
 
 #[cfg(target_os = "linux")]
@@ -100,6 +100,34 @@ mod interaction;
 
 #[cfg(target_os = "linux")]
 pub mod atspi;
+
+// Host tests run the native consent decision functions with tree fixtures;
+// platform operations remain Linux-only.
+#[cfg(all(test, not(target_os = "linux")))]
+mod atspi {
+    #[derive(Clone, Debug)]
+    pub struct AtspiNode {
+        pub element_index: Option<usize>,
+        pub role: String,
+        pub name: Option<String>,
+        pub value: Option<String>,
+        pub checked: Option<bool>,
+        pub enabled: Option<bool>,
+        pub selected: Option<bool>,
+        pub toggle_state: Option<cua_driver_contract::ToggleState>,
+        pub expanded: Option<bool>,
+        pub focused: Option<bool>,
+        pub description: Option<String>,
+        pub document_uri: Option<String>,
+        pub actions: Vec<String>,
+        pub element_key: u64,
+        pub identity: Option<()>,
+        pub depth: usize,
+        pub parent_element_index: Option<usize>,
+        pub in_web_content: bool,
+        pub object_ref: Option<()>,
+    }
+}
 
 #[cfg(any(target_os = "linux", test))]
 mod snapshot_queries;
