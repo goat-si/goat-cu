@@ -891,10 +891,6 @@ fn monitors_cover(target: Bounds, monitors: &[Bounds]) -> bool {
     })
 }
 
-/// Fallback capture path: BitBlt the desktop DC over the rectangle covered
-/// by `hwnd`'s on-screen bounds. Works for UWP / WinUI3 / DirectComposition
-/// surfaces that PrintWindow can't reach, as long as the window is on-screen
-
 #[cfg(test)]
 mod wgc_validation_tests {
     use super::{monitors_cover, normalize_wgc_frame, validate_wgc_frame, FrameGeometry};
