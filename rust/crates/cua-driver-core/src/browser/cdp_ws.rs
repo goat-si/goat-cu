@@ -1531,13 +1531,13 @@ mod tests {
     /// `chrome://inspect/#remote-debugging`. Chrome shows its "Allow remote
     /// debugging?" prompt for the first socket; a person (or the driver's
     /// consent adapter) must accept it within the connect timeout. Every later
-    /// session must reuse that socket without a second prompt.
+    /// grant uses its own socket and may require another prompt.
     ///
     /// CUA_E2E_CHROME_DEVTOOLS_ACTIVE_PORT=<user-data-dir>/DevToolsActivePort \
     ///   cargo test -p cua-driver-core --lib real_chrome -- --ignored --nocapture
     #[tokio::test]
-    #[ignore = "needs a disposable Chrome with remote debugging allowed and a person to accept one prompt"]
-    async fn real_chrome_sessions_share_one_consented_socket() {
+    #[ignore = "needs a disposable Chrome and a person to accept remote debugging prompts"]
+    async fn real_chrome_sessions_use_separate_consented_sockets() {
         let Some(path) = std::env::var_os("CUA_E2E_CHROME_DEVTOOLS_ACTIVE_PORT") else {
             return;
         };
@@ -1591,17 +1591,9 @@ mod tests {
         let target = page(a.clone()).await;
         let session_a = attach_and_eval(a.clone(), target.clone()).await;
 
-        let t = std::time::Instant::now();
         let b = pool.claim_existing(&url, 2).await.unwrap();
         log("session B: claimed");
-        assert!(
-            Arc::ptr_eq(&a, &b),
-            "session B must reuse the consented socket"
-        );
-        assert!(
-            t.elapsed() < std::time::Duration::from_millis(500),
-            "no consent wait"
-        );
+        assert!(!Arc::ptr_eq(&a, &b), "session B must use its own socket");
         let session_b = attach_and_eval(b.clone(), target.clone()).await;
         assert_ne!(
             session_a, session_b,
@@ -1617,19 +1609,14 @@ mod tests {
 
         pool.release_existing(&url, 2, SharedSocketRelease::Park)
             .await;
-        log("session B: ended (socket parked)");
-        let t = std::time::Instant::now();
+        log("session B: ended (socket closed)");
         let c = pool.claim_existing(&url, 3).await.unwrap();
         assert!(
-            Arc::ptr_eq(&a, &c),
-            "a later session must reuse the parked socket"
-        );
-        assert!(
-            t.elapsed() < std::time::Duration::from_millis(500),
-            "no consent wait"
+            !Arc::ptr_eq(&a, &c),
+            "a later session must use a new socket"
         );
         attach_and_eval(c, target).await;
-        log("session C: working on the parked socket without a prompt");
+        log("session C: working on its own socket");
         pool.release_existing(&url, 3, SharedSocketRelease::Close)
             .await;
         log("session C: ended; socket closed");

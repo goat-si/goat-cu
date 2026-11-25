@@ -1257,6 +1257,18 @@ fn harness_wpf_right_click() {
                     }
                     let mut cursor_before = POINT::default();
                     unsafe { GetCursorPos(&mut cursor_before) }.expect("read cursor before click");
+                    let bounds = window_bounds(driver, pid, wid);
+                    let (target_x, target_y) = pixel_center(&snap, "border-click-target", bounds);
+                    let shot_w = snap.structured()["screenshot_width"].as_f64().unwrap();
+                    let shot_h = snap.structured()["screenshot_height"].as_f64().unwrap();
+                    let screen_x = bounds.0 + target_x * bounds.2 / shot_w;
+                    let screen_y = bounds.1 + target_y * bounds.3 / shot_h;
+                    assert!(
+                        (screen_x - f64::from(cursor_before.x))
+                            .hypot(screen_y - f64::from(cursor_before.y))
+                            > 20.0,
+                        "cursor must start away from target for {targeting:?}"
+                    );
                     args["delivery_mode"] = serde_json::json!("foreground");
                     let response = driver.call("right_click", args);
                     assert!(

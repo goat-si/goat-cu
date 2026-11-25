@@ -11022,13 +11022,14 @@ mod budget_tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         let wakes = Arc::new(AtomicUsize::new(0));
-        for pid in [u32::MAX - 30, u32::MAX - 31] {
+        for (index, pid) in [u32::MAX - 30, u32::MAX - 31].into_iter().enumerate() {
             for _ in 0..2 {
-                let wakes = Arc::clone(&wakes);
+                let wake_count = Arc::clone(&wakes);
                 let mut done = wake_once(pid, move || async move {
-                    wakes.fetch_add(1, Ordering::SeqCst);
+                    wake_count.fetch_add(1, Ordering::SeqCst);
                 });
                 done.wait_for(|finished| *finished).await.unwrap();
+                assert_eq!(wakes.load(Ordering::SeqCst), index + 1);
             }
         }
         assert_eq!(wakes.load(Ordering::SeqCst), 2);
