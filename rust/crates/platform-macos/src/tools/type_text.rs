@@ -1019,6 +1019,14 @@ pub(crate) fn text_delivery_failure(prefix: &str, error: &anyhow::Error) -> Tool
         }
         return result;
     }
+    if error
+        .downcast_ref::<crate::input::keyboard::KeyDeliveryUncertain>()
+        .is_some()
+    {
+        return ToolResult::error(message).with_structured(serde_json::json!({
+            "code": "key_delivery_uncertain", "effect": "unverifiable", "retryable": false,
+        }));
+    }
     match error.downcast_ref::<crate::input::keyboard::PasteMayHaveLanded>() {
         Some(paste) => ToolResult::error(format!(
             "{message}. Read the field before typing the text again."
@@ -2121,6 +2129,7 @@ struct KeyFocusChecks {
     recheck_editability_after_settle: bool,
     prior: cua_driver_core::mutation::PriorInput,
     focus_already_written: bool,
+    exact_keys_window: Option<u32>,
 }
 
 fn focus_write_with(
@@ -2175,6 +2184,7 @@ fn cgevent_type_verified(
         recheck_editability_after_settle,
         mut prior,
         focus_already_written,
+        exact_keys_window,
     } = checks;
     if replace {
         let (ptr, _) = element_ptr_and_idx.ok_or_else(|| {
@@ -2223,6 +2233,22 @@ fn cgevent_type_verified(
             )
         }
     }
+    let send_guarded_text = |payload: &str| -> anyhow::Result<()> {
+        if let Some(wid) = exact_keys_window {
+            let sent = crate::input::keyboard::type_text_while(pid, payload, delay_ms, || {
+                !crate::input::skylight::sibling_window_focused(pid, wid)
+            })?;
+            if sent < payload.chars().count() {
+                return Err(crate::input::keyboard::key_construction_error(
+                    crate::input::skylight::sibling_focus_refusal(pid, wid, sent > 0),
+                    sent,
+                ));
+            }
+            Ok(())
+        } else {
+            crate::input::keyboard::type_text_with_delay(pid, payload, delay_ms)
+        }
+    };
     if replace {
         let (ptr, _) = element_ptr_and_idx.ok_or_else(|| {
             anyhow::anyhow!("replace:true requires an exact window-bound text element")
@@ -2238,7 +2264,12 @@ fn cgevent_type_verified(
         }
         let element = ptr as AXUIElementRef;
         let selected = if web_delivery {
-            crate::input::keyboard::press_key(pid, "a", &["command"])?;
+            guarded_replacement_key(
+                exact_keys_window
+                    .is_some_and(|wid| crate::input::skylight::sibling_window_focused(pid, wid)),
+                || crate::input::skylight::sibling_focus_refusal(pid, wid, false),
+                || crate::input::keyboard::press_key(pid, "a", &["command"]),
+            )?;
             wait_for_full_selection(pid, wid, ptr, before)
         } else {
             // The element focus write above has already run, independently of
@@ -2300,9 +2331,15 @@ fn cgevent_type_verified(
         }
         if web_delivery {
             if text.is_empty() {
-                crate::input::keyboard::press_key(pid, "delete", &[])?;
+                guarded_replacement_key(
+                    exact_keys_window.is_some_and(|wid| {
+                        crate::input::skylight::sibling_window_focused(pid, wid)
+                    }),
+                    || crate::input::skylight::sibling_focus_refusal(pid, wid, false),
+                    || crate::input::keyboard::press_key(pid, "delete", &[]),
+                )?;
             } else {
-                crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
+                send_guarded_text(text)?;
             }
         } else {
             let (verified, delivered, document) = replace_ax_with(
@@ -2377,10 +2414,22 @@ fn cgevent_type_verified(
                     .or_else(|| text.strip_suffix('\n'))
                     .or_else(|| text.strip_suffix('\r'))
                     .unwrap_or(text);
-                crate::input::keyboard::type_text_with_delay(pid, body, delay_ms)?;
+                send_guarded_text(body)?;
+                if let Some(wid) = exact_keys_window {
+                    if crate::input::skylight::sibling_window_focused(pid, wid) {
+                        return Err(crate::input::keyboard::key_construction_error(
+                            crate::input::skylight::sibling_focus_refusal(
+                                pid,
+                                wid,
+                                !body.is_empty(),
+                            ),
+                            body.chars().count(),
+                        ));
+                    }
+                }
                 crate::input::keyboard::press_key(pid, "return", &[])?;
             } else {
-                crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
+                send_guarded_text(text)?;
             }
 
             Ok(())
@@ -2426,6 +2475,18 @@ fn cgevent_type_verified(
             false,
             crate::document_edit::DocumentEdited::NotADocument,
         ))
+    }
+}
+
+fn guarded_replacement_key(
+    blocked: bool,
+    refusal: impl FnOnce() -> anyhow::Error,
+    send: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    if blocked {
+        Err(refusal())
+    } else {
+        send()
     }
 }
 
@@ -3166,7 +3227,9 @@ fn type_text_in_key_window(
             ),
             None => Ok(()),
         };
-        let do_type = |element: Option<(usize, Option<usize>)>, focus_already_written: bool| {
+        let do_type = |element: Option<(usize, Option<usize>)>,
+                       focus_already_written: bool,
+                       exact_keys_window: Option<u32>| {
             ensure_enabled()?;
             cgevent_type_verified(
                 KeyReceiver {
@@ -3186,6 +3249,7 @@ fn type_text_in_key_window(
                     exact_focus: focused_key_route,
                     recheck_editability_after_settle: !late_fg_targeted,
                     focus_already_written,
+                    exact_keys_window,
                     prior: if window_id.is_some() {
                         cua_driver_core::mutation::PriorInput::MayHaveDelivered
                     } else {
@@ -3316,7 +3380,8 @@ fn type_text_in_key_window(
                         late_fg_cell_check(pid, Some(wid), late_fg_targeted)?;
                         // The remembered field is focused again; the read-back
                         // follows the focused element.
-                        typed_delivery = do_type(element_ptr_and_idx, remembered.is_some())?;
+                        typed_delivery =
+                            do_type(element_ptr_and_idx, remembered.is_some(), Some(wid))?;
                         Ok(())
                     });
                 unsafe {
@@ -3350,14 +3415,14 @@ fn type_text_in_key_window(
                     wid,
                     || {
                         late_fg_cell_check(pid, Some(wid), late_fg_targeted)?;
-                        typed_delivery = do_type(element_ptr_and_idx, false)?;
+                        typed_delivery = do_type(element_ptr_and_idx, false, Some(wid))?;
                         Ok(())
                     },
                 )?;
                 (typed_delivery, fronted)
             }
             // No window to front — best-effort background keystrokes instead.
-            None => (do_type(element_ptr_and_idx, false)?, false),
+            None => (do_type(element_ptr_and_idx, false, None)?, false),
         };
         // Only claim the `_fg` path when a front actually happened; when no
         // foregrounding occurred (no window, or SPIs unavailable) these were
@@ -3416,6 +3481,7 @@ fn type_text_in_key_window(
                 recheck_editability_after_settle: false,
                 prior,
                 focus_already_written: false,
+                exact_keys_window: None,
             },
         )?;
         return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
@@ -3732,6 +3798,7 @@ fn type_text_in_key_window(
             recheck_editability_after_settle: false,
             prior,
             focus_already_written: false,
+            exact_keys_window: None,
         },
     )?;
     Ok(TypeTextDelivery::Typed(TypeTextOutcome {
@@ -4400,6 +4467,20 @@ mod u32_outcome_tests {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn replacement_guard_refuses_before_selection_or_delete_key() {
+        let sends = std::cell::Cell::new(0);
+        let result = super::guarded_replacement_key(
+            true,
+            || anyhow::anyhow!("window focus unavailable"),
+            || {
+                sends.set(sends.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(sends.get(), 0);
+    }
+    #[test]
     fn a_request_naming_a_sheet_needs_the_sheet_as_key_window() {
         use super::key_window_matches;
         // Sheet 900 attached to window 700; its elements map to 700.
@@ -4435,6 +4516,18 @@ mod tests {
         let plain = super::text_delivery_failure("type_text failed", &anyhow::anyhow!("no source"));
         assert_eq!(plain.is_error, Some(true));
         assert!(plain.structured_content.is_none());
+    }
+
+    #[test]
+    fn key_construction_failure_after_posting_is_unverifiable() {
+        let error =
+            crate::input::keyboard::key_construction_error(anyhow::anyhow!("key construction"), 1);
+        let result = super::text_delivery_failure("type_text failed", &error);
+        assert_eq!(result.is_error, Some(true));
+        let data = result.structured_content.expect("structured failure");
+        assert_eq!(data["effect"], "unverifiable");
+        assert_eq!(data["retryable"], false);
+        assert_eq!(data["code"], "key_delivery_uncertain");
     }
 
     #[derive(Default)]

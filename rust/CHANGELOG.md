@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.58.2](https://github.com/trycua/cua/compare/cua-driver-rs-v0.58.1...cua-driver-rs-v0.58.2) (2026-11-22)
+
+
+### Bug Fixes
+
+* **cua-driver:** keep foreground type_text out of sibling windows ([#8515](https://github.com/trycua/cua/issues/8515)) ([3d43490](https://github.com/trycua/cua/commit/3d434907b732cfcbd6f70ad2fcdb9cc4e4b26bf0))
+* **cua-driver:** raise the agent cursor after an untargeted move that follows a click ([#8521](https://github.com/trycua/cua/issues/8521)) ([7a96d50](https://github.com/trycua/cua/commit/7a96d50efe6389c31747a03635faf4f4dfb5b1a8)), closes [#2993](https://github.com/trycua/cua/issues/2993)
+
+## [0.58.1](https://github.com/trycua/cua/compare/cua-driver-rs-v0.58.0...cua-driver-rs-v0.58.1) (2026-11-22)
+
+
+### Bug Fixes
+
+* **cua-driver:** keep the macOS agent cursor under a window covering its background target ([#8511](https://github.com/trycua/cua/issues/8511)) ([ff020d1](https://github.com/trycua/cua/commit/ff020d192b86e18ed9a90f963103a6a3a9a95bf3)), closes [#3332](https://github.com/trycua/cua/issues/3332)
+
+## [0.58.0](https://github.com/trycua/cua/compare/cua-driver-rs-v0.57.0...cua-driver-rs-v0.58.0) (2026-11-22)
+
+
+### Features
+
+* **cua-driver:** add agent_display, a session-owned virtual display on macOS ([#8146](https://github.com/trycua/cua/issues/8146)) ([f4b3a18](https://github.com/trycua/cua/commit/f4b3a18fcc062e406fb107fbeac8f016e59429f8))
+* **cua-driver:** approve macOS permission prompts over Screen Sharing with `permissions vnc` ([#8141](https://github.com/trycua/cua/issues/8141)) ([8fac005](https://github.com/trycua/cua/commit/8fac005bb14de0b8749af91e36e07d7457945bb5))
+
+
+### Bug Fixes
+
+* **cua-driver:** capture ext-listed Wayland windows by their toplevel ([#8144](https://github.com/trycua/cua/issues/8144)) ([4ca7c40](https://github.com/trycua/cua/commit/4ca7c405865b857ea92a8f9e6edc1ba60a4a0e0a))
+
+## [0.57.0](https://github.com/trycua/cua/compare/cua-driver-rs-v0.56.9...cua-driver-rs-v0.57.0) (2026-11-21)
+
+
+### Features
+
+* **cua-driver:** sample the Hyprland cursor during recording ([#8084](https://github.com/trycua/cua/issues/8084)) ([e7fbec3](https://github.com/trycua/cua/commit/e7fbec35bf6db7d8771a5b8bccc01516ee58f63f))
+
+
+### Bug Fixes
+
+* **cua-driver:** export EmbeddedDriverDiagnostics from the embedded subpath ([#8068](https://github.com/trycua/cua/issues/8068)) ([69b8f4e](https://github.com/trycua/cua/commit/69b8f4e9b943bdd185deba7963a53f01bea50263))
+* **cua-driver:** label macOS controls through AXTitleUIElement ([#8114](https://github.com/trycua/cua/issues/8114)) ([53430b5](https://github.com/trycua/cua/commit/53430b5b59e33eaeac4c6597d217702d8f39006a))
+* **cua-driver:** print get_guide text from the call command ([#8106](https://github.com/trycua/cua/issues/8106)) ([34217ee](https://github.com/trycua/cua/commit/34217eeb29e2b33215d44379906ad407cdf75430))
+
 ## [0.56.9](https://github.com/trycua/cua/compare/cua-driver-rs-v0.56.8...cua-driver-rs-v0.56.9) (2026-11-21)
 
 

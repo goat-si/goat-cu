@@ -437,8 +437,7 @@ fn def() -> &'static ToolDef {
             probe) and `source`: the TCC identity the booleans reflect, because macOS attributes grants to \
             the responsible process (a call from a terminal reports the terminal's). \
             `probe_direct_capture:false` with `prompt:true` requests only the two TCC grants. When a grant \
-            is off, ask the user; approve Cua Driver's own prompts only if the owner explicitly authorized \
-            it (MACOS.md).".into(),
+            is off, ask the user to approve the prompts.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

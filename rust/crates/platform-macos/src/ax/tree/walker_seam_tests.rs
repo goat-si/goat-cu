@@ -232,6 +232,19 @@ impl AxTreeSource for Fake {
         }
     }
     fn element_attribute(&self, e: &Handle, name: &str) -> Read<Handle> {
+        // Existing fixtures describe controls without a separate title element.
+        // A fixture that exercises this new lookup scripts it explicitly.
+        if name == "AXTitleUIElement"
+            && self
+                .state
+                .borrow()
+                .scripts
+                .front()
+                .map(|s| s.operation.as_str())
+                != Some(format!("element {} {name}", e.id).as_str())
+        {
+            return Read::Absent;
+        }
         match self.step(format!("element {} {name}", e.id)) {
             Reply::Element(Read::Known(id)) => Read::Known(self.handle(id)),
             Reply::Element(Read::Absent) => Read::Absent,
@@ -480,6 +493,88 @@ const CONTENT: &str =
 const FRAME: &str = "AXPosition,AXSize";
 const CONTROL: &str =
     "AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected";
+
+#[test]
+fn title_element_labels_the_addressable_control() {
+    let source = Fake::new(
+        &[(1, 1, 1, &[]), (2, 2, 2, &[])],
+        vec![
+            step("timeout 1", Reply::Unit),
+            step("text 1 AXRole", Reply::Text(Read::Known("AXButton".into()))),
+            step(
+                &format!("batch 1 {CONTENT}"),
+                Reply::Batch(Ok(content(None))),
+            ),
+            step("value 1", Reply::Value(Ok(None))),
+            step(
+                "actions 1",
+                Reply::Actions(Read::Known(vec!["AXPress".into()])),
+            ),
+            step("element 1 AXTitleUIElement", Reply::Element(Read::Known(2))),
+            step("optional_timeout 2 set", Reply::Unit),
+            step(
+                "text 2 AXValue",
+                Reply::Text(Read::Known("Launch at login".into())),
+            ),
+            step(
+                &format!("batch 1 {CONTROL}"),
+                Reply::Batch(Ok(control_batch())),
+            ),
+            step("snapshot 1", Reply::Unit),
+            step("children 1", Reply::Children(Read::Absent)),
+        ],
+    );
+    let root = source.handle(1);
+    let result = run_fake(&source, &root, None, 10, WalkBudget::nodes_only(100), true);
+    drop(root);
+    source.assert_consumed();
+    source.assert_lifetimes(&[(1, 1)]);
+    assert_eq!(result.nodes[0].title.as_deref(), Some("Launch at login"));
+    assert_eq!(result.nodes[0].element_index, Some(0));
+}
+
+#[test]
+fn unknown_title_element_marks_the_walk_incomplete() {
+    let source = Fake::new(
+        &[(1, 1, 1, &[])],
+        vec![
+            step("timeout 1", Reply::Unit),
+            step("text 1 AXRole", Reply::Text(Read::Known("AXButton".into()))),
+            step(
+                &format!("batch 1 {CONTENT}"),
+                Reply::Batch(Ok(content(None))),
+            ),
+            step("value 1", Reply::Value(Ok(None))),
+            step(
+                "actions 1",
+                Reply::Actions(Read::Known(vec!["AXPress".into()])),
+            ),
+            step(
+                "element 1 AXTitleUIElement",
+                Reply::Element(Read::Unknown(
+                    super::super::tree_source::ReadFailure::WrongType,
+                )),
+            ),
+            step(
+                &format!("batch 1 {CONTROL}"),
+                Reply::Batch(Ok(control_batch())),
+            ),
+            step("children 1", Reply::Children(Read::Absent)),
+        ],
+    );
+    let root = source.handle(1);
+    let result = run_fake(&source, &root, None, 10, WalkBudget::nodes_only(100), true);
+    drop(root);
+    source.assert_consumed();
+    assert!(
+        result.nodes_skipped,
+        "an unreadable label must not yield a complete walk"
+    );
+    assert!(
+        result.nodes.iter().all(|node| node.element_index.is_none()),
+        "an unreadable identity must not be published"
+    );
+}
 
 // Baseline 36279fdc: a collapsed layout wrapper preserves document order,
 // addressable controls, display text and native emission credits.

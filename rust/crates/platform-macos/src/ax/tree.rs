@@ -23,7 +23,8 @@ use super::dense_rows::{
 use super::launch::{is_still_launching, LaunchStep, LaunchWait};
 #[cfg(test)]
 use super::snapshot::RetainedElement;
-use super::tree_source::{AxTreeSource, Read};
+use super::tree_source::AxTreeSource;
+pub(crate) use super::tree_source::Read;
 use super::window_scope::{
     decide_window_scope, is_window_like_role, ScopeDecision, TopLevelCandidate, WindowScope,
 };
@@ -291,6 +292,57 @@ where
         read()
     } else {
         ControlState::default()
+    }
+}
+
+/// AXTitle, or, for a control with neither AXTitle nor AXDescription, the
+/// text of its AXTitleUIElement. A SwiftUI grouped `Form` names its toggles
+/// only through that separate label (#6697), and VoiceOver reads it the same
+/// way. Following it costs round trips only for unnamed controls.
+pub(crate) fn title_or_title_element(
+    title: Option<&str>,
+    description: Option<&str>,
+    title_element_text: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let named = |text: Option<&str>| text.is_some_and(|t| !t.trim().is_empty());
+    if named(title) || named(description) {
+        return title.map(str::to_owned);
+    }
+    title_element_text()
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+}
+
+/// The text of `element`'s AXTitleUIElement: its AXValue (a static text
+/// label), else its AXTitle.
+///
+/// # Safety
+///
+/// `element` must be a valid `AXUIElementRef`.
+pub(crate) unsafe fn copy_title_element_text(
+    element: AXUIElementRef,
+    timeout_seconds: f32,
+) -> Read<String> {
+    super::tree_source::native::with_borrowed(element, |source, element| {
+        read_title_element_text(source, element, timeout_seconds)
+    })
+}
+
+fn read_title_element_text<S: AxTreeSource>(
+    source: &S,
+    element: &S::Element,
+    timeout_seconds: f32,
+) -> Read<String> {
+    let label = match source.element_attribute(element, "AXTitleUIElement") {
+        Read::Known(label) => label,
+        Read::Absent => return Read::Absent,
+        Read::Unknown(error) => return Read::Unknown(error),
+    };
+    source.set_optional_timeout(&label, timeout_seconds);
+    match source.text(&label, "AXValue") {
+        Read::Known(value) if !value.trim().is_empty() => Read::Known(value),
+        Read::Unknown(error) => Read::Unknown(error),
+        _ => source.text(&label, "AXTitle"),
     }
 }
 
@@ -2955,6 +3007,23 @@ fn walk_element<S: AxTreeSource>(
         )
         .unwrap_or_default()
     });
+    let title_lookup_failed = std::cell::Cell::new(false);
+    let title = title_or_title_element(title.as_deref(), description.as_deref(), || {
+        if budget.expired() {
+            title_lookup_failed.set(true);
+            note_skipped();
+            return None;
+        }
+        match read_title_element_text(source, element, AX_MESSAGING_TIMEOUT_SECONDS) {
+            Read::Known(value) => Some(value),
+            Read::Absent => None,
+            Read::Unknown(_) => {
+                title_lookup_failed.set(true);
+                note_skipped();
+                None
+            }
+        }
+    });
     let visible_title = title.as_deref().unwrap_or("").trim().to_owned();
     let visible_description = description.as_deref().unwrap_or("").trim().to_owned();
     let visible_value = value.as_deref().unwrap_or("").trim().to_owned();
@@ -3058,12 +3127,13 @@ fn walk_element<S: AxTreeSource>(
         None
     };
     let enabled = control.as_ref().and_then(|control| control.enabled);
-    let is_actionable = is_addressable(
-        &role,
-        !actions.is_empty() || actionless_control,
-        value_settable,
-        enabled,
-    );
+    let is_actionable = !title_lookup_failed.get()
+        && is_addressable(
+            &role,
+            !actions.is_empty() || actionless_control,
+            value_settable,
+            enabled,
+        );
 
     if !keeps_row(&role, is_actionable, has_content, help.is_some()) {
         if exhaustive_nodes() {
@@ -4989,6 +5059,34 @@ mod tests {
             ..ControlState::default()
         });
         assert_eq!(disabled.enabled, Some(false));
+    }
+
+    #[test]
+    fn an_unnamed_control_takes_its_title_element_text() {
+        let label = || Some(" Launch at login ".to_owned());
+        assert_eq!(
+            title_or_title_element(None, None, label).as_deref(),
+            Some("Launch at login")
+        );
+        assert_eq!(
+            title_or_title_element(Some(" "), Some(""), label).as_deref(),
+            Some("Launch at login")
+        );
+        assert_eq!(title_or_title_element(None, None, || None), None);
+        assert_eq!(
+            title_or_title_element(None, None, || Some("  ".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn a_named_control_never_reads_its_title_element() {
+        let unread = || -> Option<String> { panic!("AXTitleUIElement read for a named control") };
+        assert_eq!(
+            title_or_title_element(Some("Save"), None, unread).as_deref(),
+            Some("Save")
+        );
+        assert_eq!(title_or_title_element(None, Some("2"), unread), None);
     }
 
     #[test]

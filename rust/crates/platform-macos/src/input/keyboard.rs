@@ -700,6 +700,122 @@ pub fn type_text_with_delay(pid: i32, text: &str, inter_char_delay_ms: u64) -> a
     )
 }
 
+/// [`type_text_with_delay`] that asks `may_send` before every key press (each
+/// batched chunk, or each paced character) and stops at the first `false`.
+/// Returns how many characters were sent.
+#[derive(Debug, thiserror::Error)]
+#[error("some text may have been sent; read the field before retrying: {source}")]
+pub struct KeyDeliveryUncertain {
+    source: anyhow::Error,
+}
+
+pub(crate) fn key_construction_error(error: anyhow::Error, posted: usize) -> anyhow::Error {
+    if posted == 0 {
+        error
+    } else {
+        KeyDeliveryUncertain { source: error }.into()
+    }
+}
+
+pub fn type_text_while(
+    pid: i32,
+    text: &str,
+    inter_char_delay_ms: u64,
+    mut may_send: impl FnMut() -> bool,
+) -> anyhow::Result<usize> {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
+    let mut sent = 0;
+    if inter_char_delay_ms == 0 {
+        for chunk in plan_chunks(text) {
+            if !may_send() {
+                return Ok(sent);
+            }
+            let (down, up, chars) = match chunk {
+                TypingChunk::Text(run) => {
+                    let (down, up) = key_events(&source, 0, Some(run))
+                        .map_err(|error| key_construction_error(error, sent))?;
+                    (down, up, run.chars().count())
+                }
+                TypingChunk::Control(ch) => {
+                    let (down, up) = char_key_events(&source, ch)
+                        .map_err(|error| key_construction_error(error, sent))?;
+                    (down, up, 1)
+                }
+            };
+            post_keyboard_event(pid, &down);
+            key_gap_sleep();
+            post_keyboard_event(pid, &up);
+            key_gap_sleep();
+            sent += chars;
+        }
+        return Ok(sent);
+    }
+
+    let guard = std::cell::RefCell::new(may_send);
+    let posted = std::cell::Cell::new(0usize);
+    let stopped = || {
+        anyhow::Error::new(DesktopSequenceAbort {
+            posted: posted.get(),
+            reason: "the focused window changed during foreground typing".into(),
+        })
+    };
+    let result = deliver_text_runs(
+        text,
+        || !text_target_may_be_secret(Some(pid)),
+        |run| {
+            if !guard.borrow_mut()() {
+                return Err(stopped());
+            }
+            paste_text_preserving_clipboard(run, || {
+                if !guard.borrow_mut()() {
+                    return Err(anyhow::Error::new(PasteSequenceAbort {
+                        posted: posted.get(),
+                        reason: "the focused window changed before the paste".into(),
+                        clipboard_restored: PasteRestoration::Unknown,
+                    }));
+                }
+                hotkey(pid, "v", &["cmd"])
+            })?;
+            posted.set(posted.get() + run.chars().count());
+            Ok(())
+        },
+        |run| {
+            for ch in run.chars() {
+                if !guard.borrow_mut()() {
+                    return Err(stopped());
+                }
+                let (down, up) = char_key_events(&source, ch)
+                    .map_err(|error| key_construction_error(error, posted.get()))?;
+                post_keyboard_event(pid, &down);
+                key_gap_sleep();
+                post_keyboard_event(pid, &up);
+                posted.set(posted.get() + 1);
+                std::thread::sleep(std::time::Duration::from_millis(inter_char_delay_ms));
+            }
+            Ok(())
+        },
+        |ch| {
+            if !guard.borrow_mut()() {
+                return Err(stopped());
+            }
+            let (down, up) = char_key_events(&source, ch)
+                .map_err(|error| key_construction_error(error, posted.get()))?;
+            post_keyboard_event(pid, &down);
+            key_gap_sleep();
+            post_keyboard_event(pid, &up);
+            key_gap_sleep();
+            posted.set(posted.get() + 1);
+            Ok(())
+        },
+    );
+    match result {
+        Ok(()) => Ok(posted.get()),
+        Err(error) if error.downcast_ref::<DesktopSequenceAbort>().is_some() => Ok(posted.get()),
+        Err(error) => Err(error),
+    }
+}
+
 /// Send a key combination (hotkey) to `pid`.
 pub fn hotkey(pid: i32, key: &str, modifiers: &[&str]) -> anyhow::Result<()> {
     press_key(pid, key, modifiers)
@@ -2072,6 +2188,20 @@ fn unknown_key_message(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn key_construction_failure_after_posting_warns_against_retry() {
+        let error = super::key_construction_error(anyhow::anyhow!("construction failed"), 1);
+        assert!(error
+            .downcast_ref::<super::KeyDeliveryUncertain>()
+            .is_some());
+        let message = error.to_string();
+        assert!(message.contains("may have"), "{message}");
+        assert!(message.contains("before retry"), "{message}");
+        let before = super::key_construction_error(anyhow::anyhow!("construction failed"), 0);
+        assert!(before
+            .downcast_ref::<super::KeyDeliveryUncertain>()
+            .is_none());
+    }
     use super::*;
 
     #[test]
