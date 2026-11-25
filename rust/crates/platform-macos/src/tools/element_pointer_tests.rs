@@ -818,11 +818,21 @@ fn a_coordinate_click_reports_target_clicks_and_the_primer_separately() {
 
 // ── Through the click tool ────────────────────────────────────────────────
 
-fn tool_with_token(pid: i32) -> (super::super::click::ClickTool, String, Arc<ToolState>) {
+fn tool_with_token(
+    pid: i32,
+    sheet: bool,
+) -> (
+    super::super::click::ClickTool,
+    String,
+    Arc<ToolState>,
+    Option<super::super::click::sheet_test_evidence::Registered>,
+) {
     let state = Arc::new(ToolState::new(false, false, None));
     // A real AX element (of an app that does not exist), owned by the
     // snapshot; the registered fake answers for it.
     let element = unsafe { crate::ax::bindings::AXUIElementCreateApplication(pid) } as usize;
+    let sheet =
+        sheet.then(|| super::super::click::sheet_test_evidence::register(element, Some(false)));
     crate::ax::snapshot::ObservedIdentity::register_test_element(element);
     let snapshot = state.snapshots.publish(
         pid,
@@ -840,6 +850,7 @@ fn tool_with_token(pid: i32) -> (super::super::click::ClickTool, String, Arc<Too
         super::super::click::ClickTool::new(state.clone()),
         token,
         state,
+        sheet,
     )
 }
 
@@ -851,7 +862,7 @@ async fn b4_review_simulate_refuses_a_different_hit_before_dispatch() {
     fake.hit = Hit::Elsewhere("overlay".into());
     let fake = Arc::new(fake);
     let _registered = test_targets::register(pid, fake.clone());
-    let (tool, token, _) = tool_with_token(pid);
+    let (tool, token, _, _sheet) = tool_with_token(pid, true);
     let result = tool
         .invoke(json!({"pid":pid,"element_token":token,"simulate":true}))
         .await;
@@ -898,7 +909,7 @@ async fn an_element_count_two_takes_the_checked_pointer_route() {
     let pid = 1_000_101;
     let fake = Arc::new(Fake::new(pid));
     let _registered = test_targets::register(pid, fake.clone());
-    let (tool, token, _state) = tool_with_token(pid);
+    let (tool, token, _state, _sheet) = tool_with_token(pid, true);
     let result = tool
         .invoke(json!({ "pid": pid, "element_token": token, "count": 2 }))
         .await;
@@ -930,7 +941,7 @@ async fn an_element_axopen_double_click_skips_the_pointer_prologue() {
     fake.lists_ax_open = true;
     let fake = Arc::new(fake);
     let _registered = test_targets::register(pid, fake.clone());
-    let (tool, token, _state) = tool_with_token(pid);
+    let (tool, token, _state, _sheet) = tool_with_token(pid, true);
     let result = tool
         .invoke(json!({ "pid": pid, "element_token": token, "count": 2 }))
         .await;
@@ -950,7 +961,7 @@ async fn a_point_off_the_element_is_refused_before_the_prologue() {
     fake.hit = Hit::Elsewhere("AXRow in another window".into());
     let fake = Arc::new(fake);
     let _registered = test_targets::register(pid, fake.clone());
-    let (tool, token, _state) = tool_with_token(pid);
+    let (tool, token, _state, _sheet) = tool_with_token(pid, true);
     let result = tool
         .invoke(json!({ "pid": pid, "element_token": token, "count": 2 }))
         .await;
@@ -973,7 +984,7 @@ async fn a_point_that_fails_after_activation_is_unverifiable() {
     fake.hit_later = Some(Hit::Elsewhere("a sheet".into()));
     let fake = Arc::new(fake);
     let _registered = test_targets::register(pid, fake.clone());
-    let (tool, token, _state) = tool_with_token(pid);
+    let (tool, token, _state, _sheet) = tool_with_token(pid, true);
     let result = tool
         .invoke(json!({ "pid": pid, "element_token": token, "count": 2 }))
         .await;
@@ -1276,7 +1287,7 @@ async fn an_unconfirmed_background_activation_is_reported_as_uncertain() {
     fake.hit_later = Some(Hit::Elsewhere("a sheet".into()));
     let fake = Arc::new(fake);
     let _registered = test_targets::register(pid, fake.clone());
-    let (tool, token, _state) = tool_with_token(pid);
+    let (tool, token, _state, _sheet) = tool_with_token(pid, true);
     let result = tool
         .invoke(json!({ "pid": pid, "element_token": token, "count": 2 }))
         .await;
@@ -1342,7 +1353,7 @@ async fn a_refused_pointer_prologue_sends_nothing() {
     fake.prologue_refuses = true;
     let fake = Arc::new(fake);
     let _registered = test_targets::register(pid, fake.clone());
-    let (tool, token, _state) = tool_with_token(pid);
+    let (tool, token, _state, _sheet) = tool_with_token(pid, true);
     let result = tool
         .invoke(json!({ "pid": pid, "element_token": token, "count": 2 }))
         .await;
@@ -1365,7 +1376,7 @@ async fn an_element_count_one_keeps_the_existing_route() {
     let pid = 1_000_102;
     let fake = Arc::new(Fake::new(pid));
     let _registered = test_targets::register(pid, fake.clone());
-    let (tool, token, _state) = tool_with_token(pid);
+    let (tool, token, _state, _sheet) = tool_with_token(pid, false);
     let result = tool
         .invoke(json!({ "pid": pid, "element_token": token, "count": 1 }))
         .await;
@@ -1381,7 +1392,7 @@ async fn a_bad_count_is_refused_before_anything_is_sent() {
     let pid = 1_000_103;
     let fake = Arc::new(Fake::new(pid));
     let _registered = test_targets::register(pid, fake.clone());
-    let (tool, token, _state) = tool_with_token(pid);
+    let (tool, token, _state, _sheet) = tool_with_token(pid, false);
     for bad in [
         json!(0),
         json!(-1),
@@ -1412,7 +1423,7 @@ async fn an_element_multi_click_needs_a_plain_left_press() {
     let pid = 1_000_104;
     let fake = Arc::new(Fake::new(pid));
     let _registered = test_targets::register(pid, fake.clone());
-    let (tool, token, _state) = tool_with_token(pid);
+    let (tool, token, _state, _sheet) = tool_with_token(pid, true);
     for extra in [
         json!({ "button": "right" }),
         json!({ "button": "middle" }),
@@ -1457,7 +1468,7 @@ async fn cancelling_an_element_multi_click_keeps_the_lease_until_input_finishes(
     let (release_tx, release_rx) = mpsc::channel();
     *fake.block.lock().unwrap() = Some((entered_tx, release_rx));
     let _registered = test_targets::register(pid, fake.clone());
-    let (tool, token, state) = tool_with_token(pid);
+    let (tool, token, state, _sheet) = tool_with_token(pid, true);
     let call = tokio::spawn(async move {
         tool.invoke(json!({
             "pid": pid,

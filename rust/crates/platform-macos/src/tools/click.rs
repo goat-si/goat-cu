@@ -101,8 +101,40 @@ impl std::fmt::Display for SheetBlockedTarget {
 impl std::error::Error for SheetBlockedTarget {}
 
 fn ensure_sheet_target(element: &crate::ax::snapshot::RetainedElement) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if let Some(blocked) = sheet_test_evidence::get(element.as_ptr()) {
+        return dispatch_with_sheet_evidence(blocked, || Ok(()));
+    }
     // SAFETY: a RetainedElement holds a +1 reference on a live element.
     unsafe { ensure_sheet_clear(element.as_ptr() as AXUIElementRef) }
+}
+
+#[cfg(test)]
+pub(super) mod sheet_test_evidence {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    fn entries() -> &'static Mutex<HashMap<usize, Option<bool>>> {
+        static ENTRIES: OnceLock<Mutex<HashMap<usize, Option<bool>>>> = OnceLock::new();
+        ENTRIES.get_or_init(Default::default)
+    }
+
+    pub(super) fn get(element: usize) -> Option<Option<bool>> {
+        entries().lock().unwrap().get(&element).copied()
+    }
+
+    pub(in crate::tools) struct Registered(usize);
+
+    pub(in crate::tools) fn register(element: usize, blocked: Option<bool>) -> Registered {
+        assert!(entries().lock().unwrap().insert(element, blocked).is_none());
+        Registered(element)
+    }
+
+    impl Drop for Registered {
+        fn drop(&mut self) {
+            entries().lock().unwrap().remove(&self.0);
+        }
+    }
 }
 
 /// # Safety
