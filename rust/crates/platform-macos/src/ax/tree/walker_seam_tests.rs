@@ -598,6 +598,7 @@ fn named_group_is_visible_without_consuming_walk_depth_or_an_index() {
                 Reply::Batch(Ok(content(Some("Billing")))),
             ),
             step("value 1", Reply::Value(Ok(None))),
+            step("actions 1", Reply::Actions(Read::Known(vec![]))),
             step("children 1", Reply::Children(Read::Known(vec![2]))),
             step("timeout 2", Reply::Unit),
             step("text 2 AXRole", Reply::Text(Read::Known("AXButton".into()))),

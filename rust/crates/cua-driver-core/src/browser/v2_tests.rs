@@ -53,6 +53,8 @@ mod secret_fill_tests;
 /// navigations, frame removal, and capability regression.
 #[derive(Debug)]
 pub(super) struct FixtureState {
+    geometry_inexact: bool,
+    multiple_native_windows: bool,
     pub(super) endpoint_responses:
         std::collections::VecDeque<Result<Option<OwnedEndpoint>, BrowserRefusal>>,
     pub(super) endpoint_discovery_count: usize,
@@ -128,6 +130,10 @@ pub(super) struct FixtureState {
     /// Extra page targets living in the bound window, after T1 in the
     /// browser's `Target.getTargets` order.
     sibling_tabs: Vec<Value>,
+    /// Fail the read-only prepare probe without closing the WebSocket.
+    fail_get_targets: bool,
+    silent_get_targets: bool,
+    probe_reply_ready: Option<Arc<tokio::sync::Notify>>,
     /// Drop the primary tab target T1 from `Target.getTargets`.
     omit_primary_target: bool,
     /// Make `Browser.getWindowForTarget` for T1 answer this CDP error.
@@ -194,6 +200,8 @@ pub(super) struct FillPage {
 impl Default for FixtureState {
     fn default() -> Self {
         Self {
+            geometry_inexact: false,
+            multiple_native_windows: false,
             endpoint_responses: Default::default(),
             endpoint_discovery_count: 0,
             oopif_supported: true,
@@ -203,6 +211,9 @@ impl Default for FixtureState {
             windowless_targets: Vec::new(),
             sibling_tabs: Vec::new(),
             omit_primary_target: false,
+            fail_get_targets: false,
+            silent_get_targets: false,
+            probe_reply_ready: None,
             primary_window_error: None,
             dialog_open: false,
             page_enable_hangs: false,
@@ -596,6 +607,16 @@ fn fixture_handler(state: SharedState) -> MockHandler {
         }
         match call.method.as_str() {
             "Target.getTargets" => {
+                if st.silent_get_targets {
+                    return MockReply::hang();
+                }
+                if st.fail_get_targets {
+                    let reply = MockReply::method_not_found("Target.getTargets");
+                    return match &st.probe_reply_ready {
+                        Some(ready) => reply.after_notification(ready.clone()),
+                        None => reply,
+                    };
+                }
                 let mut infos: Vec<Value> = Vec::new();
                 if !st.omit_primary_target {
                     infos.push(json!({
@@ -1213,6 +1234,9 @@ struct FixturePlatform {
 /// and which restores core asked for.
 #[derive(Default)]
 struct FixtureFocus {
+    accept_consent: bool,
+    consent_response_ready: Option<Arc<tokio::sync::Notify>>,
+    consent_attempts: StdMutex<Vec<u8>>,
     attach_activates_browser: bool,
     frontmost: StdMutex<Option<i64>>,
     restores: StdMutex<Vec<(i64, i64)>>,
@@ -1288,7 +1312,10 @@ impl BrowserPlatform for FixturePlatform {
             window_id,
             title: "Fixture - Chrome".into(),
             bounds: Rect::new(0.0, 0.0, 800.0, 600.0),
-            geometry_exact: true,
+            geometry_exact: !self
+                .endpoint_state
+                .as_ref()
+                .is_some_and(|state| state.lock().unwrap().geometry_inexact),
             ownership: NativeOwnershipProof {
                 method: NativeOwnershipMethod::WindowServerOwner,
                 owner_pid: pid,
@@ -1302,7 +1329,9 @@ impl BrowserPlatform for FixturePlatform {
         _pid: i64,
         _window_id: u64,
     ) -> Result<Option<bool>, BrowserRefusal> {
-        Ok(Some(true))
+        Ok(Some(!self.endpoint_state.as_ref().is_some_and(|state| {
+            state.lock().unwrap().multiple_native_windows
+        })))
     }
 
     async fn discover_owned_endpoint(
@@ -1412,8 +1441,21 @@ impl BrowserPlatform for FixturePlatform {
 
     async fn handle_existing_profile_consent(
         &self,
-        _request: BrowserConsentRequest,
+        request: BrowserConsentRequest,
     ) -> Result<BrowserConsentOutcome, BrowserRefusal> {
+        if self.focus.accept_consent {
+            request.action.perform(|| {
+                self.focus
+                    .consent_attempts
+                    .lock()
+                    .unwrap()
+                    .push(request.attempt)
+            });
+            if let Some(ready) = &self.focus.consent_response_ready {
+                ready.notify_one();
+            }
+            return Ok(BrowserConsentOutcome::Accepted);
+        }
         if self.stall_consent {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             return Ok(BrowserConsentOutcome::NotPresent);
@@ -1518,6 +1560,13 @@ impl crate::consent::ProtectedConsentProvider for FixtureProtectedProvider {
 }
 
 async fn protected_existing_profile_fixture() -> (Fixture, Arc<FixtureProtectedProvider>) {
+    protected_existing_profile_fixture_with_consent(Default::default(), false).await
+}
+
+async fn protected_existing_profile_fixture_with_consent(
+    focus: Arc<FixtureFocus>,
+    stall_consent: bool,
+) -> (Fixture, Arc<FixtureProtectedProvider>) {
     let state = Arc::new(StdMutex::new(FixtureState::default()));
     let server = MockCdpServer::start(fixture_handler(state.clone())).await;
     let setup_invoked = Arc::new(AtomicBool::new(false));
@@ -1535,8 +1584,8 @@ async fn protected_existing_profile_fixture() -> (Fixture, Arc<FixtureProtectedP
             existing_endpoint_visible: Arc::new(AtomicBool::new(true)),
             setup_invoked: setup_invoked.clone(),
             setup_aborted: Arc::new(AtomicBool::new(false)),
-            stall_consent: false,
-            focus: Default::default(),
+            stall_consent,
+            focus,
         }),
         Some(provider.clone()),
     );
@@ -1605,6 +1654,7 @@ async fn attach_fixture_with_space(
         restores: StdMutex::new(Vec::new()),
         browser_off_space,
         guards: StdMutex::new(Vec::new()),
+        ..Default::default()
     });
     let provider = Arc::new(FixtureProtectedProvider {
         consent_seen: AtomicBool::new(false),
@@ -1754,6 +1804,229 @@ async fn approved_existing_profile_attach_claims_then_binds_one_generation() {
         .await;
     assert_eq!(structured(&state)["status"], "ok", "{}", structured(&state));
     crate::session::fire_session_end("transport-v2-attach");
+}
+
+#[tokio::test]
+async fn failed_prepare_probe_releases_only_the_preparing_session() {
+    for with_peer in [false, true] {
+        let (f, _) = protected_existing_profile_fixture().await;
+        let prepare = |session: &'static str| {
+            let engine = f.engine.clone();
+            async move {
+                let result = BrowserPrepareTool::new(engine)
+                    .invoke(json!({
+                        "origin_scope": ["https://fixture.test"],
+                        "pid": 1,
+                        "window_id": 7,
+                        "session": session,
+                        "_transport_session_id": session,
+                        "strategy": { "kind": "existing_profile" }
+                    }))
+                    .await;
+                structured(&result).clone()
+            }
+        };
+        if with_peer {
+            let peer = prepare("prepare-probe-peer").await;
+            assert_eq!(peer["status"], "ok", "{peer}");
+        }
+        f.state.lock().unwrap().fail_get_targets = true;
+        let result = prepare("prepare-probe-failure").await;
+        assert_eq!(result["status"], "refused", "{result}");
+        assert_eq!(result["refusal"]["code"], "browser_reconnect_exhausted");
+        assert_eq!(result["refusal"]["detail"]["retried_after_consent"], false);
+        assert_eq!(f._server.accepted_connections(), 1);
+        assert!(f
+            .engine
+            .existing_profile_grant("prepare-probe-failure", Some("prepare-probe-failure"), 1)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            f.engine
+                .pool
+                .shared_socket_holders(&f._server.ws_url())
+                .await,
+            with_peer.then_some(1),
+            "failure must release this holder without evicting a peer"
+        );
+
+        f.state.lock().unwrap().fail_get_targets = false;
+        let result = prepare("prepare-probe-recovery").await;
+        assert_eq!(result["status"], "ok", "{result}");
+        assert_eq!(
+            f._server.accepted_connections(),
+            if with_peer { 1 } else { 2 }
+        );
+        if with_peer {
+            let state = GetBrowserStateTool::new(f.engine.clone())
+                .invoke(json!({
+                    "origin_scope": ["https://fixture.test"],
+                    "pid": 1, "window_id": 7,
+                    "session": "prepare-probe-peer",
+                    "_transport_session_id": "prepare-probe-peer"
+                }))
+                .await;
+            assert_eq!(structured(&state)["status"], "ok", "{}", structured(&state));
+            crate::session::fire_session_end("prepare-probe-peer");
+        }
+        crate::session::fire_session_end("prepare-probe-recovery");
+    }
+}
+
+#[tokio::test]
+async fn silent_prepare_socket_is_refused_and_released() {
+    let (f, _) = protected_existing_profile_fixture().await;
+    f.state.lock().unwrap().silent_get_targets = true;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        BrowserPrepareTool::new(f.engine.clone()).invoke(json!({
+            "origin_scope": ["https://fixture.test"],
+            "pid": 1, "window_id": 7, "session": "prepare-silent",
+            "_transport_session_id": "prepare-silent",
+            "strategy": { "kind": "existing_profile" }
+        })),
+    )
+    .await
+    .expect("unavailable consent must settle without waiting for the CDP timeout");
+    let result = structured(&result);
+    assert_eq!(result["status"], "refused", "{result}");
+    assert_eq!(result["refusal"]["code"], "browser_route_unavailable");
+    assert!(f
+        .state
+        .lock()
+        .unwrap()
+        .calls
+        .iter()
+        .any(|(_, method, _)| method == "Target.getTargets"));
+    assert_eq!(
+        f.engine
+            .pool
+            .shared_socket_holders(&f._server.ws_url())
+            .await,
+        None
+    );
+    assert!(f
+        .engine
+        .existing_profile_grant("prepare-silent", Some("prepare-silent"), 1)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn cancelled_prepare_probe_releases_only_its_socket_hold() {
+    for with_peer in [false, true] {
+        let (f, _) =
+            protected_existing_profile_fixture_with_consent(Default::default(), true).await;
+        let url = f._server.ws_url();
+        let peer = if with_peer {
+            Some(f.engine.pool.claim_existing(&url, u64::MAX).await.unwrap())
+        } else {
+            None
+        };
+        f.state.lock().unwrap().silent_get_targets = true;
+        let engine = f.engine.clone();
+        let pending = tokio::spawn(async move {
+            BrowserPrepareTool::new(engine)
+                .invoke(json!({
+                    "pid": 1, "window_id": 7, "session": "prepare-cancelled-probe",
+                    "_transport_session_id": "prepare-cancelled-probe",
+                    "strategy": { "kind": "existing_profile" }
+                }))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                assert!(!pending.is_finished(), "prepare must wait for a CDP reply");
+                if f.state
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .iter()
+                    .any(|(_, method, _)| method == "Target.getTargets")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the loopback server must observe the pending probe");
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while f.engine.pool.shared_socket_holders(&url).await != with_peer.then_some(1) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelling a pending probe must release its holder");
+        if let Some(peer) = peer {
+            let retained = f.engine.pool.get_existing(&url, u64::MAX).await.unwrap();
+            assert!(Arc::ptr_eq(&peer, &retained));
+            assert!(!retained.is_closed());
+            f.state.lock().unwrap().silent_get_targets = false;
+            retained
+                .call(None, "Target.getTargets", json!({}))
+                .await
+                .unwrap();
+            f.engine
+                .pool
+                .release_existing(&url, u64::MAX, super::cdp_ws::SharedSocketRelease::Close)
+                .await;
+        }
+        crate::session::fire_session_end("prepare-cancelled-probe");
+    }
+}
+
+#[tokio::test]
+async fn accepted_consent_retry_also_requires_a_successful_prepare_probe() {
+    let ready = Arc::new(tokio::sync::Notify::new());
+    let focus = Arc::new(FixtureFocus {
+        accept_consent: true,
+        consent_response_ready: Some(ready.clone()),
+        ..Default::default()
+    });
+    let (f, _) = protected_existing_profile_fixture_with_consent(focus.clone(), false).await;
+    {
+        let mut state = f.state.lock().unwrap();
+        state.fail_get_targets = true;
+        // Each probe can reply only after its consent action is observed.
+        // Both WebSocket handshakes themselves succeed.
+        state.probe_reply_ready = Some(ready);
+    }
+    let result = BrowserPrepareTool::new(f.engine.clone())
+        .invoke(json!({
+            "pid": 1, "window_id": 7, "session": "prepare-probe-retry",
+            "_transport_session_id": "prepare-probe-retry",
+            "strategy": { "kind": "existing_profile" }
+        }))
+        .await;
+    let result = structured(&result);
+    assert_eq!(result["status"], "refused", "{result}");
+    assert_eq!(result["refusal"]["code"], "browser_reconnect_exhausted");
+    assert_eq!(result["refusal"]["detail"]["retried_after_consent"], true);
+    assert_eq!(result["refusal"]["detail"]["fresh_claim_failed"], true);
+    assert_eq!(
+        result["refusal"]["detail"]["displayed_consent_prompt"],
+        true
+    );
+    assert_eq!(*focus.consent_attempts.lock().unwrap(), vec![1, 2]);
+    assert_eq!(f._server.accepted_connections(), 2);
+    assert_eq!(
+        f.engine
+            .pool
+            .shared_socket_holders(&f._server.ws_url())
+            .await,
+        None
+    );
+    assert!(f
+        .engine
+        .existing_profile_grant("prepare-probe-retry", Some("prepare-probe-retry"), 1)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -3386,6 +3659,35 @@ async fn owned_endpoint_transitions_refuse_before_dispatch() {
 }
 
 // ── Mutation routing + frame identity revalidation ──────────────────────────
+
+#[tokio::test]
+async fn inexact_geometry_cannot_revalidate_a_multiple_window_binding() {
+    let f = fixture().await;
+    let (target, tab) = bind(&f).await;
+    let snap = snapshot(&f, &target, &tab).await;
+    let main_ref = ref_of(&snap, "main", "main-btn");
+    {
+        let mut state = f.state.lock().unwrap();
+        state.geometry_inexact = true;
+        state.multiple_native_windows = true;
+    }
+    let args = json!({"target_id": target, "tab_id": tab, "session": SESSION, "x": 10, "y": 20});
+    let result = browser_protected_resource_scope(&f.engine, &args, "browser_click").await;
+    assert_eq!(
+        result.unwrap_err().code,
+        Some("browser_wrong_target_refused")
+    );
+    let click = BrowserClickTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target, "tab_id": tab, "ref": main_ref, "session": SESSION,
+        }))
+        .await;
+    assert_eq!(
+        structured(&click)["refusal"]["code"],
+        "browser_wrong_target_refused"
+    );
+    assert!(recorded_calls(&f, "Input.dispatchMouseEvent").is_empty());
+}
 
 #[tokio::test]
 async fn protected_browser_scope_reproves_live_origin_and_omits_sensitive_url_text() {

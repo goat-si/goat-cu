@@ -41,6 +41,7 @@ use crate::ax::bindings::{
     copy_string_attr, focused_element_of_pid, kAXErrorSuccess, set_string_attr, AXUIElementRef,
 };
 use crate::focus_guard;
+use crate::input::keyboard::KeyForwarder;
 use crate::window_change_detector::WindowChangeDetector;
 use core_foundation::base::CFRelease;
 use cua_driver_core::background_input::BackgroundRefusal;
@@ -108,26 +109,39 @@ fn def() -> &'static ToolDef {
     })
 }
 
-fn screen_sharing_delivery_error(
-    is_screen_sharing: bool,
+fn key_forwarder_delivery_error(
+    forwarder: Option<KeyForwarder>,
     foreground: bool,
     window_id: Option<u32>,
 ) -> Option<ToolResult> {
-    if !is_screen_sharing || (foreground && window_id.is_some()) {
+    let forwarder = forwarder?;
+    if foreground && window_id.is_some() {
         return None;
     }
-    Some(
-        ToolResult::error(
+    let (message, code, reason) = match forwarder {
+        KeyForwarder::ScreenSharing => (
             "Screen Sharing text input requires delivery_mode:\"foreground\" and window_id \
              so Cua Driver can deliver physical HID key transitions safely.",
-        )
-        .with_structured(serde_json::json!({
-            "code": "SCREEN_SHARING_REQUIRES_FOREGROUND_HID",
+            "SCREEN_SHARING_REQUIRES_FOREGROUND_HID",
+            "Screen Sharing forwards physical keycodes; background PID-routed \
+             Unicode events can corrupt guest text.",
+        ),
+        KeyForwarder::IosSimulator => (
+            "iOS Simulator text input requires delivery_mode:\"foreground\" and window_id \
+             so Cua Driver can deliver physical HID key transitions safely. In the \
+             background, use set_value on the field's element_token, or press_key.",
+            "IOS_SIMULATOR_REQUIRES_FOREGROUND_HID",
+            "The iOS Simulator forwards physical keycodes; background PID-routed \
+             Unicode events arrive as the A key.",
+        ),
+    };
+    Some(
+        ToolResult::error(message).with_structured(serde_json::json!({
+            "code": code,
             "effect": "refused",
             "escalation": {
                 "recommended": "foreground",
-                "reason": "Screen Sharing forwards physical keycodes; background PID-routed \
-                           Unicode events can corrupt guest text.",
+                "reason": reason,
                 "requires": ["window_id"]
             }
         })),
@@ -372,8 +386,8 @@ impl Tool for TypeTextTool {
                 "type_text replace:true is not supported for Screen Sharing because whole-field replacement cannot be verified.",
             );
         }
-        if let Some(error) = screen_sharing_delivery_error(
-            crate::input::keyboard::is_screen_sharing_pid(pid),
+        if let Some(error) = key_forwarder_delivery_error(
+            crate::input::keyboard::key_forwarder_for_pid(pid),
             delivery_mode.is_foreground(),
             window_id,
         ) {
@@ -1369,6 +1383,11 @@ fn withheld_ax_insert_outcome(
     }
 }
 
+fn reported(outcome: (bool, Option<usize>), count_untrusted: bool) -> (bool, Option<usize>) {
+    let (verified, delivered) = outcome;
+    (verified, delivered.filter(|_| verified || !count_untrusted))
+}
+
 fn replacement_readable(
     replace: bool,
     before: &crate::ax::write_outcome::ValueRead,
@@ -2342,43 +2361,50 @@ fn cgevent_type_verified(
             }
         }
     }
-    if single_terminal_return {
-        let body = text
-            .strip_suffix("\r\n")
-            .or_else(|| text.strip_suffix('\n'))
-            .or_else(|| text.strip_suffix('\r'))
-            .unwrap_or(text);
-        crate::input::keyboard::type_text_with_delay(pid, body, delay_ms)?;
-        crate::input::keyboard::press_key(pid, "return", &[])?;
-    } else {
-        crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
-    }
-
-    // CGEvent posting is asynchronous with respect to the renderer. In
-    // particular, Chromium can acknowledge the posting process while a long
-    // tail remains queued. Poll the AX value until the complete payload is
-    // visible instead of treating any growth as success. If the deadline
-    // expires after observable growth, surface the exact partial count.
-    let deadline = std::time::Instant::now() + DELIVERY_DRAIN_TIMEOUT;
     let withheld = std::cell::Cell::new(false);
-    let (verified, delivered) = await_typed_delivery(
-        before,
-        text,
-        deadline,
+    let (verified, delivered) = single_dispatch_and_observe(
         || {
-            let value = read_axvalue_bound_classified(pid, element_ptr_and_idx, window_id);
-            if value == crate::ax::write_outcome::ValueRead::Withheld {
-                withheld.set(true);
+            if single_terminal_return {
+                let body = text
+                    .strip_suffix("\r\n")
+                    .or_else(|| text.strip_suffix('\n'))
+                    .or_else(|| text.strip_suffix('\r'))
+                    .unwrap_or(text);
+                crate::input::keyboard::type_text_with_delay(pid, body, delay_ms)?;
+                crate::input::keyboard::press_key(pid, "return", &[])?;
+            } else {
+                crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
             }
-            value.text()
+
+            Ok(())
         },
         || {
-            target_readback_is_untrusted(
-                classify_target_web_area(pid, element_ptr_and_idx, window_id),
-                crate::browser::electron_js::ElectronJs::is_electron(pid),
+            // CGEvent posting is asynchronous with respect to the renderer. In
+            // particular, Chromium can acknowledge the posting process while a long
+            // tail remains queued. Poll the AX value until the complete payload is
+            // visible instead of treating any growth as success. If the deadline
+            // expires after observable growth, surface the exact partial count.
+            let deadline = std::time::Instant::now() + DELIVERY_DRAIN_TIMEOUT;
+            await_typed_delivery(
+                before,
+                text,
+                deadline,
+                || {
+                    let value = read_axvalue_bound_classified(pid, element_ptr_and_idx, window_id);
+                    if value == crate::ax::write_outcome::ValueRead::Withheld {
+                        withheld.set(true);
+                    }
+                    value.text()
+                },
+                || {
+                    target_readback_is_untrusted(
+                        classify_target_web_area(pid, element_ptr_and_idx, window_id),
+                        crate::browser::electron_js::ElectronJs::is_electron(pid),
+                    )
+                },
             )
         },
-    );
+    )?;
     if withheld.get() {
         Ok((
             false,
@@ -2394,6 +2420,14 @@ fn cgevent_type_verified(
             crate::document_edit::DocumentEdited::NotADocument,
         ))
     }
+}
+
+fn single_dispatch_and_observe(
+    dispatch: impl FnOnce() -> anyhow::Result<()>,
+    observe: impl FnOnce() -> (bool, Option<usize>),
+) -> anyhow::Result<(bool, Option<usize>)> {
+    dispatch()?;
+    Ok(observe())
 }
 
 fn element_has_exact_app_focus(pid: i32, window_id: u32, element_ptr: usize) -> bool {
@@ -3087,9 +3121,9 @@ fn type_text_in_key_window(
 
     // --- Foreground rung: explicit agent request (skip AX/background ladder). ---
     if delivery_mode.is_foreground() {
-        let screen_sharing_target = crate::input::keyboard::is_screen_sharing_pid(pid);
+        let key_forwarder_target = crate::input::keyboard::key_forwarder_for_pid(pid).is_some();
         if let Some(refusal) = synthesis_preflight(
-            if screen_sharing_target {
+            if key_forwarder_target {
                 TextDeliveryRoute::PhysicalSynthesis
             } else {
                 TextDeliveryRoute::UnicodeSynthesis
@@ -3154,7 +3188,7 @@ fn type_text_in_key_window(
             )
         };
         let ((verified, delivered_chars, ax_replacement, document), fronted) = match window_id {
-            Some(wid) if screen_sharing_target => {
+            Some(wid) if key_forwarder_target => {
                 // Screen Sharing forwards physical HID transitions to the
                 // guest. PID-routed Unicode events all carry keycode 0 (the A
                 // key), so a guest sees "aaaa"; modifier flags alone likewise
@@ -3337,7 +3371,11 @@ fn type_text_in_key_window(
             delivered_chars: if before_withheld {
                 None
             } else {
-                delivered_chars
+                reported(
+                    (verified, delivered_chars),
+                    is_terminal_target || delay_ms == 0,
+                )
+                .1
             },
             verified: verified && !before_withheld,
             web_area: classify_target_web_area(pid, element_ptr_and_idx, window_id),
@@ -3380,7 +3418,7 @@ fn type_text_in_key_window(
             delivered_chars: if before_withheld {
                 None
             } else {
-                delivered_chars
+                reported((verified, delivered_chars), true).1
             },
             web_area: classify_target_web_area(pid, element_ptr_and_idx, window_id),
         }));
@@ -3701,7 +3739,7 @@ fn type_text_in_key_window(
             PATH_KEY_EVENTS
         },
         verified: verified && !before_withheld,
-        delivered_chars: if before_withheld {
+        delivered_chars: if before_withheld || (!verified && delay_ms == 0) {
             None
         } else {
             delivered_chars
@@ -3724,7 +3762,7 @@ pub(super) unsafe fn focused_accepts_text(element: AXUIElementRef) -> bool {
         })
 }
 
-fn is_text_input_role(role: &str) -> bool {
+pub(super) fn is_text_input_role(role: &str) -> bool {
     matches!(
         role,
         "AXTextField" | "AXTextArea" | "AXComboBox" | "AXSearchField"
@@ -4663,6 +4701,48 @@ mod tests {
     }
 
     #[test]
+    fn an_accepted_web_write_is_never_typed_again_as_keys() {
+        use crate::ax::write_outcome::{Settable, ValueObs, ValueRead};
+        use cua_driver_core::mutation::PriorInput;
+        use std::cell::Cell;
+        for observation in [
+            ValueRead::Withheld,
+            ValueRead::Allowed(ValueObs::Text("old".into())),
+        ] {
+            let sends = Cell::new(0);
+            let result = insert_ax_write(
+                false,
+                TextWriteContext {
+                    settable: Settable::Yes,
+                    prior: PriorInput::None,
+                },
+                || {
+                    sends.set(sends.get() + 1);
+                    kAXErrorSuccess
+                },
+                || observation,
+            );
+            assert!(matches!(
+                result,
+                Ok(InsertRead::Withheld { .. } | InsertRead::Readable { .. })
+            ));
+            assert_eq!(
+                sends.get(),
+                1,
+                "an accepted AX insert must not be sent twice"
+            );
+            let outcome = withheld_ax_insert_outcome(
+                "AXTextField",
+                "",
+                crate::document_edit::DocumentEdited::NotADocument,
+                WebAreaClassification::WebContent,
+            );
+            assert!(!outcome.verified);
+            assert_eq!(outcome.delivered_chars, None);
+        }
+    }
+
+    #[test]
     fn single_line_fields_split_off_one_trailing_return() {
         for (role, text, expected) in [
             ("AXTextField", "netflix.com\n", Some("netflix.com")),
@@ -4930,6 +5010,161 @@ mod tests {
             || false,
         );
         assert_eq!(delivery, (false, Some(5)));
+    }
+
+    #[test]
+    fn zero_progress_at_deadline_reports_no_delivery() {
+        let mut reads = 0;
+        let outcome = await_typed_delivery(
+            Some("abc"),
+            "xyz",
+            std::time::Instant::now(),
+            || {
+                reads += 1;
+                Some("abc".to_string())
+            },
+            || false,
+        );
+        assert_eq!(outcome, (false, Some(0)));
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn a_single_send_is_not_retyped_after_partial_or_terminal_readback() {
+        use std::cell::Cell;
+        for (before, after, text) in [
+            ("", "ab", "abcdef"),
+            ("", "aq", "abcdefghijklmnopq"),
+            ("$ read -s pw", "$ read -s pw", "secret"),
+            ("one\ntwo\n$ vim", "one\n$ vim", "dd"),
+            ("$ ", "$ \nfile-a  file-b", "a long command line"),
+        ] {
+            let sent = Cell::new(0);
+            let observed = single_dispatch_and_observe(
+                || {
+                    sent.set(sent.get() + 1);
+                    Ok(())
+                },
+                || {
+                    await_typed_delivery(
+                        Some(before),
+                        text,
+                        std::time::Instant::now(),
+                        || Some(after.to_owned()),
+                        || false,
+                    )
+                },
+            )
+            .unwrap();
+            // Each case models a batched send, whose count is not trusted.
+            let (verified, count) = reported(observed, true);
+            assert_eq!(sent.get(), 1, "no second send for {text:?}");
+            assert!(!verified);
+            assert_eq!(count, None);
+            let output = completed_text_result(
+                TypeTextOutcome {
+                    detail: String::new(),
+                    path: PATH_KEY_EVENTS,
+                    verified,
+                    delivered_chars: count,
+                    web_area: WebAreaClassification::NonWebContent,
+                },
+                false,
+                text.chars().count(),
+                false,
+                false,
+                "",
+            );
+            let structured = output.structured_content.unwrap();
+            assert_eq!(structured["effect"], "unverifiable");
+            assert!(structured.get("retry_from_character").is_none());
+        }
+    }
+
+    #[test]
+    fn an_unconfirmed_terminal_insert_reports_no_delivered_count() {
+        assert_eq!(reported((false, Some(0)), true), (false, None));
+        assert_eq!(reported((false, Some(3)), true), (false, None));
+        assert_eq!(reported((true, Some(5)), true), (true, Some(5)));
+        assert_eq!(reported((false, Some(3)), false), (false, Some(3)));
+        assert_eq!(reported((false, None), false), (false, None));
+    }
+
+    #[test]
+    fn a_first_character_per_event_read_back_is_not_retyped() {
+        let sent = std::cell::Cell::new(0);
+        let result = single_dispatch_and_observe(
+            || {
+                sent.set(sent.get() + 1);
+                Ok(())
+            },
+            || {
+                await_typed_delivery(
+                    Some(""),
+                    "abcdefghijklmnopq",
+                    std::time::Instant::now(),
+                    || Some("aq".into()),
+                    || false,
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(sent.get(), 1);
+        assert_eq!(reported(result, true), (false, None));
+    }
+
+    #[test]
+    fn a_terminal_screen_is_never_retyped() {
+        for (before, after, text) in [
+            ("$ read -s pw", "$ read -s pw", "secret"),
+            ("one\ntwo\n$ vim", "one\n$ vim", "dd"),
+            ("$ ", "$ \nfile-a  file-b", "a long command line"),
+        ] {
+            let sent = std::cell::Cell::new(0);
+            let result = single_dispatch_and_observe(
+                || {
+                    sent.set(sent.get() + 1);
+                    Ok(())
+                },
+                || {
+                    await_typed_delivery(
+                        Some(before),
+                        text,
+                        std::time::Instant::now(),
+                        || Some(after.into()),
+                        || false,
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(sent.get(), 1);
+            assert_eq!(reported(result, true), (false, None));
+        }
+    }
+
+    #[test]
+    fn a_native_partial_prefix_is_not_retyped() {
+        for (before, after) in [("", "ab"), ("x", "xab"), ("", "ba"), ("x", "yab")] {
+            let sent = std::cell::Cell::new(0);
+            let result = single_dispatch_and_observe(
+                || {
+                    sent.set(sent.get() + 1);
+                    Ok(())
+                },
+                || {
+                    await_typed_delivery(
+                        Some(before),
+                        "abcdef",
+                        std::time::Instant::now(),
+                        || Some(after.into()),
+                        || false,
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(sent.get(), 1);
+            assert_eq!(reported(result, true), (false, None));
+        }
     }
 
     #[test]
@@ -5214,19 +5449,30 @@ mod tests {
     }
 
     #[test]
-    fn screen_sharing_text_fails_closed_without_foreground_window() {
-        for (foreground, window_id) in [(false, None), (false, Some(7)), (true, None)] {
-            let result = screen_sharing_delivery_error(true, foreground, window_id)
-                .expect("unsafe Screen Sharing route must be refused");
-            assert_eq!(result.is_error, Some(true));
-            let structured = result.structured_content.unwrap();
-            assert_eq!(structured["code"], "SCREEN_SHARING_REQUIRES_FOREGROUND_HID");
-            assert_eq!(structured["effect"], "refused");
-            assert_eq!(structured["escalation"]["recommended"], "foreground");
-            assert_eq!(structured["escalation"]["requires"][0], "window_id");
+    fn key_forwarder_text_fails_closed_without_foreground_window() {
+        for (forwarder, code) in [
+            (
+                KeyForwarder::ScreenSharing,
+                "SCREEN_SHARING_REQUIRES_FOREGROUND_HID",
+            ),
+            (
+                KeyForwarder::IosSimulator,
+                "IOS_SIMULATOR_REQUIRES_FOREGROUND_HID",
+            ),
+        ] {
+            for (foreground, window_id) in [(false, None), (false, Some(7)), (true, None)] {
+                let result = key_forwarder_delivery_error(Some(forwarder), foreground, window_id)
+                    .expect("unsafe key-forwarder route must be refused");
+                assert_eq!(result.is_error, Some(true));
+                let structured = result.structured_content.unwrap();
+                assert_eq!(structured["code"], code);
+                assert_eq!(structured["effect"], "refused");
+                assert_eq!(structured["escalation"]["recommended"], "foreground");
+                assert_eq!(structured["escalation"]["requires"][0], "window_id");
+            }
+            assert!(key_forwarder_delivery_error(Some(forwarder), true, Some(7)).is_none());
         }
-        assert!(screen_sharing_delivery_error(true, true, Some(7)).is_none());
-        assert!(screen_sharing_delivery_error(false, false, None).is_none());
+        assert!(key_forwarder_delivery_error(None, false, None).is_none());
     }
 }
 

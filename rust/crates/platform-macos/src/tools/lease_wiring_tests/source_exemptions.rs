@@ -425,10 +425,10 @@ pub(super) const ENTRIES: &[Entry] = &[
         file: "tools/mod.rs",
         item: "focused_element_holds_point",
         primitive: "tokio::task::spawn_blocking",
-        fingerprint: 2870286684112758937,
+        fingerprint: 9134458224314152668,
         occurrence: 1,
         category: Category::Read,
-        reason: "focused element location read",
+        reason: "focused element, hit-test, role and focus reads",
     },
     Entry {
         file: "tools/mod.rs",

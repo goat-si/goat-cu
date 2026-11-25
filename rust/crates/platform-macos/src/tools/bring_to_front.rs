@@ -736,7 +736,7 @@ mod tests {
                 height: 600.0,
             },
             layer: 0,
-            z_index,
+            z_index: Some(z_index),
             is_on_screen: true,
             current_space_id: None,
             on_current_space: Some(true),
@@ -837,6 +837,43 @@ mod tests {
             lane_wait >= VERIFY_TIMEOUT / 2,
             "lane handed on while the worker still ran: {lane_wait:?}"
         );
+    }
+
+    #[test]
+    fn already_front_observation_does_not_bypass_full_guard() {
+        let front = contested_observation(Some(7), Some(7), Some(7));
+        let sibling = contested_observation(Some(7), Some(900), Some(7));
+        assert!(front.exact_window_frontmost_ordinary(7));
+        assert!(!sibling.exact_window_frontmost_ordinary(7));
+        // The observation does not prove AppKit/native-key state; the
+        // production path must still use GOAT's full foreground guard.
+        let production = include_str!("bring_to_front.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(!production.contains("\"already_front\""));
+    }
+
+    #[test]
+    fn foreign_or_unknown_frontmost_retains_full_guard() {
+        let foreign = observation(Some(515), Some(true), Some(7), Some(7), true);
+        assert_eq!(foreign.workspace_frontmost_pid, Some(515));
+        let missing = observation(None, Some(true), Some(7), Some(7), true);
+        assert_eq!(missing.workspace_frontmost_pid, None);
+        let production = include_str!("bring_to_front.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(production.contains("make_exact_window_key(pid, window_id)"));
+        assert!(production.contains("activateWithOptions(NSApplicationActivationOptions::empty())"));
+    }
+
+    #[test]
+    fn frontmost_observation_tracks_target_order() {
+        let front = contested_observation(Some(7), Some(7), Some(7));
+        let sibling = contested_observation(Some(7), Some(8), Some(8));
+        assert!(front.exact_window_frontmost_ordinary(7));
+        assert!(!sibling.exact_window_frontmost_ordinary(7));
     }
 
     #[test]

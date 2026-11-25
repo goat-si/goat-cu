@@ -530,6 +530,32 @@ mod tests {
             Some(100)
         );
     }
+    #[test]
+    fn running_existing_app_keeps_background_open_event() {
+        let production = include_str!("nsworkspace.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(production.contains("config.setActivates(false)"));
+        assert!(!production.contains("K_AE_REOPEN_APPLICATION"));
+        assert!(!production.contains("b\"rapp\""));
+    }
+
+    #[test]
+    fn not_running_app_uses_open_event() {
+        assert_eq!(super::K_AE_OPEN_APPLICATION, super::fourcc(b"oapp"));
+    }
+
+    #[test]
+    fn new_instance_uses_open_event_even_when_app_is_running() {
+        let production = include_str!("nsworkspace.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(production
+            .contains("config.setCreatesNewApplicationInstance(cfg.creates_new_instance)"));
+        assert!(production.contains("apple_event::open_application_event(bid)"));
+    }
 }
 
 /// Hand-rolled binding for

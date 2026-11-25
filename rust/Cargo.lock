@@ -1352,6 +1352,7 @@ dependencies = [
  "tracing",
  "uniffi",
  "uuid",
+ "windows 0.58.0",
 ]
 
 [[package]]
@@ -1407,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "cua-telemetry"
-version = "0.28.2"
+version = "0.29.0"
 dependencies = [
  "hex",
  "rand 0.9.5",

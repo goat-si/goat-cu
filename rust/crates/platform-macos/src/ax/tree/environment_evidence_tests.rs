@@ -952,7 +952,7 @@ fn provider_enablement_preserves_failed_and_cached_outcomes() {
             trace.borrow_mut().push("opt-in");
             AccessibilityOptIn::ManualAccessibility
         },
-        || {
+        |_| {
             trace.borrow_mut().push("wait");
             false
         },
@@ -972,7 +972,7 @@ fn provider_enablement_preserves_failed_and_cached_outcomes() {
         Some(stamp),
         now + Duration::from_secs(1),
         || panic!("cached failure must not re-enable"),
-        || panic!("cached failure must not wait"),
+        |_| panic!("cached failure must not wait"),
         |_, _| panic!("cached failure must not write"),
         Some(7),
     );
@@ -997,7 +997,7 @@ fn provider_enablement_preserves_failed_and_cached_outcomes() {
         Some(stamp),
         now,
         || AccessibilityOptIn::EnhancedUserInterface,
-        || true,
+        |_| true,
         |stamp, wait| ready_cache.set(Some(ProcessEnablement { stamp, wait })),
         Some(7),
     );
@@ -1012,7 +1012,7 @@ fn provider_enablement_preserves_failed_and_cached_outcomes() {
         Some(stamp),
         now + Duration::from_secs(1),
         || panic!("cached ready must not re-enable"),
-        || panic!("cached ready must not wait"),
+        |_| panic!("cached ready must not wait"),
         |_, _| panic!("cached ready must not write"),
         Some(7),
     );
@@ -1027,7 +1027,7 @@ fn provider_enablement_preserves_failed_and_cached_outcomes() {
         Some(stamp),
         now,
         || AccessibilityOptIn::NotAccepted,
-        || panic!("rejected opt-in must not wait"),
+        |_| panic!("rejected opt-in must not wait"),
         |_, _| panic!("rejected opt-in must not cache"),
         Some(7),
     );

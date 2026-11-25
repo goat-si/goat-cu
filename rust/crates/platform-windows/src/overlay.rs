@@ -1662,6 +1662,40 @@ mod tests {
         })
     }
 
+    #[test]
+    fn windows_cursor_hook_is_not_advertised_or_emitted() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let received = Arc::new(AtomicUsize::new(0));
+        let sink = received.clone();
+        assert!(cua_driver_core::cursor_hook::set_cursor_hook_fn(
+            move |_| {
+                sink.fetch_add(1, Ordering::SeqCst);
+            }
+        ));
+        let mut map = empty_map();
+        let key = "windows-cursor-hook-refused-s9";
+        apply_msg(&mut map, move_msg(key, 4.0, 5.0));
+        apply_msg(
+            &mut map,
+            OverlayMsg::Cmd(KeyedOverlayCommand {
+                key: key.to_owned(),
+                cmd: OverlayCommand::ClickPulse { x: 4.0, y: 5.0 },
+            }),
+        );
+        map.tick_all(0.016);
+        assert_eq!(received.load(Ordering::SeqCst), 0);
+        assert!(!cua_driver_core::cursor_hook::cursor_hook_supported());
+        let production = include_str!("overlay.rs")
+            .split("// ── Headless unit tests")
+            .next()
+            .unwrap();
+        assert!(!production.contains("declare_cursor_hook_emitter"));
+        assert!(!production.contains("push_cursor_event"));
+    }
+
     fn settle(map: &mut RenderMap) {
         for _ in 0..2000 {
             map.tick_all(0.016);

@@ -14,8 +14,7 @@
 #   --require-signature  fail unless the release archive's Sigstore bundle
 #                        verifies with cosign (every archive is always checked
 #                        against the release's SHA256SUMS)
-#   --no-connect         do not connect Claude Code, Codex and Cursor, and skip
-#                        the permission guide
+#   --no-connect         compatibility option: skip the permission guide
 #   --no-test            do not run `cua-driver test` at the end
 #   --backend=rust       explicit Rust backend (no-op; Rust is the only option)
 #   --experimental-rust  legacy alias for --backend=rust (no-op)

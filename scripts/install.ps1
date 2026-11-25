@@ -79,7 +79,7 @@
 #               this when you manage PATH out-of-band (chezmoi, a dotfiles
 #               repo, group policy). Idempotent either way: if the dir is
 #               already on PATH, nothing changes.
-#   -NoConnect  do not connect Claude Code, Codex and Cursor to Cua Driver.
+#   -NoConnect  compatibility option; automatic connection is not supported.
 #               Same as $env:CUA_DRIVER_NO_CONNECT=1 (use the env var with
 #               `irm | iex`, which cannot take switches).
 #   -NoTest     do not run `cua-driver test` at the end. Same as
@@ -147,6 +147,7 @@ if ($PSVersionTable.PSEdition -eq 'Desktop') {
 }
 
 $Repo       = "trycua/cua"
+$ReleaseDownloadBase = "https://github.com/$Repo/releases/download"
 $TagPrefix  = "cua-driver-rs-v"
 $NightlyTagPrefix = "nightly-cua-driver-rs-v"
 $BinaryName = "cua-driver.exe"
@@ -163,7 +164,7 @@ $ThemeBinaryName = "cua-cursor-theme.exe"
 # where the baked line hasn't been updated yet.
 #
 # ~~~ BAKED_VERSION: auto-updated after release publication — do not edit ~~~
-$Script:CuaDriverRsBakedVersion = "0.53.2" # published-installer-version
+$Script:CuaDriverRsBakedVersion = "0.55.0" # published-installer-version
 # ~~~ END_BAKED_VERSION ~~~
 #
 # Withdrawn releases (for example, a release published without valid
@@ -1288,7 +1289,7 @@ function Get-ReleaseZip([string]$version, [string]$archLabel, [string]$destDir) 
     # never confused with a transient network, server, or authentication
     # failure. Only the former may activate baked-version fallback.
     $zipName = "cua-driver-rs-$version-$archLabel.zip"
-    $url     = "https://github.com/$Repo/releases/download/$Script:CuaDriverRsReleaseTag/$zipName"
+    $url     = "$ReleaseDownloadBase/$Script:CuaDriverRsReleaseTag/$zipName"
     $zipPath = Join-Path $destDir $zipName
     $maxAttempts = $Script:ReleaseRetryDelays.Count + 1
 
@@ -1341,7 +1342,7 @@ function Get-BaseVersion([string]$version) {
 
 function Get-ReleaseFile([string]$name, [string]$destPath) {
     # Returns $true when fetched, $false on HTTP 404; exits on anything else.
-    $url = "https://github.com/$Repo/releases/download/$Script:CuaDriverRsReleaseTag/$name"
+    $url = "$ReleaseDownloadBase/$Script:CuaDriverRsReleaseTag/$name"
     $maxAttempts = $Script:ReleaseRetryDelays.Count + 1
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         try {
@@ -2040,36 +2041,14 @@ elseif ($AutoStart) {
     }
 }
 
-# Connect the user's agents and run the self-test, so one paste leaves Cua
-# Driver ready to use. Calls use the absolute path (the visible bin dir may not
-# be on this session's PATH yet) and are guarded so an older binary without
-# `connect` / `test` falls back to the hints below. A failing step never fails
-# the install.
+# Run the self-test when available. GOAT does not ship the upstream connect
+# command; configuration remains an explicit user step.
 function Test-CuaDriverCommand {
     param([string]$Binary, [string]$Name)
     try {
         $helpText = (& $Binary --help 2>&1 | Out-String)
     } catch { return $false }
     return [bool]($helpText -match "(?m)^Subcommands:.*(: |, )$([regex]::Escape($Name))(,|\s*$)")
-}
-
-$ConnectedAgent = ''
-if (-not $NoConnect -and (Test-CuaDriverCommand $installedBinary 'connect')) {
-    $connectOut = @()
-    $connectRc = 1
-    try {
-        $connectOut = @(& $installedBinary connect 2>$null)
-        $connectRc = $LASTEXITCODE
-    } catch { }
-    $connectOut | ForEach-Object { Write-Host $_ }
-    if ($connectRc -eq 0) {
-        foreach ($agentName in @('Claude Code', 'Codex', 'Cursor')) {
-            if ($connectOut -match "^$([regex]::Escape($agentName)): (already )?connected$") {
-                $ConnectedAgent = $agentName
-                break
-            }
-        }
-    }
 }
 
 if (-not $NoTest -and (Test-CuaDriverCommand $installedBinary 'test')) {
@@ -2084,20 +2063,13 @@ if (-not $NoTest -and (Test-CuaDriverCommand $installedBinary 'test')) {
     }
 }
 
-$SkipHints = $false
-if ($ConnectedAgent) {
-    Write-Host ""
-    Write-Host "Done. Ask $ConnectedAgent (restart it first if it is open): `"Use Cua Driver to open Notepad and write a haiku.`""
-    $SkipHints = $true
-}
-
 # Unified post-install hints come from a single shared text file so the
 # 4 Rust installers (this script + _install-rust.sh + install-local.ps1 +
 # install-local.sh) never drift. The .txt holds the OS-agnostic bulk
 # (Try-it / skill pack / MCP setup / docs link) with {{BINARY}}
 # placeholders; OS-specific bits (autostart) stay inline below.
 $HintsUrl = "https://cua.ai/driver/post-install-hints.txt"
-if (-not $SkipHints) { try {
+try {
     $hintsRaw = (Invoke-WebRequest -Uri $HintsUrl -UseBasicParsing -TimeoutSec 10).Content
     Write-Host ($hintsRaw -replace '\{\{BINARY\}\}', $installedBinary)
 }
@@ -2106,7 +2078,7 @@ catch {
     # get enough to recover.
     Write-Host "Next steps: $installedBinary --version  |  $installedBinary mcp-config --client <name>  |  $installedBinary skills install"
     Write-Host "Docs: https://github.com/trycua/cua/tree/main/libs/cua-driver/rust"
-} }
+}
 
 # Windows-specific autostart hint (kept inline; OS-natural location).
 Write-Host ""

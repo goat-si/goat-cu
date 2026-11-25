@@ -24,8 +24,7 @@
 #   --channel <name>     persist and install the latest stable or nightly release
 #   --require-signature  fail unless the archive's Sigstore bundle verifies
 #                        with cosign (needs cosign on PATH)
-#   --no-connect         do not connect Claude Code, Codex and Cursor to Cua
-#                        Driver (and skip the permission guide); same as
+#   --no-connect         compatibility option: skip the permission guide; same as
 #                        CUA_DRIVER_NO_CONNECT=1
 #   --no-test            do not run `cua-driver test` at the end; same as
 #                        CUA_DRIVER_NO_TEST=1
@@ -139,6 +138,8 @@ if [[ "$_cua_install_common_loaded" == "0" ]]; then
 fi
 
 REPO="trycua/cua"
+RELEASE_DOWNLOAD_BASE="https://github.com/$REPO/releases/download"
+RELEASE_DOWNLOAD_BASE="${RELEASE_DOWNLOAD_BASE%/}"
 BINARY_NAME="cua-driver"
 TAG_PREFIX="cua-driver-rs-v"
 NIGHTLY_TAG_PREFIX="nightly-cua-driver-rs-v"
@@ -443,6 +444,46 @@ acquire_install_lock() {
 
 acquire_install_lock "$@"
 
+# Warn when a release dir about to be pruned is still pinned by a
+# hand-written systemd user unit or desktop entry. The GC cannot rewrite
+# those files and the breakage is silent — the unit keeps restarting into
+# `Failed at step EXEC` after the dir disappears — so name the exact file
+# and the stable replacement before deleting anything.
+#
+# Matching is on the `packages/releases/<dir>` suffix because the same dir
+# can be written as an absolute path, `%h/...` (systemd), or `$HOME/...`.
+#
+# Args: $1 = current symlink path, remaining args = dirs about to be pruned.
+warn_referenced_release_dirs() {
+    local current_link="$1"
+    shift
+    local stable="${current_link%/}/$BINARY_NAME"
+    local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+    local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+    local dir file needle referenced
+    for dir in "$@"; do
+        needle="packages/releases/${dir##*/}"
+        referenced=0
+        for file in \
+            "$config_home"/systemd/user/*.service \
+            "$config_home"/systemd/user/*.socket \
+            "$config_home"/systemd/user/*.timer \
+            "$data_home"/applications/*.desktop \
+            "$config_home"/autostart/*.desktop; do
+            [[ -f "$file" ]] || continue
+            grep -qF -- "$needle" "$file" 2>/dev/null || continue
+            if [[ "$referenced" == "0" ]]; then
+                printf 'warning: pruning %s, which is still referenced by:\n' "$dir" >&2
+                referenced=1
+            fi
+            printf 'warning:   %s\n' "$file" >&2
+        done
+        if [[ "$referenced" == "1" ]]; then
+            printf 'warning: point those references at %s (stable across installs) and reload them; that release dir is removed after this run\n' "$stable" >&2
+        fi
+    done
+}
+
 # Prune per-version release dirs under $RELEASES_DIR for the current
 # $TARGET, keeping the N most recent (by mtime). The dir that the
 # `current` symlink resolves to is always preserved — even if it's
@@ -541,6 +582,8 @@ prune_old_releases() {
     for p in "${to_prune[@]}"; do
         log "  - ${p##*/}"
     done
+    # Subshell: a write to a closed stderr must not stop the prune.
+    ( warn_referenced_release_dirs "$current_link" "${to_prune[@]}" ) || true
     printf '%s\0' "${to_prune[@]}" | xargs -0 rm -rf
 }
 
@@ -687,7 +730,7 @@ done
 # asset — see the recovery at the download step below.
 #
 # ~~~ BAKED_VERSION: auto-updated after release publication — do not edit ~~~
-CUA_DRIVER_RS_BAKED_VERSION="0.53.2" # published-installer-version
+CUA_DRIVER_RS_BAKED_VERSION="0.55.0" # published-installer-version
 # ~~~ END_BAKED_VERSION ~~~
 #
 # Withdrawn releases (for example, a macOS archive published unsigned) are
@@ -985,7 +1028,7 @@ fetch_release_url() {
 download_release_tarball() {
     local version="$1" tarball url status=0
     tarball="$(release_tarball_name "$version")"
-    url="https://github.com/$REPO/releases/download/${TAG}/$tarball"
+    url="$RELEASE_DOWNLOAD_BASE/${TAG}/$tarball"
     log "downloading $url"
     fetch_release_url "$url" "$TMP_DIR/$tarball" || status=$?
     (( status == 0 || status == 44 )) && return "$status"
@@ -1015,7 +1058,7 @@ COSIGN_OIDC_ISSUER="https://token.actions.githubusercontent.com"
 # Fetches one small release asset (SHA256SUMS, a bundle) to $2.
 # 0 = fetched, 44 = HTTP 404, 1 = any other failure (after retries).
 fetch_release_file() {
-    local url="https://github.com/$REPO/releases/download/${TAG}/$1" status=0
+    local url="$RELEASE_DOWNLOAD_BASE/${TAG}/$1" status=0
     fetch_release_url "$url" "$2" || status=$?
     (( status == 0 || status == 44 )) && return "$status"
     err "could not download $url after $RELEASE_ATTEMPTS attempt(s) (HTTP ${RELEASE_HTTP_CODE:-unknown}, curl exit $RELEASE_CURL_STATUS)"
@@ -1661,30 +1704,13 @@ if [[ "${REPLACED_SWIFT:-0}" == "1" ]]; then
     echo ""
 fi
 
-# Connect the user's agents, grant permissions and run the self-test, so one
-# paste leaves Cua Driver ready to use. Every call uses the absolute path
-# ($BIN_DIR may not be on this shell's PATH yet) and is guarded so an older
-# binary without `connect` / `test` falls back to the hints below. A failing
-# step never fails the install.
+# Offer permissions and run the self-test when available. GOAT does not ship
+# the upstream connect command; configuration remains an explicit user step.
 driver_has_command() {
     # `--help` prints one "Subcommands:" line; older binaries do not list the
     # new ones (and exit 0 for any argument, so the exit code says nothing).
     "$BIN_LINK" --help 2>&1 | grep -E "^Subcommands:.*(: |, )$1(,|\$)" >/dev/null 2>&1
 }
-
-CONNECTED_AGENT=""
-if [[ "$NO_CONNECT" != "1" ]] && driver_has_command connect; then
-    CONNECT_OUT="$("$BIN_LINK" connect 2>/dev/null)" && CONNECT_RC=0 || CONNECT_RC=$?
-    [[ -n "$CONNECT_OUT" ]] && printf '%s\n' "$CONNECT_OUT"
-    if [[ "$CONNECT_RC" == "0" ]]; then
-        for _agent in "Claude Code" "Codex" "Cursor"; do
-            if printf '%s\n' "$CONNECT_OUT" | grep -E "^$_agent: (already )?connected\$" >/dev/null; then
-                CONNECTED_AGENT="$_agent"
-                break
-            fi
-        done
-    fi
-fi
 
 # The permission guide needs a person at a terminal: stdin and stdout attached
 # and no CI. `curl ... | bash` has no terminal on stdin, so it skips this.
@@ -1697,12 +1723,6 @@ fi
 if [[ "$NO_TEST" != "1" ]] && driver_has_command test; then
     echo ""
     "$BIN_LINK" test || echo "The test did not pass. Run it again later: $BIN_LINK test"
-fi
-
-if [[ -n "$CONNECTED_AGENT" ]]; then
-    echo ""
-    echo "Done. Ask $CONNECTED_AGENT (restart it first if it is open): \"Use Cua Driver to open TextEdit and write a haiku.\""
-    exit 0
 fi
 
 # Unified post-install hints come from a single shared text file so the

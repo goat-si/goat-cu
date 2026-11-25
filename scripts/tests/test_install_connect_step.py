@@ -1,4 +1,4 @@
-"""The installer connects agents and runs the self-test after installing.
+"""The installer leaves configuration explicit and runs the self-test.
 
 Runs the real post-install block of `_install-rust.sh` against a fake
 `cua-driver` so each guard is exercised: an older binary without `connect` /
@@ -82,39 +82,50 @@ def _run(tmp_path: Path, fake: Path, flags: str = "", env: dict[str, str] | None
 NEW = "mcp, list-tools, test, connect, mcp-config"
 
 
+def test_goat_installers_never_dispatch_connect() -> None:
+    shell = INSTALLER.read_text(encoding="utf-8")
+    windows = (SCRIPTS / "install.ps1").read_text(encoding="utf-8-sig")
+    assert '"$BIN_LINK" connect' not in shell
+    assert '& $installedBinary connect' not in windows
+
+
 @requires_posix_bash
-def test_connects_tests_and_ends_with_one_done_line(tmp_path: Path) -> None:
+def test_does_not_connect_and_still_runs_the_self_test(tmp_path: Path) -> None:
     fake = _fake_driver(tmp_path, NEW, "Claude Code: connected\nCodex: not installed")
     result, calls = _run(tmp_path, fake)
     assert result.returncode == 0, result.stderr
-    assert "Claude Code: connected" in result.stdout
+    assert "Claude Code: connected" not in result.stdout
     assert "Cua Driver works." in result.stdout
-    assert 'Done. Ask Claude Code' in result.stdout
-    assert "FELL_THROUGH_TO_HINTS" not in result.stdout
-    assert "connect" in calls and "test" in calls
+    assert 'Done. Ask Claude Code' not in result.stdout
+    assert "FELL_THROUGH_TO_HINTS" in result.stdout
+    assert "connect" not in calls and "test" in calls
     # No terminal on stdin, so the permission guide must not run.
     assert "permissions grant" not in calls
 
 
 @requires_posix_bash
-def test_names_the_agent_that_was_actually_connected(tmp_path: Path) -> None:
+def test_does_not_claim_an_agent_was_connected(tmp_path: Path) -> None:
     fake = _fake_driver(tmp_path, NEW, "Claude Code: not installed\nCodex: already connected")
-    result, _ = _run(tmp_path, fake)
-    assert "Done. Ask Codex" in result.stdout
+    result, calls = _run(tmp_path, fake)
+    assert "connect" not in calls
+    assert "Done. Ask Codex" not in result.stdout
+    assert "FELL_THROUGH_TO_HINTS" in result.stdout
 
 
 @requires_posix_bash
-def test_no_agent_connected_falls_back_to_the_hints(tmp_path: Path) -> None:
+def test_install_shows_hints_without_connecting_agents(tmp_path: Path) -> None:
     fake = _fake_driver(tmp_path, NEW, "Claude Code: not installed\nCodex: not installed")
-    result, _ = _run(tmp_path, fake)
+    result, calls = _run(tmp_path, fake)
+    assert "connect" not in calls
     assert "Done. Ask" not in result.stdout
     assert "FELL_THROUGH_TO_HINTS" in result.stdout
 
 
 @requires_posix_bash
-def test_failed_connect_falls_back_to_the_hints(tmp_path: Path) -> None:
+def test_unavailable_connect_still_shows_hints(tmp_path: Path) -> None:
     fake = _fake_driver(tmp_path, NEW, "Claude Code: could not connect (boom)", connect_rc=1)
-    result, _ = _run(tmp_path, fake)
+    result, calls = _run(tmp_path, fake)
+    assert "connect" not in calls
     assert result.returncode == 0
     assert "FELL_THROUGH_TO_HINTS" in result.stdout
 
@@ -149,8 +160,9 @@ def test_no_test_skips_the_self_test(tmp_path: Path, flags: str, env: dict[str, 
     fake = _fake_driver(tmp_path, NEW, "Claude Code: connected")
     result, calls = _run(tmp_path, fake, flags, env)
     assert "test" not in calls
-    assert "connect" in calls
-    assert "Done. Ask Claude Code" in result.stdout
+    assert "connect" not in calls
+    assert "Done. Ask Claude Code" not in result.stdout
+    assert "FELL_THROUGH_TO_HINTS" in result.stdout
 
 
 def test_flags_are_parsed_and_documented() -> None:
@@ -175,26 +187,26 @@ def test_permission_guide_needs_a_macos_terminal_outside_ci() -> None:
 def test_every_new_call_uses_the_absolute_binary_path() -> None:
     block = _post_install_block()
     assert "cua-driver connect" not in block and "cua-driver test" not in block
-    for call in ('"$BIN_LINK" connect', '"$BIN_LINK" test', '"$BIN_LINK" permissions grant'):
+    assert '"$BIN_LINK" connect' not in block
+    for call in ('"$BIN_LINK" test', '"$BIN_LINK" permissions grant'):
         assert call in block
 
 
-def test_windows_installer_connects_and_tests_with_guards_and_no_permission_step() -> None:
+def test_windows_installer_does_not_connect_and_tests_with_guards() -> None:
     source = (SCRIPTS / "install.ps1").read_text(encoding="utf-8-sig")
     assert "[switch]$NoConnect" in source and "[switch]$NoTest" in source
     assert "$env:CUA_DRIVER_NO_CONNECT -eq '1'" in source
     assert "$env:CUA_DRIVER_NO_TEST -eq '1'" in source
-    assert "& $installedBinary connect" in source
+    assert "& $installedBinary connect" not in source
     assert "& $installedBinary test" in source
-    assert "Test-CuaDriverCommand $installedBinary 'connect'" in source
+    assert "Test-CuaDriverCommand $installedBinary 'connect'" not in source
     assert "Test-CuaDriverCommand $installedBinary 'test'" in source
     assert "permissions grant" not in source.split("function Test-CuaDriverCommand")[1].split("Unified post-install hints")[0]
-    assert "if (-not $SkipHints)" in source
+    assert "$SkipHints" not in source
 
 
 def test_post_install_hints_name_mcp_config_not_connect() -> None:
-    # GOAT's binary has no `connect` subcommand (the installer's connect step
-    # is skipped by `driver_has_command`), so the hints must not advertise it.
+    # GOAT's binary has no `connect` subcommand, so hints must not advertise it.
     hints = (SCRIPTS / "post-install-hints.txt").read_text(encoding="utf-8")
     assert "{{BINARY}} connect" not in hints
     assert "mcp-config --client <name>" in hints

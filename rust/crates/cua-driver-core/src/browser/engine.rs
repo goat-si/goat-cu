@@ -1731,9 +1731,10 @@ impl BrowserEngine {
                     "the tab moved to a different browser window since binding",
                 ));
             }
-            let geometry_matches = live
-                .bounds
-                .is_some_and(|bounds| bounds.approx_eq(&native.bounds, BOUNDS_TOLERANCE_PX));
+            let geometry_matches = native.geometry_exact
+                && live
+                    .bounds
+                    .is_some_and(|bounds| bounds.approx_eq(&native.bounds, BOUNDS_TOLERANCE_PX));
             let correlation_still_exact = if geometry_matches {
                 true
             } else {

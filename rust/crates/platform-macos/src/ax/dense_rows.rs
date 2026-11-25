@@ -458,6 +458,7 @@ mod tests {
             identifier: None,
             help: None,
             actions: vec![],
+            custom_actions: vec![],
             element_ptr: 0,
             depth,
             parent_element_index: parent,

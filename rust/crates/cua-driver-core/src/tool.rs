@@ -5742,6 +5742,83 @@ resources:
         assert_ne!(result.is_error, Some(true));
     }
 
+    /// A `list_apps` stand-in: a shared window host with no identity and the
+    /// packaged app it hosts.
+    struct HostedAppsProbe;
+
+    #[async_trait::async_trait]
+    impl super::Tool for HostedAppsProbe {
+        fn def(&self) -> &super::ToolDef {
+            static DEF: std::sync::OnceLock<super::ToolDef> = std::sync::OnceLock::new();
+            DEF.get_or_init(|| super::ToolDef {
+                name: "list_apps".into(),
+                description: "test app list".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                read_only: true,
+                destructive: false,
+                idempotent: true,
+                open_world: false,
+            })
+        }
+
+        async fn invoke(&self, _args: serde_json::Value) -> crate::protocol::ToolResult {
+            crate::protocol::ToolResult::text("apps").with_structured(serde_json::json!({
+                "apps": [
+                    {"pid": 100, "bundle_id": null, "launch_path": null},
+                    {"pid": 200, "bundle_id": "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"},
+                ]
+            }))
+        }
+    }
+
+    #[cfg(feature = "yaml")]
+    #[tokio::test]
+    async fn bounded_window_grant_refuses_unverified_hosted_app_identity() {
+        const MANIFEST: &str = r#"
+version: 3
+expires_after: 1h
+idle_timeout: 30m
+allow:
+  tools: [get_window_state]
+resources:
+  apps:
+    - bundle_id: Microsoft.WindowsCalculator_8wekyb3d8bbwe!App
+      launch: false
+      windows: all
+"#;
+        for frame in [7, 8] {
+            let hits = Arc::new(AtomicUsize::new(0));
+            let mut registry = super::ToolRegistry::new();
+            registry.register(Box::new(ObservationProbe {
+                hits: hits.clone(),
+                def: super::ToolDef {
+                    name: "get_window_state".into(),
+                    description: "test observation".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    read_only: true,
+                    destructive: false,
+                    idempotent: true,
+                    open_world: false,
+                },
+            }));
+            registry.register(Box::new(HostedAppsProbe));
+            let result = registry
+                .invoke_with_context(
+                    "get_window_state",
+                    serde_json::json!({"pid": 100, "window_id": frame, "session": "review"}),
+                    bounded_context(MANIFEST),
+                )
+                .await;
+
+            assert_eq!(
+                result.is_error != Some(true),
+                false,
+                "unverified hosted frame {frame}: {result:?}"
+            );
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+        }
+    }
+
     #[cfg(feature = "yaml")]
     #[tokio::test]
     async fn capability_manifest_typed_resources_narrow_standard_and_unrestricted() {

@@ -212,6 +212,7 @@ pub struct AXNode {
     pub identifier: Option<String>,
     pub help: Option<String>,
     pub actions: Vec<String>,
+    pub custom_actions: Vec<super::actions::CustomAction>,
     /// The raw AXUIElementRef pointer value, for caching.
     pub element_ptr: usize,
     /// Depth in the rendered markdown tree (matches the indent level used in
@@ -729,6 +730,7 @@ impl AXNode {
             identifier: None,
             help: None,
             actions: vec![],
+            custom_actions: vec![],
             element_ptr,
             depth: 0,
             parent_element_index: None,
@@ -2482,14 +2484,56 @@ fn is_layout_container(role: &str) -> bool {
     matches!(role, "AXGroup" | "AXScrollArea")
 }
 
-/// Whether an AXGroup/AXScrollArea is only a layout wrapper to collapse. A
-/// named one (AXTitle or AXDescription, such as a "Profile" or "Billing"
-/// section) keeps its row, so identical controls in different sections can be
-/// told apart.
-fn collapse_layout_container(role: &str, title: Option<&str>, description: Option<&str>) -> bool {
+/// Whether an AXGroup/AXScrollArea is only a layout wrapper to collapse. One
+/// that carries content (AXTitle or AXDescription, such as a "Profile" or
+/// "Billing" section, or a non-empty AXValue or AXHelp) keeps its row, so
+/// identical controls in different sections can be told apart, and its own
+/// actions (a SwiftUI row's press or custom actions) stay addressable.
+fn collapse_layout_container(
+    role: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    has_value_or_help: bool,
+) -> bool {
     is_layout_container(role)
         && title.is_none_or(|text| text.trim().is_empty())
         && description.is_none_or(|text| text.trim().is_empty())
+        && !has_value_or_help
+}
+
+/// Whether a node gets a row of its own. A node with no action and nothing to
+/// show collapses into its parent, except a window or sheet, and a group or
+/// scroll area kept for its help: with no action it is an unindexed display
+/// row, and its help is the content that row shows.
+fn keeps_row(role: &str, is_actionable: bool, has_content: bool, has_help: bool) -> bool {
+    is_actionable
+        || has_content
+        || role == "AXWindow"
+        || role == "AXSheet"
+        || (has_help && is_layout_container(role))
+}
+
+/// The actions a node is addressable by. A named group or scroll area whose
+/// only actions are the generic menu and scroll ones every section carries
+/// (SwiftUI, Catalyst and web content) is a section label, not a target, so
+/// it stays an unindexed display row and indexes after it do not shift. One
+/// with an action of its own (a press, an app's custom action) is a target,
+/// and so is a group kept for its value or help, which only an indexed row
+/// shows.
+fn layout_group_actions(
+    role: &str,
+    named: bool,
+    mut advertised: super::actions::ElementActions,
+) -> super::actions::ElementActions {
+    let generic = |action: &String| action == "AXShowMenu" || action.starts_with("AXScroll");
+    if is_layout_container(role)
+        && named
+        && advertised.custom.is_empty()
+        && advertised.standard.iter().all(generic)
+    {
+        advertised.standard.clear();
+    }
+    advertised
 }
 
 /// `max_depth` budget a node's children are walked at. A named layout group
@@ -2699,6 +2743,7 @@ fn walk_element<S: AxTreeSource>(
                     .into_walk_legacy(),
                 )
                 .unwrap_or_default(),
+                custom_actions: vec![],
                 element_ptr: snapshot_key,
                 depth,
                 parent_element_index: parent_index,
@@ -2756,6 +2801,8 @@ fn walk_element<S: AxTreeSource>(
 
     // Named layout containers are display rows. Their children gain visual
     // indentation without consuming an extra walk-depth level.
+    let mut layout_attrs = None;
+    let mut layout_actions = None;
     if is_layout_container(&role) {
         let attrs = match scroll_attrs.take() {
             Some(attrs) => Some(attrs),
@@ -2768,61 +2815,86 @@ fn walk_element<S: AxTreeSource>(
             ),
         };
         let named = attrs.as_ref().is_some_and(|attrs| {
-            !collapse_layout_container(&role, attrs.title.as_deref(), attrs.description.as_deref())
+            !collapse_layout_container(
+                &role,
+                attrs.title.as_deref(),
+                attrs.description.as_deref(),
+                attrs.value.is_some() || attrs.help.is_some(),
+            )
         });
-        if named || exhaustive_nodes() {
-            let mut node = match attrs {
-                Some(attrs) => {
-                    if attrs.read_failed {
-                        note_skipped();
+        let actions = if named {
+            known(
+                super::evidence::observe_read(
+                    Some(element_key),
+                    super::evidence::ReadSite::ActionNames,
+                    source.action_names(element),
+                )
+                .into_walk_legacy(),
+            )
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let actionable =
+            !layout_group_actions(&role, named, super::actions::split(actions.clone())).is_empty();
+        if actionable && attrs.is_some() {
+            layout_attrs = attrs;
+            layout_actions = Some(actions);
+        } else {
+            if named || exhaustive_nodes() {
+                let mut node = match attrs {
+                    Some(attrs) => {
+                        if attrs.read_failed {
+                            note_skipped();
+                        }
+                        display_node(
+                            &role,
+                            attrs,
+                            source.key(element),
+                            depth,
+                            parent_index,
+                            in_web_content,
+                        )
                     }
-                    display_node(
-                        &role,
-                        attrs,
-                        source.key(element),
-                        depth,
-                        parent_index,
-                        in_web_content,
-                    )
-                }
-                None => {
-                    note_skipped();
-                    role_only_node(
-                        role.clone(),
-                        source.key(element),
-                        depth,
-                        parent_index,
-                        in_web_content,
-                    )
-                }
-            };
-            node.canonical.role_read = role_read;
-            lines.push((depth, format_node_line(&node)));
-            nodes.push(node);
-        } else if attrs.as_ref().is_some_and(|attrs| attrs.read_failed) || attrs.is_none() {
-            note_skipped();
+                    None => {
+                        note_skipped();
+                        role_only_node(
+                            role.clone(),
+                            source.key(element),
+                            depth,
+                            parent_index,
+                            in_web_content,
+                        )
+                    }
+                };
+                node.canonical.role_read = role_read;
+                lines.push((depth, format_node_line(&node)));
+                nodes.push(node);
+            } else if attrs.as_ref().is_some_and(|attrs| attrs.read_failed) || attrs.is_none() {
+                note_skipped();
+            }
+            walk_children(
+                source,
+                element,
+                surface,
+                &role,
+                depth + usize::from(named),
+                child_walk_depth(&role, walk_depth),
+                parent_index,
+                child_label_path,
+                in_web_content,
+                nodes,
+                lines,
+                counter,
+                budget,
+                batching_disabled,
+                max_depth,
+                include_web_content,
+                deferred,
+                label_claims,
+            );
+            return;
         }
-        walk_children(
-            source,
-            element,
-            surface,
-            &role,
-            depth + usize::from(named),
-            child_walk_depth(&role, walk_depth),
-            parent_index,
-            child_label_path,
-            in_web_content,
-            nodes,
-            lines,
-            counter,
-            budget,
-            batching_disabled,
-            max_depth,
-            include_web_content,
-            deferred,
-            label_claims,
-        );
-        return;
     }
 
     // Keep AXTitle and AXDescription SEPARATE so that the tree format matches
@@ -2844,13 +2916,15 @@ fn walk_element<S: AxTreeSource>(
         read_failed,
         secure,
         value_unknown,
-    }) = super::content_attrs::read_content_attrs_with(
-        source,
-        element,
-        &role,
-        budget,
-        batching_disabled,
-    )
+    }) = layout_attrs.or_else(|| {
+        super::content_attrs::read_content_attrs_with(
+            source,
+            element,
+            &role,
+            budget,
+            batching_disabled,
+        )
+    })
     else {
         // Only the role is known: a selector on its label cannot be answered.
         note_skipped();
@@ -2870,15 +2944,17 @@ fn walk_element<S: AxTreeSource>(
         // A label read failed: a selector on it cannot be answered.
         note_skipped();
     }
-    let actions = known(
-        super::evidence::observe_read(
-            Some(element_key),
-            super::evidence::ReadSite::ActionNames,
-            source.action_names(element),
+    let actions = layout_actions.unwrap_or_else(|| {
+        known(
+            super::evidence::observe_read(
+                Some(element_key),
+                super::evidence::ReadSite::ActionNames,
+                source.action_names(element),
+            )
+            .into_walk_legacy(),
         )
-        .into_walk_legacy(),
-    )
-    .unwrap_or_default();
+        .unwrap_or_default()
+    });
     let visible_title = title.as_deref().unwrap_or("").trim().to_owned();
     let visible_description = description.as_deref().unwrap_or("").trim().to_owned();
     let visible_value = value.as_deref().unwrap_or("").trim().to_owned();
@@ -2989,7 +3065,7 @@ fn walk_element<S: AxTreeSource>(
         enabled,
     );
 
-    if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" {
+    if !keeps_row(&role, is_actionable, has_content, help.is_some()) {
         if exhaustive_nodes() {
             let mut node = AXNode {
                 canonical: super::vocabulary::CanonicalEvidence {
@@ -3146,6 +3222,7 @@ fn walk_element<S: AxTreeSource>(
             identifier: identifier.clone(),
             help: help.clone(),
             actions: actions.clone(),
+            custom_actions: super::actions::split(actions.clone()).custom,
             element_ptr,
             depth,
             parent_element_index: parent_index,
@@ -3180,6 +3257,7 @@ fn walk_element<S: AxTreeSource>(
             identifier: identifier.clone(),
             help: help.clone(),
             actions: vec![],
+            custom_actions: vec![],
             element_ptr,
             depth,
             parent_element_index: parent_index,
@@ -3253,7 +3331,7 @@ fn walk_element<S: AxTreeSource>(
         surface,
         &role,
         depth + 1,
-        walk_depth + 1,
+        child_walk_depth(&role, walk_depth),
         next_parent,
         child_label_path,
         in_web_content,
@@ -3809,6 +3887,7 @@ fn role_only_node(
         identifier: None,
         help: None,
         actions: Vec::new(),
+        custom_actions: Vec::new(),
         element_ptr,
         depth,
         parent_element_index,
@@ -4111,8 +4190,17 @@ fn format_node_line_inner(node: &AXNode, bounded: bool) -> String {
         parts.push_str(&format!(" ({})", sanitize_node_text(d, char_limit)));
     }
 
-    // Bracketed metadata block (identifier, help, actions).
-    if node.element_index.is_some() {
+    // Bracketed metadata block (identifier, help, actions). An unindexed row
+    // shows only its help, which a group kept for its help has no other way
+    // to show.
+    if node.element_index.is_none() {
+        if let Some(h) = &node.help {
+            parts.push_str(&format!(
+                " [help=\"{}\"]",
+                sanitize_node_text(h, char_limit)
+            ));
+        }
+    } else {
         let mut attrs: Vec<String> = Vec::new();
         if node.enabled == Some(false) {
             attrs.push("disabled".into());
@@ -4135,6 +4223,15 @@ fn format_node_line_inner(node: &AXNode, bounded: bool) -> String {
             .collect();
         if !shown.is_empty() {
             attrs.push(format!("actions=[{}]", shown.join(",")));
+        }
+        if !node.custom_actions.is_empty() {
+            let action_str = node
+                .custom_actions
+                .iter()
+                .map(|action| serde_json::to_string(&action.name).expect("string serialization"))
+                .collect::<Vec<_>>()
+                .join(",");
+            attrs.push(format!("custom_actions=[{}]", action_str));
         }
         if !attrs.is_empty() {
             parts.push_str(" [");
@@ -4545,22 +4642,115 @@ mod tests {
     #[test]
     fn named_layout_groups_keep_their_row_and_unnamed_wrappers_collapse() {
         for role in ["AXGroup", "AXScrollArea"] {
-            assert!(!collapse_layout_container(role, Some("Billing"), None));
-            assert!(!collapse_layout_container(role, None, Some("Profile")));
+            assert!(!collapse_layout_container(
+                role,
+                Some("Billing"),
+                None,
+                false
+            ));
+            assert!(!collapse_layout_container(
+                role,
+                None,
+                Some("Profile"),
+                false
+            ));
             assert!(!collapse_layout_container(
                 role,
                 Some("  "),
-                Some("Billing")
+                Some("Billing"),
+                false
             ));
-            assert!(collapse_layout_container(role, None, None));
-            assert!(collapse_layout_container(role, Some(" "), Some("\n\t")));
+            // An unnamed group with its own value or help is content, not a
+            // wrapper.
+            assert!(!collapse_layout_container(role, None, None, true));
+            assert!(collapse_layout_container(role, None, None, false));
+            assert!(collapse_layout_container(
+                role,
+                Some(" "),
+                Some("\n\t"),
+                false
+            ));
         }
-        assert!(!collapse_layout_container("AXButton", None, None));
-        assert!(!collapse_layout_container("AXWebArea", None, None));
-        // A kept group is a display row: its actions are not read, so it gets
-        // no element_index and indexes after it do not shift.
+        assert!(!collapse_layout_container("AXButton", None, None, false));
+        assert!(!collapse_layout_container("AXWebArea", None, None, false));
         assert!(is_layout_container("AXGroup") && is_layout_container("AXScrollArea"));
         assert!(!is_layout_container("AXButton"));
+    }
+
+    #[test]
+    fn a_kept_group_is_addressable_only_by_an_action_of_its_own() {
+        let actions = |names: &[&str]| {
+            super::super::actions::split(names.iter().map(|n| (*n).to_owned()).collect())
+        };
+        // Web and SwiftUI sections advertise only menu and scroll actions:
+        // the group stays a display row, so an echoing text child keeps
+        // its own index (#7780).
+        for generic in [
+            &["AXShowMenu", "AXScrollToVisible"][..],
+            &["AXScrollUpByPage", "AXScrollDownByPage"][..],
+            &[][..],
+        ] {
+            assert!(layout_group_actions("AXGroup", true, actions(generic)).is_empty());
+            assert!(layout_group_actions("AXScrollArea", true, actions(generic)).is_empty());
+        }
+        let pressable = layout_group_actions("AXGroup", true, actions(&["AXPress", "AXShowMenu"]));
+        assert_eq!(pressable.standard, ["AXPress", "AXShowMenu"]);
+        let custom = layout_group_actions(
+            "AXGroup",
+            true,
+            actions(&["AXShowMenu", "Name:Pin List\nTarget:0x0\nSelector:(null)"]),
+        );
+        assert_eq!(custom.standard, ["AXShowMenu"]);
+        assert_eq!(custom.custom.len(), 1);
+        // A group kept for its help or value has no name to show as a
+        // display row, so it keeps its actions and its index.
+        let help_only = layout_group_actions("AXGroup", false, actions(&["AXShowMenu"]));
+        assert_eq!(help_only.standard, ["AXShowMenu"]);
+        // Other roles keep every action they advertise.
+        let menu_only = layout_group_actions("AXImage", true, actions(&["AXShowMenu"]));
+        assert_eq!(menu_only.standard, ["AXShowMenu"]);
+    }
+
+    #[test]
+    fn a_help_only_group_with_no_action_keeps_an_unindexed_row() {
+        for role in ["AXGroup", "AXScrollArea"] {
+            assert!(keeps_row(role, false, false, true));
+            assert!(!keeps_row(role, false, false, false));
+        }
+        // Help alone does not keep a row for another role's empty node.
+        assert!(!keeps_row("AXImage", false, false, true));
+        assert!(keeps_row("AXWindow", false, false, false));
+
+        let node = AXNode {
+            owned_row_label: None,
+            canonical: Default::default(),
+            element_index: None,
+            role: "AXGroup".into(),
+            title: None,
+            value: None,
+            description: None,
+            placeholder: None,
+            subrole: None,
+            identifier: Some("grp-help-only".into()),
+            help: Some("Swipe left to archive.".into()),
+            actions: vec![],
+            custom_actions: vec![],
+            element_ptr: 0,
+            depth: 1,
+            parent_element_index: None,
+            frame: None,
+            value_state: None,
+            value_description: None,
+            min_value: None,
+            max_value: None,
+            enabled: None,
+            selected: None,
+            in_web_content: false,
+        };
+        assert_eq!(
+            format_node_line(&node),
+            "- AXGroup [help=\"Swipe left to archive.\"]"
+        );
     }
 
     #[test]
@@ -4586,6 +4776,48 @@ mod tests {
             format_node_line(&node),
             "- [7] AXCheckBox \"Reset\" [disabled actions=[press]]"
         );
+    }
+
+    #[test]
+    fn a_custom_action_name_cannot_add_tree_rows() {
+        let node = AXNode {
+            owned_row_label: None,
+            canonical: Default::default(),
+            element_index: Some(4),
+            role: "AXCell".into(),
+            title: None,
+            value: None,
+            description: None,
+            placeholder: None,
+            subrole: None,
+            identifier: None,
+            help: None,
+            actions: vec!["AXPress".into()],
+            custom_actions: crate::ax::actions::split(vec![
+                "Name:Pin List\nTarget:0x0\nSelector:(null)".into(),
+                "Name:Move Down\nTarget:0x0\nSelector:(null)".into(),
+            ])
+            .custom,
+            element_ptr: 0,
+            depth: 0,
+            parent_element_index: None,
+            frame: None,
+            value_state: None,
+            value_description: None,
+            min_value: None,
+            max_value: None,
+            enabled: Some(true),
+            selected: None,
+            in_web_content: false,
+        };
+        let rendered = format_node_line(&node);
+        assert_eq!(rendered.lines().count(), 1, "{rendered}");
+        assert!(rendered.contains("actions=[press]"), "{rendered}");
+        assert!(
+            rendered.contains("custom_actions=[\"Pin List\",\"Move Down\"]"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Selector"), "{rendered}");
     }
 
     #[test]
@@ -5250,6 +5482,7 @@ mod lean_row_tests {
                 identifier: None,
                 help: None,
                 actions: vec!["AXRaise".into()],
+                custom_actions: vec![],
                 element_ptr: 0,
                 depth: 0,
                 parent_element_index: None,
@@ -5275,6 +5508,7 @@ mod lean_row_tests {
                 identifier: None,
                 help: None,
                 actions: vec![],
+                custom_actions: vec![],
                 element_ptr: 0,
                 depth: 1,
                 parent_element_index: Some(0),
@@ -5300,6 +5534,7 @@ mod lean_row_tests {
                 identifier: None,
                 help: None,
                 actions: vec![],
+                custom_actions: vec![],
                 element_ptr: 0,
                 depth: 2,
                 parent_element_index: Some(0),
@@ -5325,6 +5560,7 @@ mod lean_row_tests {
                 identifier: None,
                 help: None,
                 actions: vec![],
+                custom_actions: vec![],
                 element_ptr: 0,
                 depth: 2,
                 parent_element_index: Some(0),
@@ -5350,6 +5586,7 @@ mod lean_row_tests {
                 identifier: None,
                 help: None,
                 actions: vec!["AXConfirm".into()],
+                custom_actions: vec![],
                 element_ptr: 0,
                 depth: 1,
                 parent_element_index: Some(0),

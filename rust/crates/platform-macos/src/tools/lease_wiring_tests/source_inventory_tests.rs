@@ -68,7 +68,9 @@ fn check_reviewed_glob_targets(root: &Path) {
         // (clippy items_after_test_module), no export added or removed.
         // S4 re-audited AX bindings: opt-in narrows to Chromium/Electron;
         // added AX helpers do not export worker launchers.
-        (root.join("ax/bindings.rs"), 9390041552410539438_u64),
+        // S9 adds bounded AX attribute reads and an absence probe; neither
+        // exports a worker launcher or mutating dispatch entry point.
+        (root.join("ax/bindings.rs"), 11896794543820533297_u64),
         (
             root.join("../../cua-driver-contract/src/vocabulary.rs"),
             7383688377390068226_u64,

@@ -11,6 +11,8 @@
 //!   - AXTextField / AXTextArea inside web content (AXWebArea): wait for DOM focus
 //!     (event driven, capped at 800 ms by `CUA_DRIVER_WEBKIT_SETTLE_MS`). Native text inputs return without it.
 //!   - AXPopUpButton: appends the list of available options and redirects to set_value.
+//!   - AXMenuButton / AXPopUpButton with no menu in the tree: waits (up to 1 s)
+//!     until the menu the press opens is, so the next snapshot sees it.
 //!   - Advertised-action warning if the element didn't list the requested action.
 //!
 //! * **Pixel path** (`x`, `y`): synthesises CGEvent mouse clicks and posts them to
@@ -191,6 +193,93 @@ fn selection_readback_confirms(
         // the driver can read: it may not have landed at all.
         !before && after
     }
+}
+
+const SELECTION_READBACK_POLL: std::time::Duration = std::time::Duration::from_millis(25);
+/// How long a menu-opening press waits for its menu to reach the AX tree.
+const MENU_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
+/// The longest one AX read of the menu wait may block an unresponsive app.
+const MENU_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Whether `ax_action` on `role` opens a menu that belongs to the element: a
+/// SwiftUI `Menu` (AXMenuButton) or an AppKit popup button publishes it beside
+/// or under the control. A menu bar item keeps its menu in the tree while
+/// closed, and a context menu (AXShowMenu on any other role) belongs to no
+/// element, so neither is waited for.
+fn opens_menu(ax_action: &str, role: &str) -> bool {
+    matches!(ax_action, "AXPress" | "AXShowMenu")
+        && matches!(role, "AXMenuButton" | "AXPopUpButton")
+}
+
+/// Whether `shows_menu` reports a menu before `timeout` (#6082). Returns as
+/// soon as it does; a press that opens nothing costs the full timeout.
+/// `shows_menu` gets the deadline and must not read past it.
+fn menu_appeared(
+    mut shows_menu: impl FnMut(std::time::Instant) -> bool,
+    timeout: std::time::Duration,
+    poll: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if shows_menu(deadline) {
+            return true;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        std::thread::sleep(poll.min(left));
+    }
+}
+
+/// Whether an AXMenu holding at least one item is among `element`'s children
+/// or its siblings. SwiftUI publishes a `Menu`'s open menu in both places;
+/// AppKit puts it under the popup button or menu bar item. Each read is
+/// capped at `MENU_READ_TIMEOUT` and none starts after `deadline`, so an app
+/// that stops answering cannot hold the caller past it.
+unsafe fn menu_beside(element: AXUIElementRef, deadline: std::time::Instant) -> bool {
+    use crate::ax::bindings::AXUIElementSetMessagingTimeout;
+    let left = || deadline.saturating_duration_since(std::time::Instant::now());
+    // Caps `node`'s next read at what is left of the budget; false, and no
+    // read, once none is.
+    let bound = |node: AXUIElementRef| {
+        let budget = left();
+        !budget.is_zero()
+            && unsafe {
+                AXUIElementSetMessagingTimeout(node, budget.min(MENU_READ_TIMEOUT).as_secs_f32())
+            } == crate::ax::bindings::kAXErrorSuccess
+            && !left().is_zero()
+    };
+    let mut nodes = Vec::new();
+    if bound(element) {
+        nodes = copy_children(element);
+        if bound(element) {
+            if let Some(parent) = copy_element_attr(element, "AXParent") {
+                if bound(parent) {
+                    nodes.extend(copy_children(parent));
+                }
+                CFRelease(parent as CFTypeRef);
+            }
+        }
+    }
+    // The element is the snapshot's; give it the walker's bound back.
+    let _ = AXUIElementSetMessagingTimeout(element, crate::ax::tree::AX_MESSAGING_TIMEOUT_SECONDS);
+    let mut found = false;
+    for node in nodes {
+        if !found
+            && bound(node)
+            && copy_string_attr(node, "AXRole").as_deref() == Some("AXMenu")
+            && bound(node)
+        {
+            let items = copy_children(node);
+            found = !items.is_empty();
+            for item in items {
+                CFRelease(item as CFTypeRef);
+            }
+        }
+        CFRelease(node as CFTypeRef);
+    }
+    found
 }
 
 /// AXPress on a radio button or checkbox that advertises it: a press whose
@@ -1266,7 +1355,7 @@ fn def() -> &'static ToolDef {
                 "capture_id": { "type": "string", "description": "Optional capture ID from get_window_state or get_desktop_state. With x,y it is consumed atomically; stale or mismatched captures are refused." },
                 "x":             { "type": "number",  "description": "X in screenshot pixels (get_window_state PNG, or get_desktop_state PNG for a desktop target)." },
                 "y":             { "type": "number",  "description": "Y in screenshot pixels from the image selected by target." },
-                "action":        { "type": "string",  "description": "AX action: press (default), show_menu, pick, confirm, cancel, open, show_alternate_ui, show_default_ui. show_alternate_ui reveals hover-only controls on an element that lists it, without the pointer." },
+                "action":        { "type": "string",  "description": "AX action: press (default), show_menu, pick, confirm, cancel, open, show_alternate_ui, show_default_ui; or an element's published custom_actions name or raw envelope. show_alternate_ui reveals hover-only controls on an element that lists it, without the pointer." },
                 "button":        {
                     "type": "string",
                     "enum": ["left", "right", "middle"],
@@ -2272,6 +2361,7 @@ impl ClickTool {
                                             foreground,
                                             read_back,
                                             false,
+                                            watch_page,
                                             if crate::input::skylight::focus_generation() != focus_generation {
                                                 cua_driver_core::mutation::PriorInput::MayHaveDelivered
                                             } else {
@@ -2319,6 +2409,7 @@ impl ClickTool {
                                         &selection_modifiers,
                                         false,
                                         read_back,
+                                        watch_page,
                                         watch_page,
                                         cua_driver_core::mutation::PriorInput::None,
                                         prompt,
@@ -6936,10 +7027,36 @@ pub(super) fn resolve_click_action<T: Copy>(
     Ok((advertised, action))
 }
 
+fn revalidate_click_action(
+    requested: &str,
+    advertised: &[String],
+    foreground: bool,
+    previous: &str,
+) -> anyhow::Result<()> {
+    let current =
+        crate::input::ax_actions::resolve_element_action(requested, advertised, foreground)?;
+    anyhow::ensure!(current == previous, "target action changed before dispatch");
+    Ok(())
+}
+
 #[cfg(test)]
 mod u31_click_action_seam_tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn changed_custom_action_is_refused_before_dispatch() {
+        let old = "Name:Move Down\nTarget:0x0\nSelector:(null)";
+        let new = "Name:Move Up\nTarget:0x0\nSelector:(null)";
+        let sends = std::cell::Cell::new(0);
+        let result = revalidate_click_action("Move Down", &[new.to_owned()], false, old);
+        if result.is_ok() {
+            sends.set(sends.get() + 1);
+        }
+        assert!(result.is_err());
+        assert_eq!(sends.get(), 0);
+        assert!(revalidate_click_action("Move Down", &[old.to_owned()], false, old).is_ok());
+    }
 
     #[test]
     fn resolves_exact_action_on_the_same_target_before_enabled_check() {
@@ -7012,6 +7129,7 @@ fn perform_ax_click(
     foreground: bool,
     read_back: bool,
     watch_page: bool,
+    wait_for_menu: bool,
     mut prior: cua_driver_core::mutation::PriorInput,
     prompt: PromptInput,
 ) -> anyhow::Result<AxClickStep> {
@@ -7026,6 +7144,7 @@ fn perform_ax_click(
     // A live enabled-state check follows action resolution, as before. The
     // resolved spelling belongs to this target's advertised actions.
     let advertised = unsafe { copy_action_names(element) };
+    revalidate_click_action(action_str, &advertised, foreground, ax_action)?;
     crate::input::ax_actions::ensure_ax_action_enabled(element_ptr, ax_action, foreground)?;
 
     // Capture advertised actions BEFORE dispatching so we can detect silent no-ops
@@ -7264,6 +7383,11 @@ fn perform_ax_click(
     let page = (watch_page && !foreground && ax_action == "AXPress")
         .then(|| unsafe { crate::ax::web_effect::PageProbe::before_press(pid, element) })
         .flatten();
+    // A control that already shows a menu gives the wait nothing to see.
+    let menu_wait = wait_for_menu && opens_menu(ax_action, &role) && {
+        let deadline = std::time::Instant::now() + MENU_OPEN_TIMEOUT;
+        unsafe { !menu_beside(element, deadline) }
+    };
     let pressed_at = std::time::Instant::now();
     let err = latency::section(latency::Stage::AxPerform, || unsafe {
         crate::ax::bindings::perform_action(element, ax_action)
@@ -7347,6 +7471,25 @@ fn perform_ax_click(
     let evidence = probe.observe();
     if let Some(evidence) = evidence {
         summary.push_str(&format!(" Read back: {}.", evidence.detail()));
+    }
+
+    // The app publishes the menu after the press returns; wait so a snapshot
+    // taken right after this call finds its items.
+    let menu_opened = menu_wait.then(|| {
+        menu_appeared(
+            |deadline| unsafe { menu_beside(element, deadline) },
+            MENU_OPEN_TIMEOUT,
+            SELECTION_READBACK_POLL,
+        )
+    });
+    match menu_opened {
+        Some(true) => summary.push_str(" A menu appeared near the control in the accessibility tree; take a fresh snapshot before choosing an item."),
+        Some(false) => summary.push_str(&format!(
+            "\n⚠️ No open menu appeared in the accessibility tree within {} ms; take a fresh \
+             snapshot before choosing an item.",
+            MENU_OPEN_TIMEOUT.as_millis()
+        )),
+        None => {}
     }
 
     // AXPopUpButton: list available options, redirect to set_value.
@@ -8139,6 +8282,62 @@ mod tests {
         assert!(r.get("escalation").is_none());
     }
 
+    /// #6082: only a press or show-menu on a control that owns its menu waits.
+    #[test]
+    fn only_menu_owning_controls_wait_for_their_menu() {
+        for role in ["AXMenuButton", "AXPopUpButton"] {
+            assert!(opens_menu("AXPress", role), "{role}");
+            assert!(opens_menu("AXShowMenu", role), "{role}");
+            assert!(!opens_menu("AXConfirm", role), "{role}");
+        }
+        assert!(!opens_menu("AXPress", "AXMenuBarItem"));
+        assert!(!opens_menu("AXPress", "AXButton"));
+        assert!(!opens_menu("AXShowMenu", "AXButton"));
+    }
+
+    /// #6082: the wait ends at the first read that shows a menu, and a press
+    /// that opens none gives up at the timeout without failing.
+    #[test]
+    fn menu_wait_returns_once_a_menu_appears() {
+        let poll = std::time::Duration::from_millis(1);
+        let mut reads = 0;
+        assert!(menu_appeared(
+            |_| {
+                reads += 1;
+                reads >= 3
+            },
+            std::time::Duration::from_secs(5),
+            poll,
+        ));
+        assert_eq!(reads, 3);
+
+        let started = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(30);
+        assert!(!menu_appeared(|_| false, timeout, poll));
+        assert!(started.elapsed() >= timeout);
+    }
+
+    /// #6082: the wait hands every read its deadline and never sleeps past
+    /// it, so a long poll interval cannot stretch the bound.
+    #[test]
+    fn menu_wait_stays_within_its_deadline() {
+        let timeout = std::time::Duration::from_millis(30);
+        let started = std::time::Instant::now();
+        let mut deadlines = Vec::new();
+        assert!(!menu_appeared(
+            |deadline| {
+                deadlines.push(deadline);
+                false
+            },
+            timeout,
+            std::time::Duration::from_secs(5),
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(deadlines.windows(2).all(|d| d[0] == d[1]));
+    }
+
+    /// A press the driver confirmed, or one it has no evidence against, never
+    /// reads as a no-op.
     #[test]
     fn noop_suspicion_needs_evidence() {
         let outcome = |unadvertised, evidence| ("clicked".into(), unadvertised, evidence, false);

@@ -272,7 +272,13 @@ pub(crate) fn foreground_matches_target_or_owned_window(
     foreground_matches(target, actual, false)
 }
 
-fn foreground_matches(target: ForegroundTarget, actual: u64, hidden_dismisses: bool) -> bool {
+/// True only when the addressed HWND no longer exists; a hidden HWND is not
+/// enough to prove the original process instance still owns it.
+pub(crate) fn window_closed(hwnd: u64) -> bool {
+    !unsafe { IsWindow(HWND(hwnd as *mut _)) }.as_bool()
+}
+
+fn foreground_matches(target: ForegroundTarget, actual: u64, after_click: bool) -> bool {
     let current_target_pid = window_owner_pid(target.hwnd);
     let actual_pid = window_owner_pid(actual);
     let actual_hwnd = HWND(actual as *mut _);
@@ -285,14 +291,16 @@ fn foreground_matches(target: ForegroundTarget, actual: u64, hidden_dismisses: b
             (!owner.0.is_null()).then_some(owner.0 as usize as u64)
         });
 
+    let target_dismissed = target_dismissed(
+        current_target_pid,
+        target.pid,
+        after_click && !unsafe { IsWindowVisible(HWND(target.hwnd as *mut _)) }.as_bool(),
+    );
+
     post_action_foreground_allowed(PostActionForegroundRelation {
         exact_match: target.hwnd == actual,
         target_identity_live: current_target_pid == Some(target.pid),
-        target_dismissed: target_dismissed(
-            current_target_pid,
-            target.pid,
-            hidden_dismisses && !unsafe { IsWindowVisible(HWND(target.hwnd as *mut _)) }.as_bool(),
-        ),
+        target_dismissed,
         actual_live: actual_pid.is_some(),
         actual_visible,
         same_pid: actual_pid == Some(target.pid),
@@ -778,6 +786,16 @@ mod exact_window_tests {
         dismissed.actual_is_prior_owner = true;
         dismissed.same_pid = false;
         assert!(!post_action_foreground_allowed(dismissed));
+    }
+
+    #[test]
+    fn dismissed_unowned_target_does_not_authorize_unrelated_foreground() {
+        let mut closed = relation(false, false, false);
+        closed.target_identity_live = false;
+        closed.target_dismissed = true;
+        closed.actual_live = false;
+        closed.actual_visible = false;
+        assert!(!post_action_foreground_allowed(closed));
     }
 
     #[test]

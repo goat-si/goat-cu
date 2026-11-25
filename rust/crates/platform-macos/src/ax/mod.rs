@@ -21,6 +21,7 @@
 
 #[allow(dead_code)]
 pub(crate) mod actionability;
+pub mod actions;
 mod batch_attrs;
 pub mod bindings;
 pub(crate) mod content_attrs;

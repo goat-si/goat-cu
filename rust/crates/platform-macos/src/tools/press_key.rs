@@ -542,6 +542,9 @@ pub(super) fn delivery_failed(error: anyhow::Error) -> ToolResult {
     if let Some(refusal) = crate::security_prompt::tool_result(&error) {
         return refusal;
     }
+    if let Some(refusal) = super::key_focus_unconfirmed_error(&error) {
+        return refusal;
+    }
     if let Some(conflict) = error.downcast_ref::<WindowFocusConflictError>() {
         return match *conflict {
             WindowFocusConflictError::AddressedElementOutsideWindow {
@@ -3678,7 +3681,7 @@ pub(super) mod tests {
         use std::cell::RefCell;
         let events = RefCell::new(Vec::new());
         let mut checks = 0;
-        with_confirmed_key_focus(
+        crate::input::ax_actions::with_confirmed_key_focus(
             Some(42),
             |target| {
                 events.borrow_mut().push(("focus", target));
@@ -3712,7 +3715,7 @@ pub(super) mod tests {
         use std::cell::Cell;
         let sent = Cell::new(0);
         for target in [Some(42), None] {
-            with_confirmed_key_focus(
+            crate::input::ax_actions::with_confirmed_key_focus(
                 target,
                 |_| Ok(()),
                 |_| true,
@@ -3724,14 +3727,14 @@ pub(super) mod tests {
             .unwrap();
         }
         assert_eq!(sent.get(), 2);
-        let failed = with_confirmed_key_focus(
+        let failed = crate::input::ax_actions::with_confirmed_key_focus(
             Some(42),
             |_| anyhow::bail!("focus unavailable"),
             |_| panic!("must not confirm failed focus"),
             || -> anyhow::Result<()> { panic!("must not dispatch") },
         );
         assert_eq!(failed.unwrap_err().to_string(), "focus unavailable");
-        with_confirmed_key_focus(
+        crate::input::ax_actions::with_confirmed_key_focus(
             None,
             |_| panic!("window key has no element"),
             |_| panic!("window key has no element"),

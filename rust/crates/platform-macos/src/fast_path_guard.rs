@@ -202,7 +202,7 @@ unsafe fn hit_test(pid: i32, x: f64, y: f64) -> Option<AXUIElementRef> {
 }
 
 /// Whether `hit` is `target` or a descendant within a few ancestors.
-unsafe fn is_self_or_ancestor(hit: AXUIElementRef, target: AXUIElementRef) -> bool {
+pub(crate) unsafe fn is_self_or_ancestor(hit: AXUIElementRef, target: AXUIElementRef) -> bool {
     let mut current = hit;
     let mut owned: Vec<AXUIElementRef> = Vec::new();
     let mut found = false;
@@ -275,7 +275,8 @@ fn window_observation(
     screen: (f64, f64),
     want: &WindowFingerprint,
 ) -> WindowObservation {
-    let windows = crate::windows::all_windows();
+    let enumeration = crate::windows::all_windows_with_space_snapshot();
+    let windows = enumeration.windows;
     let Some(info) = windows.iter().find(|w| w.window_id == window_id) else {
         return WindowObservation {
             exists: false,
@@ -290,24 +291,37 @@ fn window_observation(
     let b = &info.bounds;
     // `z_index` grows toward the front (the frontmost window has the highest
     // value), so the window at the point is the one with the largest z_index.
-    let front = windows
+    let front = enumeration
+        .complete
+        .then(|| front_window_at_point(&windows, screen))
+        .flatten();
+    WindowObservation {
+        exists: true,
+        pid: info.pid,
+        frame: Rect::new(b.x, b.y, b.width, b.height),
+        scale: want.scale,
+        visible: info.is_on_screen && info.on_current_space != Some(false),
+        pid_at_point: front.map(|w| w.pid),
+        covered_at_point: Some(front.is_none_or(|w| w.window_id != window_id)),
+    }
+}
+
+fn front_window_at_point(
+    windows: &[crate::windows::WindowInfo],
+    screen: (f64, f64),
+) -> Option<&crate::windows::WindowInfo> {
+    let candidates: Vec<_> = windows
         .iter()
         .filter(|w| w.layer == 0 && w.is_on_screen)
         .filter(|w| {
             Rect::new(w.bounds.x, w.bounds.y, w.bounds.width, w.bounds.height)
                 .contains(screen.0, screen.1)
         })
-        .max_by_key(|w| w.z_index);
-    WindowObservation {
-        exists: true,
-        pid: info.pid,
-        frame: Rect::new(b.x, b.y, b.width, b.height),
-        // A scale change shows as a size change in pixels; points are enough.
-        scale: want.scale,
-        visible: info.is_on_screen && info.on_current_space != Some(false),
-        pid_at_point: front.map(|w| w.pid),
-        covered_at_point: front.map(|w| w.window_id != window_id),
+        .collect();
+    if candidates.iter().any(|window| window.z_index.is_none()) {
+        return None;
     }
+    candidates.into_iter().max_by_key(|w| w.z_index)
 }
 
 /// Act-time crops from the window itself (never the screen).
@@ -589,6 +603,30 @@ pub fn annotate(result: &mut ToolResult, summary: Option<Value>) {
 #[cfg(test)]
 mod tests {
     use super::label_of;
+
+    #[test]
+    fn unknown_stacking_does_not_prove_the_target_is_uncovered() {
+        let window = |id, z_index| crate::windows::WindowInfo {
+            window_id: id,
+            pid: id as i32,
+            app_name: String::new(),
+            title: String::new(),
+            bounds: crate::windows::WindowBounds {
+                x: 0.,
+                y: 0.,
+                width: 100.,
+                height: 100.,
+            },
+            layer: 0,
+            z_index,
+            is_on_screen: true,
+            current_space_id: None,
+            on_current_space: Some(true),
+            space_ids: None,
+        };
+        let windows = [window(1, Some(1)), window(2, None)];
+        assert!(super::front_window_at_point(&windows, (10., 10.)).is_none());
+    }
 
     #[test]
     fn label_prefers_title_then_description() {
