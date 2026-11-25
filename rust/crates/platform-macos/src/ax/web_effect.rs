@@ -203,6 +203,13 @@ unsafe fn read_window(pid: i32, window: AXUIElementRef) -> Option<u64> {
     // A hidden or covered Chromium window holds back its page changes until it
     // is asked something; ask first so the read sees the page as it is now.
     super::enablement::flush_pending_web_updates(pid, window);
+    read_window_with(window, |el| copy_attrs_batch(el, &ATTRS))
+}
+
+unsafe fn read_window_with(
+    window: AXUIElementRef,
+    mut read: impl FnMut(AXUIElementRef) -> BatchRead,
+) -> Option<u64> {
     let started = Instant::now();
     let mut hasher = DefaultHasher::new();
     let mut stack = vec![(RetainedElement::retain(window as usize), false)];
@@ -218,7 +225,7 @@ unsafe fn read_window(pid: i32, window: AXUIElementRef) -> Option<u64> {
         // read: the one-by-one fallback and a failed attribute read cannot be
         // told from a missing attribute, so two failed reads could match and
         // pass for an unchanged page.
-        let BatchRead::Slots(attrs) = copy_attrs_batch(el, &ATTRS) else {
+        let BatchRead::Slots(attrs) = read(el) else {
             return None;
         };
         // An answered absent attribute is different from a missing slot.
@@ -246,11 +253,14 @@ unsafe fn read_window(pid: i32, window: AXUIElementRef) -> Option<u64> {
                 children.push(RetainedElement::retain(child as usize));
             }
         }
+        let title = decoded(&attrs, 6, string_from_cf)?;
+        let description = decoded(&attrs, 7, string_from_cf)?;
+        let position = decoded(&attrs, 8, point_from_cf)?;
+        let size = decoded(&attrs, 9, size_from_cf)?;
+        if is_window {
+            title.hash(&mut hasher);
+        }
         let text = if in_page {
-            let title = decoded(&attrs, 6, string_from_cf)?;
-            let description = decoded(&attrs, 7, string_from_cf)?;
-            let position = decoded(&attrs, 8, point_from_cf)?;
-            let size = decoded(&attrs, 9, size_from_cf)?;
             let frame = match (position, size) {
                 (Some((x, y)), Some((w, h))) if w >= 1.0 && h >= 1.0 => {
                     Some([x, y, w, h].map(f64::to_bits))
@@ -265,9 +275,6 @@ unsafe fn read_window(pid: i32, window: AXUIElementRef) -> Option<u64> {
         } else {
             None
         };
-        if is_window {
-            decoded(&attrs, 6, string_from_cf)?.hash(&mut hasher);
-        }
         NodeFacts {
             role,
             subrole,
@@ -290,6 +297,71 @@ unsafe fn read_window(pid: i32, window: AXUIElementRef) -> Option<u64> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    fn chrome_node_bad_slot_is_unknown(wrong_type: bool) {
+        use crate::ax::bindings::{
+            kAXErrorNoValue, kAXErrorSuccess, kAXValueAXErrorType, AXUIElementCreateApplication,
+            AXValueCreate,
+        };
+        use core_foundation::{
+            base::{CFRetain, CFType},
+            number::CFNumber,
+            string::CFString,
+        };
+        #[link(name = "CoreFoundation", kind = "framework")]
+        extern "C" {
+            static kCFNull: CFTypeRef;
+        }
+        unsafe {
+            let app = AXUIElementCreateApplication(std::process::id() as i32);
+            assert!(!app.is_null());
+            let absent = || {
+                CFType::wrap_under_create_rule(AXValueCreate(
+                    kAXValueAXErrorType,
+                    &kAXErrorNoValue as *const _ as *const _,
+                ) as CFTypeRef)
+            };
+            let mut slots: Vec<CFType> = (0..10).map(|_| absent()).collect();
+            slots[0] = CFString::new("AXGroup").as_CFType();
+            let good = CFArray::from_CFTypes(&slots);
+            let before = read_window_with(app, |_| {
+                let raw = good.as_CFTypeRef();
+                CFRetain(raw);
+                super::super::batch_attrs::finish_batch(kAXErrorSuccess, raw, 10)
+            })
+            .unwrap();
+            slots[7] = if wrong_type {
+                CFNumber::from(42).as_CFType()
+            } else {
+                CFType::wrap_under_get_rule(kCFNull)
+            };
+            let array = CFArray::from_CFTypes(&slots);
+            let result = watch(
+                before,
+                || {
+                    read_window_with(app, |_| {
+                        let raw = array.as_CFTypeRef();
+                        CFRetain(raw);
+                        super::super::batch_attrs::finish_batch(kAXErrorSuccess, raw, 10)
+                    })
+                },
+                || Duration::ZERO,
+                |_| {},
+            );
+            assert_eq!(result, PageChange::Unknown, "wrong_type={wrong_type}");
+            CFRelease(app as _);
+        }
+    }
+
+    #[test]
+    fn chrome_node_missing_slot_never_reports_unchanged() {
+        chrome_node_bad_slot_is_unknown(false);
+    }
+
+    #[test]
+    fn chrome_node_wrong_type_never_reports_unchanged() {
+        chrome_node_bad_slot_is_unknown(true);
+    }
 
     /// Scripted reads against a fake clock that advances only when the watch
     /// sleeps.

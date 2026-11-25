@@ -131,6 +131,38 @@ fn pixel_target_check_failure(error: &crate::input::mouse::TargetCheckFailed) ->
 #[cfg(test)]
 mod sheet_dispatch_tests {
     #[test]
+    fn sheet_appearing_after_admission_blocks_point_ax_dispatch() {
+        use super::*;
+        use std::cell::Cell;
+        let sends = Cell::new(0);
+        unsafe {
+            let element =
+                crate::ax::bindings::AXUIElementCreateApplication(std::process::id() as i32);
+            assert!(!element.is_null());
+            let admission = Some(false);
+            assert_eq!(admission, Some(false));
+            for sheet in [Some(true), None] {
+                let outcome = ax_press_with_ancestors_with(
+                    element,
+                    &None,
+                    std::process::id() as i32,
+                    ClickReads::for_click(false),
+                    &|_| vec!["AXPress".into()],
+                    &|_, _| {
+                        sends.set(sends.get() + 1);
+                        crate::ax::bindings::kAXErrorSuccess
+                    },
+                    &|_| sheet,
+                )
+                .unwrap();
+                assert!(matches!(outcome, AxPressOutcome::SheetBlocked));
+            }
+            CFRelease(element as _);
+        }
+        assert_eq!(sends.get(), 0);
+    }
+
+    #[test]
     fn a_blocked_or_unreadable_sheet_never_dispatches_a_point() {
         use std::cell::Cell;
         for blocked in [Some(true), None] {
@@ -3096,6 +3128,10 @@ impl ClickTool {
                                 PxAxPress::Delivered(evidence, hit)
                             }
                             Ok(AxPressOutcome::Unavailable) => PxAxPress::FallThrough,
+                            Ok(AxPressOutcome::SheetBlocked) => {
+                                CFRelease(element as _);
+                                return Err(SheetBlockedTarget.into());
+                            }
                             Ok(AxPressOutcome::Indeterminate) => {
                                 CFRelease(element as _);
                                 return Ok(PxAxPress::Indeterminate(hit));
@@ -3144,6 +3180,9 @@ impl ClickTool {
                         }));
                     }
                     Ok(Err(error)) if !focus_only => {
+                        if error.is::<SheetBlockedTarget>() {
+                            return sheet_refusal();
+                        }
                         if let Some(failure) = error.downcast_ref::<ClickWriteFailure>() {
                             if failure.disposition
                                 == cua_driver_contract::ErrorDisposition::NOT_DELIVERED
@@ -7259,6 +7298,26 @@ mod u31_click_action_seam_tests {
     use std::cell::RefCell;
 
     #[test]
+    fn escaped_fronting_action_is_refused_at_admission_and_recheck() {
+        let raw = "Name:Focus\tWindow\nTarget:0x0\nSelector:(null)";
+        let advertised = vec![raw.to_owned()];
+        let sends = std::cell::Cell::new(0);
+        let admitted = resolve_click_action(
+            73_u32,
+            "Focus\\tWindow",
+            false,
+            |_| advertised.clone(),
+            |_, _, _| {
+                sends.set(sends.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(admitted.is_err());
+        assert!(revalidate_click_action("Focus\\tWindow", &advertised, false, raw).is_err());
+        assert_eq!(sends.get(), 0);
+    }
+
+    #[test]
     fn changed_custom_action_is_refused_before_dispatch() {
         let old = "Name:Move Down\nTarget:0x0\nSelector:(null)";
         let new = "Name:Move Up\nTarget:0x0\nSelector:(null)";
@@ -7646,6 +7705,8 @@ fn perform_ax_click(
     };
     // Making the window key, or the menu wait, can let the app open a sheet.
     unsafe { ensure_sheet_clear(element) }?;
+    let current_actions = unsafe { copy_action_names(element) };
+    revalidate_click_action(action_str, &current_actions, foreground, ax_action)?;
     let pressed_at = std::time::Instant::now();
     let err = latency::section(latency::Stage::AxPerform, || unsafe {
         crate::ax::bindings::perform_action(element, ax_action)
@@ -7938,6 +7999,7 @@ enum AxPressOutcome {
     Delivered(Option<ClickEvidence>),
     /// No actionable element: fall through to the routed pixel path.
     Unavailable,
+    SheetBlocked,
     /// An AX action may have been delivered: stop, do not fall through.
     Indeterminate,
     NotDelivered(crate::ax::bindings::AXError),
@@ -8001,11 +8063,31 @@ unsafe fn ax_press_with_ancestors(
     pid: i32,
     reads: ClickReads,
 ) -> Result<AxPressOutcome, super::window_points::WindowMoved> {
-    use crate::ax::bindings::{copy_action_names, copy_element_attr, copy_string_attr};
+    ax_press_with_ancestors_with(
+        element,
+        dispatch_guard,
+        pid,
+        reads,
+        &|el| crate::ax::bindings::copy_action_names(el),
+        &|el, action| AXUIElementPerformAction(el, action),
+        &|el| crate::ax::exact_target::element_blocked_by_sheet(el),
+    )
+}
+
+unsafe fn ax_press_with_ancestors_with(
+    element: crate::ax::bindings::AXUIElementRef,
+    dispatch_guard: &Option<super::window_points::DispatchGuard>,
+    pid: i32,
+    reads: ClickReads,
+    read_actions: &dyn Fn(AXUIElementRef) -> Vec<String>,
+    perform: &dyn Fn(AXUIElementRef, core_foundation::string::CFStringRef) -> i32,
+    sheet: &dyn Fn(AXUIElementRef) -> Option<bool>,
+) -> Result<AxPressOutcome, super::window_points::WindowMoved> {
+    use crate::ax::bindings::{copy_element_attr, copy_string_attr};
     use core_foundation::base::CFRelease;
     use core_foundation::string::CFString;
 
-    let leaf_actions = copy_action_names(element);
+    let leaf_actions = read_actions(element);
     if leaf_actions.iter().any(|a| a == "AXPress") {
         let role = copy_string_attr(element, "AXRole").unwrap_or_default();
         let probe = ClickProbe::capture(
@@ -8014,8 +8096,11 @@ unsafe fn ax_press_with_ancestors(
             reads,
         );
         super::window_points::check_guard(dispatch_guard)?;
+        if sheet(element) != Some(false) {
+            return Ok(AxPressOutcome::SheetBlocked);
+        }
         let action = CFString::new("AXPress");
-        let err = AXUIElementPerformAction(element, action.as_concrete_TypeRef());
+        let err = perform(element, action.as_concrete_TypeRef());
         let outcome = crate::ax::write_outcome::native_write_outcome(
             crate::ax::write_outcome::NativeWriteKind::Perform,
             true,
@@ -8069,7 +8154,7 @@ unsafe fn ax_press_with_ancestors(
         // below: no entry is used after release, and nothing is freed twice.
         current = parent;
         let role = copy_string_attr(current, "AXRole");
-        let actions = copy_action_names(current);
+        let actions = read_actions(current);
         let sidebar = role.as_deref() == Some("AXOutline")
             && copy_string_attr(current, "AXDescription")
                 .is_some_and(|d| d.eq_ignore_ascii_case("sidebar"));
@@ -8097,8 +8182,14 @@ unsafe fn ax_press_with_ancestors(
         }
         return Err(moved);
     }
+    if sheet(target) != Some(false) {
+        for (_, _, el, _) in chain {
+            CFRelease(el as _);
+        }
+        return Ok(AxPressOutcome::SheetBlocked);
+    }
     let action = CFString::new(action_name);
-    let err = AXUIElementPerformAction(target, action.as_concrete_TypeRef());
+    let err = perform(target, action.as_concrete_TypeRef());
     // Finder opens a sidebar location and still returns an AX error
     // (kAXErrorAttributeUnsupported): an error that does not prove the
     // action never reached the app is observed like a success.

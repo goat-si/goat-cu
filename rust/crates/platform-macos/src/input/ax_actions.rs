@@ -846,7 +846,15 @@ pub fn resolve_element_action<'a>(
         ));
     }
     match match_advertised_action(requested, advertised) {
-        AdvertisedActionMatch::Matched(action) => return Ok(action),
+        AdvertisedActionMatch::Matched(action) => {
+            if !foreground && background_action_may_front(action) {
+                return Err(element_action_refusal(
+                    "background_unavailable",
+                    format!("refusing {requested}: the advertised action fronts the target window. Retry with delivery_mode:\"foreground\" only if the user allows it"),
+                ));
+            }
+            return Ok(action);
+        }
         AdvertisedActionMatch::Ambiguous => {
             return Err(element_action_refusal(
                 "ambiguous",

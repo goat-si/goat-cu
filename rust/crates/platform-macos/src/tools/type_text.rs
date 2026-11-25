@@ -1033,7 +1033,10 @@ pub(crate) fn text_delivery_failure(prefix: &str, error: &anyhow::Error) -> Tool
         .downcast_ref::<crate::input::keyboard::KeyDeliveryUncertain>()
         .is_some()
     {
-        return ToolResult::error(message).with_structured(serde_json::json!({
+        return ToolResult::error(format!(
+            "{message}. Read the field before typing or submitting again."
+        ))
+        .with_structured(serde_json::json!({
             "code": "key_delivery_uncertain", "effect": "unverifiable", "retryable": false,
         }));
     }
@@ -2177,6 +2180,29 @@ fn cgevent_type_verified(
     bool,
     crate::document_edit::DocumentEdited,
 )> {
+    cgevent_type_verified_with(
+        receiver,
+        request,
+        before,
+        checks,
+        &crate::input::keyboard::type_text_with_delay,
+        &|pid| crate::input::keyboard::press_key(pid, "return", &[]),
+    )
+}
+
+fn cgevent_type_verified_with(
+    receiver: KeyReceiver,
+    request: KeyTextRequest<'_>,
+    before: Option<&str>,
+    checks: KeyFocusChecks,
+    send_text: &dyn Fn(i32, &str, u64) -> anyhow::Result<()>,
+    send_return: &dyn Fn(i32) -> anyhow::Result<()>,
+) -> anyhow::Result<(
+    bool,
+    Option<usize>,
+    bool,
+    crate::document_edit::DocumentEdited,
+)> {
     let KeyReceiver {
         pid,
         window_id,
@@ -2258,7 +2284,7 @@ fn cgevent_type_verified(
             }
             Ok(())
         } else {
-            crate::input::keyboard::type_text_with_delay(pid, payload, delay_ms)
+            send_text(pid, payload, delay_ms)
         }
     };
     if replace {
@@ -2443,7 +2469,9 @@ fn cgevent_type_verified(
                         ));
                     }
                 }
-                crate::input::keyboard::press_key(pid, "return", &[])?;
+                send_return(pid).map_err(|error| {
+                    crate::input::keyboard::key_construction_error(error, body.chars().count())
+                })?;
             } else {
                 send_guarded_text(text)?;
             }
@@ -4480,6 +4508,53 @@ mod u32_outcome_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chromium_submission_return_failure_after_body_is_nonretryable() {
+        use super::*;
+        use std::cell::RefCell;
+        let calls = RefCell::new(Vec::new());
+        let error = cgevent_type_verified_with(
+            KeyReceiver {
+                pid: 42,
+                window_id: None,
+                element: None,
+            },
+            KeyTextRequest {
+                text: "hello\n",
+                delay_ms: 0,
+                settle_ms: 0,
+                replace: false,
+                single_terminal_return: true,
+            },
+            None,
+            KeyFocusChecks {
+                exact_focus: false,
+                recheck_editability_after_settle: false,
+                prior: cua_driver_core::mutation::PriorInput::None,
+                focus_already_written: false,
+                exact_keys_window: None,
+            },
+            &|_, text, _| {
+                calls.borrow_mut().push(text.to_owned());
+                Ok(())
+            },
+            &|_| {
+                calls.borrow_mut().push("return".to_owned());
+                Err(anyhow::anyhow!("return failed"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(*calls.borrow(), ["hello", "return"]);
+        let result = text_delivery_failure("type_text failed", &error);
+        let data = result.structured_content.expect("structured uncertainty");
+        assert_eq!(data["code"], "key_delivery_uncertain");
+        assert_eq!(data["effect"], "unverifiable");
+        assert_eq!(data["retryable"], false);
+        assert!(result
+            .content
+            .iter()
+            .any(|item| format!("{item:?}").contains("Read the field")));
+    }
     #[test]
     fn replacement_guard_refuses_before_selection_or_delete_key() {
         let sends = std::cell::Cell::new(0);
