@@ -123,16 +123,18 @@ They appear on three kinds of result:
 | A browser refusal (`status: "refused"`, `refusal.code`) | next to `refusal` in `structuredContent` |
 | An `ActionResult` with `effect` `unverifiable`, `suspected_noop` or `refused` | `hint` and `next_call` on the `ActionResult` |
 
-For example, a background drag that macOS cannot drop returns:
+For example, a background drag whose session outcome cannot be established
+returns an error with structured content like:
 
 ```json
 {
-  "code": "background_unavailable",
-  "reason": "drag_and_drop_session",
-  "hint": "No drop landed: macOS drag-and-drop needs the real pointer. Try a route that is not a drag first (Move button, menu item, shortcut). Retry with delivery_mode:\"foreground\" only if the user allows the window to come forward.",
-  "next_call": {"tool": "get_window_state", "arguments": {"pid": 811, "window_id": 659}}
+  "code": "drag_delivery_uncertain",
+  "effect": "unverifiable",
+  "event_kind": "mouse_drag"
 }
 ```
+
+Read the window before taking another action; the driver does not repeat the drag.
 
 A refusal also ends its text with a line `Next: <hint>`, so a client that shows
 the agent only the text still delivers it. The first line stays the refusal.

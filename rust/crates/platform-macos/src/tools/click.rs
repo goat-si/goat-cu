@@ -7219,31 +7219,33 @@ fn perform_ax_click(
         // Checked before the row-selection fallback, which writes AXSelected
         // on an ancestor: a press that landed (a toggle, a navigation) needs
         // no other write. Same evidence and input rules as a success.
-        if let cua_driver_core::mutation::WriteOutcome::StopUncertain(
-            reason @ (cua_driver_core::mutation::Reason::AttributeUnsupported
-            | cua_driver_core::mutation::Reason::NoValue),
-        ) = outcome
-        {
-            // A press the app reported as failed never claims the sheet's
-            // closing: only a delivered AXPress may.
-            let (classified, evidence) = direct_perform_evidence(reason, || probe.observe());
-            if classified == cua_driver_core::mutation::WriteOutcome::Delivered {
-                let evidence = evidence.expect("fresh tied effect");
-                let _chain = cua_driver_core::mutation::ChainResult::from_recorded(
-                    vec![cua_driver_core::mutation::WriteOutcome::Delivered],
-                    prior,
-                )
-                .expect("one write");
-                return Ok(AxClickStep::Done((
-                    format!(
-                        "✅ Performed {ax_action} on [{idx}] {role} \"{title}\"; {}, although \
+        if ax_action != "AXOpen" {
+            if let cua_driver_core::mutation::WriteOutcome::StopUncertain(
+                reason @ (cua_driver_core::mutation::Reason::AttributeUnsupported
+                | cua_driver_core::mutation::Reason::NoValue),
+            ) = outcome
+            {
+                // A press the app reported as failed never claims the sheet's
+                // closing: only a delivered AXPress may.
+                let (classified, evidence) = direct_perform_evidence(reason, || probe.observe());
+                if classified == cua_driver_core::mutation::WriteOutcome::Delivered {
+                    let evidence = evidence.expect("fresh tied effect");
+                    let _chain = cua_driver_core::mutation::ChainResult::from_recorded(
+                        vec![cua_driver_core::mutation::WriteOutcome::Delivered],
+                        prior,
+                    )
+                    .expect("one write");
+                    return Ok(AxClickStep::Done((
+                        format!(
+                            "✅ Performed {ax_action} on [{idx}] {role} \"{title}\"; {}, although \
                          the app returned AX error {err}.",
-                        evidence.detail()
-                    ),
-                    false,
-                    Some(evidence),
-                    false,
-                )));
+                            evidence.detail()
+                        ),
+                        false,
+                        Some(evidence),
+                        false,
+                    )));
+                }
             }
         }
         let chain = cua_driver_core::mutation::ChainResult::from_recorded(vec![outcome], prior)
@@ -8606,6 +8608,34 @@ mod tests {
             "a radio turning off was another radio's press"
         );
         assert!(!toggle_press_shows("AXRadioButton", "1", "1"));
+    }
+
+    /// A stale or erroring AXOpen may have acted; it cannot be upgraded to a
+    /// confirmed open or followed by a second route (coordinator E3).
+    #[test]
+    fn an_erroring_open_counts_only_when_its_element_is_gone_and_the_window_changed() {
+        use crate::ax::bindings::{
+            kAXErrorAttributeUnsupported, kAXErrorIllegalArgument, kAXErrorInvalidUIElement,
+        };
+        for err in [
+            kAXErrorAttributeUnsupported,
+            kAXErrorInvalidUIElement,
+            kAXErrorIllegalArgument,
+        ] {
+            let result = super::super::double_click::double_click_element(
+                (),
+                1,
+                true,
+                true,
+                |_| err,
+                |_| -> anyhow::Result<()> { panic!("uncertain AXOpen must not be resent") },
+            )
+            .expect("uncertain result");
+            assert!(matches!(
+                result,
+                super::super::double_click::ElementDoubleClick::Ax(_)
+            ));
+        }
     }
 
     /// Surface 5: schema must advertise the new `button` field with the three

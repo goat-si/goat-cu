@@ -80,7 +80,8 @@ fn def() -> &'static ToolDef {
             from disk; `value` is the full new name with its extension (macOS may ask to allow controlling \
             Finder); with serve --no-automation-prompts, ungranted consent refuses with \
             `automation_consent_required`. Refusals: Finder's Get Info `Name` field, `file_name_needs_rename`; Safari's address \
-            field, `address_field_not_settable` (the refusal names the route that opens an address). WebKit \
+            field, `address_field_not_settable` (the refusal names the route that opens an address); \
+            recognized LibreOffice Calc cells and the Name Box, `calc_cell_unavailable`. WebKit \
             ignores AXValue writes to web inputs: use `type_text_chars`.".into(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -243,6 +244,23 @@ impl Tool for SetValueTool {
                 return finder_rename_result(pid, window_id, &path, &value, renamed);
             }
             None => {}
+        }
+
+        // The upstream Calc key sequence lacks per-keystroke instance checks.
+        // Refuse before focus, key, or value writes (coordinator E4).
+        let calc_guard = element_guard.clone();
+        match latency::spawn_action_blocking(move || unsafe {
+            super::calc_cell::target_of(pid, calc_guard.as_ptr() as AXUIElementRef)
+        }).await {
+            Ok(Some(_)) => return super::pre_dispatch_refusal(
+                "calc_cell_unavailable",
+                "set_value on a LibreOffice Calc cell is unavailable through the background keyboard route; no value or key was sent.",
+            ),
+            Err(error) => return super::pre_dispatch_refusal(
+                "calc_target_unreadable",
+                format!("Could not classify the Calc target ({error}); no value or key was sent."),
+            ),
+            Ok(None) => {}
         }
 
         let address_guard = element_guard.clone();
@@ -1023,6 +1041,34 @@ enum RestoredFocus {
     WriteFailed { error: i32, outcome: WriteOutcome },
     NotFocused { focus_written: bool },
     NotEditable { focus_written: bool },
+}
+
+// ── LibreOffice Calc cells ───────────────────────────────────────────────────
+
+#[cfg(test)]
+fn calc_cell_record(verified: bool) -> cua_driver_core::action_record::ActionExecutionRecord {
+    use cua_driver_core::action_record::{
+        ActionEffect, ActionEvidence, ActionExecutionRecord, ActionTransport, ActualDelivery,
+        EvidenceKind, RequestedDelivery,
+    };
+    let effect = if verified {
+        ActionEffect::Confirmed
+    } else {
+        ActionEffect::Unverifiable
+    };
+    let mut record = ActionExecutionRecord::builder(
+        effect,
+        ActionTransport::MacosCgEventPid,
+        RequestedDelivery::Background,
+    )
+    .actual_delivery(ActualDelivery::Background);
+    if verified {
+        record = record.evidence(ActionEvidence {
+            kind: EvidenceKind::AccessibilityReadback,
+            detail: "the Name Box shows the address and the cell reads the value".into(),
+        });
+    }
+    record.build().expect("calc cell record is valid")
 }
 
 // ── File name cells ──────────────────────────────────────────────────────────
@@ -1991,10 +2037,10 @@ fn write_not_applied(verified: Option<bool>, changed: Option<bool>) -> bool {
 /// script must stop here instead of carrying on as if it had.
 fn not_applied_result(element_index: usize, vcl: bool) -> ToolResult {
     let route = if vcl {
-        "LibreOffice ignores accessibility value writes and drops background pointer \
-         input, so its cells cannot be edited in the background. Editing them needs the \
-         window in front: bring_to_front if the user allows it, then type_text into the \
-         cell. Otherwise stop and report that the edit is blocked."
+        "LibreOffice ignores accessibility value writes and background pointer input, \
+         but takes keys posted to its window: pass window_id, go to the cell with the \
+         Name Box (hotkey cmd+shift+f5, then the address and return), then type_text the \
+         value and return."
     } else {
         "Try the control's own input route instead: click it, then type_text, or use a \
          keyboard shortcut. If that needs the window in front, bring_to_front only if the \
@@ -2741,7 +2787,7 @@ fn hex_digit(n: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::{
-        address_field_refusal, apply_surface_trust, apply_verification_label, classify_write,
+        address_field_refusal, apply_surface_trust, apply_verification_label, calc_cell_record, classify_write,
         file_name_needs_rename, is_file_name_cell, is_get_info_name_field, is_safari_address_field,
         not_applied_result, text_value_role_requires_exact_focus, write_not_applied,
         SetValueOutcome, GET_INFO_RENAME_ROUTE, LIST_RENAME_ROUTE,
@@ -2988,6 +3034,13 @@ mod tests {
         ] {
             assert!(reason.contains(needed), "missing {needed:?}: {reason}");
         }
+    }
+
+    #[test]
+    fn a_calc_cell_write_publishes_a_background_key_record() {
+        use cua_driver_core::action_record::ActionEffect;
+        assert_eq!(calc_cell_record(true).effect, ActionEffect::Confirmed);
+        assert_eq!(calc_cell_record(false).effect, ActionEffect::Unverifiable);
     }
 
     #[test]

@@ -164,7 +164,20 @@ pub(super) fn run_prepared<I: GestureIo>(
     io: &mut I,
     plan: Vec<Step>,
     prepared: Prepared<I::Event>,
+    keep_going: impl FnMut() -> bool,
+) -> Result<GestureOutcome, GestureFailure> {
+    run_prepared_with_drag_hook(io, plan, prepared, keep_going, |_, _, _| Ok((false, None)))
+}
+
+// The hook may handle a drag step's wait and post further drag events. The
+// release placement must be updated after each such post, so the existing
+// button guard releases at the last delivered point on errors and panics.
+pub(super) fn run_prepared_with_drag_hook<I: GestureIo>(
+    io: &mut I,
+    plan: Vec<Step>,
+    prepared: Prepared<I::Event>,
     mut keep_going: impl FnMut() -> bool,
+    mut hook: impl FnMut(&mut I, &Step, &mut Placement) -> anyhow::Result<(bool, Option<Placement>)>,
 ) -> Result<GestureOutcome, GestureFailure> {
     let io = std::rc::Rc::new(std::cell::RefCell::new(io));
     let mut primer = prepared.primer.map(|reserved| ButtonGuard {
@@ -219,8 +232,18 @@ pub(super) fn run_prepared<I: GestureIo>(
                 if matches!(step.kind, Kind::Down | Kind::Dragged) {
                     io.borrow_mut().observe(&step);
                 }
-                io.borrow_mut().settle(&step);
-                if step.kind == Kind::Dragged && stopped.is_none() && !keep_going() {
+                let (handled_wait, destination) = if step.kind == Kind::Dragged && stopped.is_none()
+                {
+                    hook(&mut *io.borrow_mut(), &step, &mut button.step.placement)?
+                } else {
+                    (false, None)
+                };
+                if !handled_wait {
+                    io.borrow_mut().settle(&step);
+                }
+                if let Some(destination) = destination {
+                    stopped = Some(destination);
+                } else if step.kind == Kind::Dragged && stopped.is_none() && !keep_going() {
                     stopped = Some(step.placement);
                 }
             }
@@ -378,6 +401,37 @@ mod tests {
             .iter()
             .filter_map(|(k, p)| (*k == kind).then_some(*p))
             .collect()
+    }
+
+    #[test]
+    fn session_hook_failure_releases_once_at_last_posted_point() {
+        let mut fake = Fake::new(Route::Background);
+        let plan = background_plan();
+        let prepared = prepare_gesture(&mut fake, &plan).unwrap();
+        let destination = Placement {
+            screen: (10.0, 10.0),
+            window_local: None,
+        };
+        let failure = run_prepared_with_drag_hook(
+            &mut fake,
+            plan,
+            prepared,
+            || true,
+            |io, step, release_at| {
+                let mut moved = *step;
+                moved.placement = destination;
+                let mut event = io.create(&moved)?;
+                io.stamp(&mut event, &moved);
+                io.post(&event, &moved);
+                *release_at = destination;
+                anyhow::bail!("lost session observation")
+            },
+        )
+        .unwrap_err();
+        assert!(failure.input_posted);
+        assert_eq!(failure.button_receipt, ReleaseReceipt::HandedToTransport);
+        assert_eq!(posted(&fake, Kind::Up), vec![destination]);
+        assert_eq!(posted(&fake, Kind::Down).len(), 1);
     }
 
     #[test]

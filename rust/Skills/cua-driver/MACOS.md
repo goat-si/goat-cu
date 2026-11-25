@@ -793,13 +793,11 @@ A native `<input type="range">` in Chrome does not follow a background drag
 `browser_pointer` `action:"drag"` on a bound tab, which sends the drag
 through CDP `Input.dispatchMouseEvent` with the button held.
 
-A drag that starts a macOS drag-and-drop session (reordering a list by drag
-and drop, moving a file, HTML5 `draggable` content) cannot drop in the
-background: macOS tracks those sessions with the real pointer. The driver
-sees the session start, releases at once, and returns
-`background_unavailable` with `reason: "drag_and_drop_session"`. Look for a
-non-drag route first (Move Up/Down, a menu or context-menu command, a
-shortcut, cut and paste), then foreground if the user allows it.
+A native drag-and-drop session may end while the driver holds the drop point.
+The result is not driver-verified: read the window to check it. If the session
+remains open when the hold runs out, the result has `code:"drag_delivery_uncertain"`
+and `effect:"unverifiable"`. Read the window before attempting another action;
+the driver does not repeat the drag in the foreground.
 
 In an Electron window, `drag` is sent from the app's main process
 (CDP `Input.dispatchMouseEvent` with the button held, or
@@ -920,13 +918,15 @@ check above, and only the result is lost.
 
 ### A value write the app does not apply (LibreOffice)
 
-Some apps accept an accessibility value write and ignore it. LibreOffice
-Calc cells do: `set_value` returns success at the AX level and the cell
-keeps its old content. `set_value` re-reads the value, and when it has
-not moved it fails with `code:"write_not_applied"` and
-`effect:"not_applied"`, so a `run_script` stops there. LibreOffice also
-ignores background pointer input, so address it with `window_id` and type
-instead (see "LibreOffice, Numbers and other editors in the background").
+Some apps accept an accessibility value write and ignore it. `set_value`
+re-reads the value, and when it has not moved it fails with
+`code:"write_not_applied"` and `effect:"not_applied"`, so a `run_script`
+stops there.
+
+For a recognized LibreOffice Calc cell or Name Box, `set_value` refuses with
+`calc_cell_unavailable` before sending a value or key. Use the window-targeted
+keyboard routes described under "LibreOffice, Numbers and other editors in
+the background", and read the cell back.
 
 ### Known text-input limits (Catalyst + Electron)
 

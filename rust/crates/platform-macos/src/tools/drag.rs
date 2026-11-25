@@ -106,9 +106,8 @@ fn def() -> &'static ToolDef {
                 real pointer does not move and the user's front window keeps focus. It works for controls that \
                 follow drag events (sliders, canvases, pointer-event widgets on Chrome pages); in an Electron \
                 window it is sent from the app's main process, so pointer-capture widgets and HTML5 drag and \
-                drop work too. Elsewhere a drag that starts a macOS drag-and-drop session (list reordering, \
-                moving a file, HTML5 draggable content) cannot drop in the background: the driver releases at \
-                once and returns background_unavailable with reason drag_and_drop_session. For a browser tab \
+                drop work too. A native drag-and-drop session is held at the drop point; when its outcome \
+                cannot be confirmed, read the window before taking further action. For a browser tab \
                 bound with get_browser_state, use browser_pointer action:\"drag\". The result is not \
                 driver-verified. If nothing changed, use a route that is not a drag first: a Move control or \
                 menu item by element_token, or the keyboard (a shortcut, cut and paste). Retry with \
@@ -614,71 +613,43 @@ impl DragTool {
                         )
                         .map(|()| DragDispatchOutcome {
                             native_drag_session: false,
+                            session_dropped: false,
                             selection,
                         });
                     }
                     // A drag that starts a system drag-and-drop session
-                    // (list reordering, file drags, HTML5 draggable) is
-                    // tracked by macOS with the hardware pointer, so the
-                    // drop cannot land at the requested point. AppKit shows
-                    // the drag image in a window of the target at the
-                    // dragging level; when one appears, release at once so
-                    // the session ends where the user's pointer is not
-                    // moving, and report it.
+                    // (list reordering, file drags, HTML5 draggable) shows
+                    // its drag image in a window of the target at the
+                    // dragging level. AppKit ends a session started by
+                    // window-routed events soon after it starts, dropping
+                    // at the last dragged point, so the gesture holds the
+                    // drop point until the image goes away. A session that
+                    // outlives the hold did not drop there.
                     let before = drag_image_windows(pid);
                     // After the window read, right before the press.
                     super::window_points::check_guard(&dispatch_guard)?;
                     let before_selection = focused_selection(pid, wid);
                     super::window_points::check_guard(&dispatch_guard)?;
-                    let mut session_seen = false;
-                    let origin = validated_frame
-                        .as_ref()
-                        .map(|frame| (frame.bounds.x, frame.bounds.y));
-                    let outcome = match origin {
-                        Some(origin) => crate::input::mouse::drag_at_xy_background_with_origin(
-                            pid,
-                            (from_sx, from_sy),
-                            (to_sx, to_sy),
-                            wid,
-                            duration_ms,
-                            steps,
-                            &m,
-                            button,
-                            observe,
-                            || {
-                                session_seen = !drag_image_windows(pid).is_subset(&before);
-                                !session_seen
-                            },
-                            origin,
-                        ),
-                        None => crate::input::mouse::drag_at_xy_background(
-                            pid,
-                            (from_sx, from_sy),
-                            (to_sx, to_sy),
-                            wid,
-                            duration_ms,
-                            steps,
-                            &m,
-                            button,
-                            observe,
-                            || {
-                                session_seen = !drag_image_windows(pid).is_subset(&before);
-                                !session_seen
-                            },
-                        ),
-                    }?;
-
-                    let session = session_seen
-                        || !drag_image_windows(pid).is_subset(&before)
-                        || matches!(
-                            outcome,
-                            crate::input::mouse::BackgroundDragOutcome::StoppedEarly { .. }
-                        );
+                    let origin = validated_frame.as_ref()
+                        .map(|frame| (frame.bounds.x, frame.bounds.y))
+                        .unwrap_or((from_sx - from_lx, from_sy - from_ly));
+                    let outcome = crate::input::mouse::drag_at_xy_background_session_with_origin(
+                        pid, (from_sx, from_sy), (to_sx, to_sy), wid, duration_ms,
+                        steps, &m, button, observe,
+                        || !drag_image_windows(pid).is_subset(&before), origin,
+                    )?;
+                    let late_session = !drag_image_windows(pid).is_subset(&before);
+                    let session_dropped = matches!(outcome, crate::input::mouse::BackgroundDragOutcome::DragSession { ended: true });
+                    let session = matches!(outcome, crate::input::mouse::BackgroundDragOutcome::DragSession { ended: false } | crate::input::mouse::BackgroundDragOutcome::StoppedEarly { .. }) || (late_session && !session_dropped);
                     let after_selection = focused_selection(pid, wid);
-                    let selection =
-                        selection_confirmation(before_selection.as_ref(), after_selection.as_ref());
+                    let selection = if session_dropped {
+                        None
+                    } else {
+                        selection_confirmation(before_selection.as_ref(), after_selection.as_ref())
+                    };
                     Ok(DragDispatchOutcome {
                         native_drag_session: session,
+                        session_dropped,
                         selection,
                     })
                 })
@@ -747,16 +718,13 @@ impl DragTool {
                 "cgevent",
             )
         };
+        let session_note = if matches!(&result, Ok(Ok(DragDispatchOutcome { session_dropped: true, .. }))) {
+            " The gesture started a macOS drag-and-drop session; the driver held the drop \
+             point until the session ended there."
+        } else {
+            ""
+        };
         match result {
-            Ok(Ok(DragDispatchOutcome {
-                native_drag_session: true,
-                ..
-            })) if cua_driver_core::delivery::brief_foreground_allowed()
-                && !cua_driver_core::delivery::background_requested_explicitly(&args) =>
-            {
-                self.brief_foreground_drag(&args, pid, wid, prior_front)
-                    .await
-            }
             Ok(Ok(DragDispatchOutcome {
                 native_drag_session: true,
                 ..
@@ -764,6 +732,7 @@ impl DragTool {
             Ok(Ok(DragDispatchOutcome {
                 native_drag_session: false,
                 selection,
+                ..
             })) => {
                 let verification_note = if selection.is_some() {
                     "text selection confirmed by accessibility readback"
@@ -775,7 +744,7 @@ impl DragTool {
                         "✅ Posted drag{btn_suffix}{mod_suffix} to pid {pid} window {wid} \
                          from window-pixel ({}, {}) → ({}, {}), \
                          screen ({}, {}) → ({}, {}) \
-                         in {duration_ms}ms / {steps} steps ({route_note}; {verification_note}).{}",
+                         in {duration_ms}ms / {steps} steps ({route_note}; {verification_note}).{session_note}{}",
                         from_x as i64,
                         from_y as i64,
                         to_x as i64,
@@ -792,9 +761,14 @@ impl DragTool {
                     selection,
                 )
             }
-            Ok(Err(e)) => crate::security_prompt::tool_result(&e)
-                .unwrap_or_else(|| ToolResult::error(format_drag_failure("drag failed", &e))),
-            Err(e) => ToolResult::error(format!("Task error: {e}")),
+            Ok(Err(e)) => crate::security_prompt::tool_result(&e).unwrap_or_else(|| {
+                if e.downcast_ref::<crate::input::gesture::GestureFailure>().is_some_and(|f| f.input_posted) {
+                    uncertain_drag_result(format_drag_failure("drag failed", &e))
+                } else {
+                    ToolResult::error(format_drag_failure("drag failed", &e))
+                }
+            }),
+            Err(e) => uncertain_drag_result(format!("Drag task failed ({e}); it may have sent input.")),
         }
     }
 }
@@ -979,14 +953,17 @@ impl DragTool {
                     "effect": "unverifiable",
                 }))
             }
-            other => {
-                let reason = match (other, &reply) {
-                    (Some(ElectronDragReply::Refused { reason }), _) => reason,
-                    (_, Err(error)) => error.to_string(),
-                    (_, Ok(text)) => format!("unexpected inspector reply: {text}"),
-                };
+            Some(ElectronDragReply::Refused { reason })
+                if matches!(reason.as_str(), "no_require" | "no_window" | "outside_content") =>
+            {
                 electron_drag_refusal(&reason)
             }
+            Some(ElectronDragReply::Refused { reason }) => uncertain_drag_result(format!(
+                "Electron returned an unrecognized drag result ({reason}); it may have sent input."
+            )),
+            None => electron_drag_unparsed_reply_result(
+                reply.as_ref().map(String::as_str).map_err(ToString::to_string),
+            ),
         }
     }
 }
@@ -1045,6 +1022,7 @@ struct SelectionConfirmation {
 #[derive(Debug)]
 struct DragDispatchOutcome {
     native_drag_session: bool,
+    session_dropped: bool,
     selection: Option<SelectionConfirmation>,
 }
 
@@ -1424,6 +1402,14 @@ fn electron_drag_refusal(reason: &str) -> ToolResult {
     )
 }
 
+fn electron_drag_unparsed_reply_result(reply: Result<&str, String>) -> ToolResult {
+    let reason = match reply {
+        Ok(_) => "unexpected inspector reply",
+        Err(_) => "inspector request failed",
+    };
+    uncertain_drag_result(format!("Electron drag result unavailable ({reason}); it may have sent input."))
+}
+
 fn drag_image_windows(pid: i32) -> std::collections::HashSet<u32> {
     crate::windows::pid_on_screen_windows_any_layer(pid)
         .into_iter()
@@ -1433,23 +1419,20 @@ fn drag_image_windows(pid: i32) -> std::collections::HashSet<u32> {
 }
 
 fn drag_and_drop_session_result(pid: i32, wid: u32, suffix: String) -> ToolResult {
-    cua_driver_core::delivery::background_unavailable_result_with_suggestion(
-        format!(
-            "The background drag in pid {pid} window {wid} started a macOS drag-and-drop \
-             session (for example reordering a list, moving a file or dragging page content). \
-             macOS tracks drag-and-drop with the real pointer, so the drop did not land at the \
-             requested point; the driver released at once. {DRAG_LADDER}{suffix}"
-        ),
-        "background_unavailable",
-        "drag-and-drop sessions follow the hardware pointer on macOS",
-        serde_json::json!({
-            "effect": "no_drop",
+    uncertain_drag_result(format!(
+        "The background drag in pid {pid} window {wid} started a drag-and-drop session, \
+         but its drop could not be confirmed.{suffix}"
+    ))
+}
+
+fn uncertain_drag_result(message: String) -> ToolResult {
+    ToolResult::error(format!("{message} Read the window before attempting another action; do not repeat the drag without checking."))
+        .with_structured(serde_json::json!({
+            "code": "drag_delivery_uncertain",
+            "effect": "unverifiable",
             "event_kind": "mouse_drag",
-            "reason": "drag_and_drop_session",
-            "requires": ["delivery_mode:foreground", "window_id"],
-        }),
-        DRAG_LADDER,
-    )
+        }))
+        .with_disposition(cua_driver_contract::ErrorDisposition::SUSPECTED_NOOP)
 }
 
 fn window_id_required(foreground: bool) -> ToolResult {
@@ -1469,6 +1452,15 @@ fn window_id_required(foreground: bool) -> ToolResult {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn electron_lost_or_malformed_reply_is_uncertain_and_never_a_refusal() {
+        for reply in [Err("inspector disconnected".to_owned()), Ok("not json")] {
+            let result = super::electron_drag_unparsed_reply_result(reply);
+            let content = result.structured_content.as_ref().unwrap();
+            assert_eq!(content["effect"], "unverifiable");
+            assert_eq!(content["code"], "drag_delivery_uncertain");
+        }
+    }
     #[test]
     fn drag_failure_text_window_branch_formats_a_gesture_failure() {
         use crate::input::gesture::{GestureFailure, ReleaseReceipt};
@@ -1605,16 +1597,10 @@ mod tests {
             "{mode}"
         );
 
-        for (result, anchor) in [
-            (
-                drag_and_drop_session_result(1, 2, String::new()),
-                "drop did not land",
-            ),
-            (
-                electron_drag_refusal("inspector off"),
-                "did not take the drag",
-            ),
-        ] {
+        let uncertain = drag_and_drop_session_result(1, 2, String::new());
+        assert_eq!(uncertain.structured_content.as_ref().unwrap()["effect"], "unverifiable");
+        assert!(text_of(&uncertain).contains("Read the window"));
+        for (result, anchor) in [(electron_drag_refusal("inspector off"), "did not take the drag")] {
             assert_foreground_last(&text_of(&result), anchor, &rungs);
             let structured = result.structured_content.expect("structured refusal");
             assert_foreground_last(

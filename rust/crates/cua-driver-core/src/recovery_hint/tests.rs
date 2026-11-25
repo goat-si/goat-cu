@@ -225,7 +225,7 @@ fn a_drag_refused_by_macos_drag_and_drop_names_a_non_drag_route_and_the_foregrou
     );
     assert_eq!(
         hint.hint,
-        "No drop landed: drag-and-drop needs the real pointer. Try a Move button or menu item \
+        "Drop unconfirmed. Read the window, then try a Move button or menu item \
          (element_token) or the keyboard first. Last, only if the user allows the window to come \
          forward: delivery_mode:\"foreground\" (moves the user's pointer)."
     );

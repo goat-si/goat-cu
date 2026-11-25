@@ -65,7 +65,7 @@ pub const DEFAULT_MAX_ELEMENTS: usize = 2_000;
 /// `AXUIElementCopyAttributeValue` after `spawn_blocking` starts, so the native
 /// messaging timeout is what keeps an unresponsive app from retaining a worker
 /// indefinitely.
-const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 2.0;
+pub(crate) const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 2.0;
 
 /// Most windows of one app a walk brings up to date (see
 /// [`super::enablement::flush_pending_web_updates`]).
@@ -215,8 +215,8 @@ pub struct AXNode {
     /// The raw AXUIElementRef pointer value, for caching.
     pub element_ptr: usize,
     /// Depth in the rendered markdown tree (matches the indent level used in
-    /// `tree_markdown`). Layout containers AXScrollArea/AXGroup collapse so
-    /// children share the parent's depth.
+    /// `tree_markdown`). Unnamed AXScrollArea/AXGroup layout wrappers collapse
+    /// so children share the parent's depth; named ones keep their own row.
     pub depth: usize,
     /// `element_index` of the nearest actionable ancestor, if any. Walks the
     /// rendered tree (so it skips collapsed layout containers).
@@ -1486,6 +1486,7 @@ where
                         menu,
                         menu,
                         0,
+                        0,
                         None,
                         None,
                         LabelPath::Inactive,
@@ -1786,6 +1787,7 @@ fn walk_root<S: AxTreeSource>(
             root,
             root,
             0,
+            0,
             None,
             None,
             LabelPath::Inactive,
@@ -1835,6 +1837,7 @@ fn finish_deferred<S: AxTreeSource>(
                     &row.element,
                     &row.element,
                     row.depth,
+                    row.walk_depth,
                     row.parent_index,
                     Some(&row.parent_role),
                     row.label_path,
@@ -2331,12 +2334,38 @@ fn known<T>(read: Read<T>) -> Option<T> {
     }
 }
 
+fn is_layout_container(role: &str) -> bool {
+    matches!(role, "AXGroup" | "AXScrollArea")
+}
+
+/// Whether an AXGroup/AXScrollArea is only a layout wrapper to collapse. A
+/// named one (AXTitle or AXDescription, such as a "Profile" or "Billing"
+/// section) keeps its row, so identical controls in different sections can be
+/// told apart.
+fn collapse_layout_container(role: &str, title: Option<&str>, description: Option<&str>) -> bool {
+    is_layout_container(role)
+        && title.is_none_or(|text| text.trim().is_empty())
+        && description.is_none_or(|text| text.trim().is_empty())
+}
+
+/// `max_depth` budget a node's children are walked at. A named layout group
+/// kept as a row indents its children but spends no budget, so `max_depth`
+/// admits the same elements as when every group collapsed.
+fn child_walk_depth(role: &str, walk_depth: usize) -> usize {
+    if is_layout_container(role) {
+        walk_depth
+    } else {
+        walk_depth + 1
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn walk_element<S: AxTreeSource>(
     source: &S,
     element: &S::Element,
     surface: &S::Element,
     depth: usize,
+    walk_depth: usize,
     parent_index: Option<usize>,
     parent_role: Option<&str>,
     parent_path: LabelPath,
@@ -2351,7 +2380,7 @@ fn walk_element<S: AxTreeSource>(
     deferred: &mut Vec<DeferredRow<S::Element>>,
     label_claims: &mut Vec<(usize, String)>,
 ) {
-    if depth > max_depth {
+    if walk_depth > max_depth {
         note_depth_cut();
         budget.record_cut(IncompleteReason {
             kind: IncompleteReasonKind::PolicyOmission,
@@ -2562,6 +2591,7 @@ fn walk_element<S: AxTreeSource>(
                 surface,
                 &role,
                 depth + 1,
+                walk_depth + 1,
                 Some(idx),
                 label_path,
                 in_web_content,
@@ -2580,71 +2610,39 @@ fn walk_element<S: AxTreeSource>(
         scroll_attrs = Some(attrs);
     }
 
-    // Skip pure layout containers that have no interesting content.
-    if role == "AXScrollArea" || role == "AXGroup" {
-        // An exhaustive walk keeps the container as a display-only row, so a
-        // selector naming it is answered rather than assumed absent.
-        if exhaustive_nodes() {
-            let attrs = match scroll_attrs.take() {
-                Some(attrs) => Some(attrs),
-                None => super::content_attrs::read_content_attrs_with(
-                    source,
-                    element,
-                    &role,
-                    budget,
-                    batching_disabled,
-                ),
-            };
+    // Named layout containers are display rows. Their children gain visual
+    // indentation without consuming an extra walk-depth level.
+    if is_layout_container(&role) {
+        let attrs = match scroll_attrs.take() {
+            Some(attrs) => Some(attrs),
+            None => super::content_attrs::read_content_attrs_with(
+                source, element, &role, budget, batching_disabled,
+            ),
+        };
+        let named = attrs.as_ref().is_some_and(|attrs| {
+            !collapse_layout_container(&role, attrs.title.as_deref(), attrs.description.as_deref())
+        });
+        if named || exhaustive_nodes() {
             let mut node = match attrs {
                 Some(attrs) => {
-                    if attrs.read_failed {
-                        note_skipped();
-                    }
-                    display_node(
-                        &role,
-                        attrs,
-                        source.key(element),
-                        depth,
-                        parent_index,
-                        in_web_content,
-                    )
+                    if attrs.read_failed { note_skipped(); }
+                    display_node(&role, attrs, source.key(element), depth, parent_index, in_web_content)
                 }
                 None => {
                     note_skipped();
-                    role_only_node(
-                        role.clone(),
-                        source.key(element),
-                        depth,
-                        parent_index,
-                        in_web_content,
-                    )
+                    role_only_node(role.clone(), source.key(element), depth, parent_index, in_web_content)
                 }
             };
             node.canonical.role_read = role_read;
             lines.push((depth, format_node_line(&node)));
             nodes.push(node);
+        } else if attrs.as_ref().is_some_and(|attrs| attrs.read_failed) || attrs.is_none() {
+            note_skipped();
         }
-        // Still recurse — children may be interesting. Layout containers
-        // collapse, so children inherit the parent's depth AND the same
-        // parent_index (no actionable node was emitted here).
         walk_children(
-            source,
-            element,
-            surface,
-            &role,
-            depth,
-            parent_index,
-            child_label_path,
-            in_web_content,
-            nodes,
-            lines,
-            counter,
-            budget,
-            batching_disabled,
-            max_depth,
-            include_web_content,
-            deferred,
-            label_claims,
+            source, element, surface, &role, depth + usize::from(named), child_walk_depth(&role, walk_depth),
+            parent_index, child_label_path, in_web_content, nodes, lines, counter, budget,
+            batching_disabled, max_depth, include_web_content, deferred, label_claims,
         );
         return;
     }
@@ -2847,6 +2845,7 @@ fn walk_element<S: AxTreeSource>(
             surface,
             &role,
             depth + 1,
+            walk_depth + 1,
             parent_index,
             child_label_path,
             in_web_content,
@@ -3076,6 +3075,7 @@ fn walk_element<S: AxTreeSource>(
         surface,
         &role,
         depth + 1,
+        walk_depth + 1,
         next_parent,
         child_label_path,
         in_web_content,
@@ -3098,6 +3098,7 @@ fn walk_children<S: AxTreeSource>(
     surface: &S::Element,
     role: &str,
     depth: usize,
+    walk_depth: usize,
     parent_index: Option<usize>,
     label_path: LabelPath,
     in_web_content: bool,
@@ -3111,7 +3112,7 @@ fn walk_children<S: AxTreeSource>(
     deferred: &mut Vec<DeferredRow<S::Element>>,
     label_claims: &mut Vec<(usize, String)>,
 ) {
-    if depth > max_depth {
+    if walk_depth > max_depth {
         // A tree that ends exactly at the cap is still complete.
         match observed_walk_children(source, element, budget) {
             Read::Absent => {}
@@ -3182,6 +3183,7 @@ fn walk_children<S: AxTreeSource>(
                 collection: source.key(element),
                 element: child.clone(),
                 depth,
+                walk_depth,
                 parent_index,
                 parent_role: role.to_owned(),
                 label_path,
@@ -3194,6 +3196,7 @@ fn walk_children<S: AxTreeSource>(
                 &child,
                 surface,
                 depth,
+                walk_depth,
                 parent_index,
                 Some(role),
                 label_path,
@@ -3532,6 +3535,7 @@ mod secure_value_tests {
             collection: 0,
             element: unsafe { RetainedElement::retain(0) },
             depth: 0,
+            walk_depth: 0,
             parent_index: None,
             parent_role: "AXTable".into(),
             label_path: LabelPath::Inactive,
@@ -4222,6 +4226,37 @@ mod tests {
         assert_eq!(filter_tree(md, "needle"), "- [0] AXWindow \"Example\"\n  - [1] AXTable \"History\"\n    - [2] AXRow \"Message\"\n      - AXStaticText = \"needle\"\n");
         assert_eq!(filter_tree(md, "scroll"), "");
         assert_eq!(filter_tree(md, "inactive tabs"), "");
+    }
+
+    #[test]
+    fn named_layout_groups_keep_their_row_and_unnamed_wrappers_collapse() {
+        for role in ["AXGroup", "AXScrollArea"] {
+            assert!(!collapse_layout_container(role, Some("Billing"), None));
+            assert!(!collapse_layout_container(role, None, Some("Profile")));
+            assert!(!collapse_layout_container(
+                role,
+                Some("  "),
+                Some("Billing")
+            ));
+            assert!(collapse_layout_container(role, None, None));
+            assert!(collapse_layout_container(role, Some(" "), Some("\n\t")));
+        }
+        assert!(!collapse_layout_container("AXButton", None, None));
+        assert!(!collapse_layout_container("AXWebArea", None, None));
+        // A kept group is a display row: its actions are not read, so it gets
+        // no element_index and indexes after it do not shift.
+        assert!(is_layout_container("AXGroup") && is_layout_container("AXScrollArea"));
+        assert!(!is_layout_container("AXButton"));
+    }
+
+    #[test]
+    fn a_kept_named_group_spends_no_max_depth_budget() {
+        // A button at walk depth 3 under a named group stays within
+        // max_depth=3, as it did when the group collapsed.
+        assert_eq!(child_walk_depth("AXGroup", 3), 3);
+        assert_eq!(child_walk_depth("AXScrollArea", 3), 3);
+        assert_eq!(child_walk_depth("AXWindow", 2), 3);
+        assert_eq!(child_walk_depth("AXButton", 2), 3);
     }
 
     #[test]
@@ -5210,6 +5245,7 @@ mod selectable_row_tests {
             collection: 0,
             element: unsafe { RetainedElement::retain(0) },
             depth: 1,
+            walk_depth: 1,
             parent_index: None,
             parent_role: "AXGroup".into(),
             label_path: LabelPath::Inactive,

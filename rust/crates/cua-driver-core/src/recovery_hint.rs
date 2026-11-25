@@ -888,7 +888,7 @@ fn background_unavailable(c: &Ctx) -> RecoveryHint {
         )
         .call(c.look_at_window()),
         (_, Some("drag_and_drop_session")) => RecoveryHint::new(format!(
-            "No drop landed: drag-and-drop needs the real pointer. Try a Move button or menu item \
+            "Drop unconfirmed. Read the window, then try a Move button or menu item \
              (element_token) or the keyboard first. {pointer_last}"
         ))
         .call(c.read_window()),

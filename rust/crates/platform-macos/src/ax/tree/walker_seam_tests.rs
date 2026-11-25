@@ -505,6 +505,11 @@ fn representative_window_markdown_and_nodes_are_pinned() {
             step("children 1", Reply::Children(Read::Known(vec![2]))),
             step("timeout 2", Reply::Unit),
             step("text 2 AXRole", Reply::Text(Read::Known("AXGroup".into()))),
+            step(
+                &format!("batch 2 {CONTENT}"),
+                Reply::Batch(Ok(content(None))),
+            ),
+            step("value 2", Reply::Value(Ok(None))),
             step("children 2", Reply::Children(Read::Known(vec![3, 4, 5]))),
             step("timeout 3", Reply::Unit),
             step("text 3 AXRole", Reply::Text(Read::Known("AXButton".into()))),
@@ -576,8 +581,54 @@ fn representative_window_markdown_and_nodes_are_pinned() {
         "AXNode { owned_row_label: None, element_index: Some(1), role: \"AXTextField\", title: Some(\"Name\"), value: Some(\"Ada\"), description: None, identifier: None, help: None, actions: [], element_ptr: 5, depth: 1, parent_element_index: None, frame: None, value_state: Some(\"Ada\"), value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }",
     ]);
     assert_eq!(source.trace(), [
-        "adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXPosition,AXSize", "children 1", "adopt 2", "timeout 2", "text 2 AXRole", "children 2", "adopt 3", "adopt 4", "adopt 5", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 3", "children 3", "release 3", "timeout 4", "text 4 AXRole", "batch 4 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 4", "actions 4", "batch 4 AXPosition,AXSize", "children 4", "release 4", "timeout 5", "text 5 AXRole", "batch 5 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 5", "actions 5", "value_settable 5", "batch 5 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 5", "children 5", "release 5", "release 2", "release 1",
+        "adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXPosition,AXSize", "children 1", "adopt 2", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "children 2", "adopt 3", "adopt 4", "adopt 5", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 3", "children 3", "release 3", "timeout 4", "text 4 AXRole", "batch 4 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 4", "actions 4", "batch 4 AXPosition,AXSize", "children 4", "release 4", "timeout 5", "text 5 AXRole", "batch 5 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 5", "actions 5", "value_settable 5", "batch 5 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 5", "children 5", "release 5", "release 2", "release 1",
     ]);
+}
+
+#[test]
+fn named_group_is_visible_without_consuming_walk_depth_or_an_index() {
+    let source = Fake::new(
+        &[(1, 1, 1, &[2]), (2, 2, 2, &[])],
+        vec![
+            step("timeout 1", Reply::Unit),
+            step("text 1 AXRole", Reply::Text(Read::Known("AXGroup".into()))),
+            step(
+                &format!("batch 1 {CONTENT}"),
+                Reply::Batch(Ok(content(Some("Billing")))),
+            ),
+            step("value 1", Reply::Value(Ok(None))),
+            step("children 1", Reply::Children(Read::Known(vec![2]))),
+            step("timeout 2", Reply::Unit),
+            step("text 2 AXRole", Reply::Text(Read::Known("AXButton".into()))),
+            step(
+                &format!("batch 2 {CONTENT}"),
+                Reply::Batch(Ok(content(Some("Save")))),
+            ),
+            step("value 2", Reply::Value(Ok(None))),
+            step(
+                "actions 2",
+                Reply::Actions(Read::Known(vec!["AXPress".into()])),
+            ),
+            step(
+                &format!("batch 2 {CONTROL}"),
+                Reply::Batch(Ok(control_batch())),
+            ),
+            step("snapshot 2", Reply::Unit),
+            step("children 2", Reply::Children(Read::Absent)),
+        ],
+    );
+    let root = source.handle(1);
+    let result = run_fake(&source, &root, None, 0, WalkBudget::nodes_only(20), true);
+    drop(root);
+    source.assert_consumed();
+    source.assert_lifetimes(&[(2, 1)]);
+    assert_eq!(
+        result.tree_markdown,
+        "- AXGroup \"Billing\"\n  - [0] AXButton \"Save\" [actions=[press]]\n"
+    );
+    assert_eq!(result.nodes[0].element_index, None);
+    assert_eq!(result.nodes[1].element_index, Some(0));
+    assert!(!result.truncated);
 }
 
 pub(super) fn closed_menu_fixture() -> TreeWalkResult {
@@ -1259,6 +1310,11 @@ fn node_budget_cut_preserves_pending_counts() {
         vec![
             step("timeout 1", Reply::Unit),
             step("text 1 AXRole", Reply::Text(Read::Known("AXGroup".into()))),
+            step(
+                &format!("batch 1 {CONTENT}"),
+                Reply::Batch(Ok(content(None))),
+            ),
+            step("value 1", Reply::Value(Ok(None))),
             step("children 1", Reply::Children(Read::Known(vec![2, 3, 4]))),
             step("timeout 2", Reply::Unit),
             step("text 2 AXRole", Reply::Text(Read::Known("AXButton".into()))),
@@ -1293,7 +1349,7 @@ fn node_budget_cut_preserves_pending_counts() {
     assert_eq!(result.nodes.iter().map(|node| format!("{node:?}")).collect::<Vec<_>>(), [
         "AXNode { owned_row_label: None, element_index: Some(0), role: \"AXButton\", title: Some(\"Run\"), value: None, description: None, identifier: None, help: None, actions: [\"AXPress\"], element_ptr: 2, depth: 0, parent_element_index: None, frame: None, value_state: None, value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }",
     ]);
-    assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "children 1", "adopt 2", "adopt 3", "adopt 4", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 2", "children 2", "release 2", "release 3", "release 4", "release 1"]);
+    assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "children 1", "adopt 2", "adopt 3", "adopt 4", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 2", "children 2", "release 2", "release 3", "release 4", "release 1"]);
     assert_deferred_budget();
 }
 
@@ -1921,6 +1977,11 @@ pub(super) fn large_container_fixture() -> TreeWalkResult {
     let mut script = vec![
         step("timeout 1", Reply::Unit),
         step("text 1 AXRole", Reply::Text(Read::Known("AXGroup".into()))),
+        step(
+            &format!("batch 1 {CONTENT}"),
+            Reply::Batch(Ok(content(None))),
+        ),
+        step("value 1", Reply::Value(Ok(None))),
         step("children 1", Reply::Children(Read::Known(ids.clone()))),
         step("text 1 AXTitle", Reply::Text(Read::Absent)),
         step("text 1 AXDescription", Reply::Text(Read::Absent)),
@@ -1985,8 +2046,8 @@ pub(super) fn large_container_fixture() -> TreeWalkResult {
     );
     let trace = source.trace();
     assert_eq!(
-        &trace[..4],
-        ["adopt 1", "timeout 1", "text 1 AXRole", "children 1"]
+        &trace[..6],
+        ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "children 1"]
     );
     assert_eq!(
         trace
@@ -2011,7 +2072,7 @@ pub(super) fn large_container_fixture() -> TreeWalkResult {
         101
     );
     assert_eq!(
-        &trace[207..211],
+        &trace[209..213],
         [
             "timeout 2",
             "batch 2 AXPosition,AXSize",
