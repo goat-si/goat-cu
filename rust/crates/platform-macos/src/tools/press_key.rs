@@ -8,8 +8,8 @@ use core_foundation::base::CFRelease;
 use cua_driver_contract::PressKeyInput;
 use cua_driver_core::{
     action_record::{
-        ActionEffect, ActionEvidence, ActionExecutionRecord, ActionTransport, ActualDelivery,
-        EvidenceKind, RequestedDelivery,
+        ActionEffect, ActionEvidence, ActionExecutionRecord, ActionTransport,
+        ActualDelivery, EvidenceKind, RequestedDelivery,
     },
     protocol::ToolResult,
     tool::{Tool, ToolDef},
@@ -176,10 +176,20 @@ fn dispatch_with_ax_oracle(
     Ok(false)
 }
 
+/// A sent key has an unknown effect and never offers an automatic retry.
+fn delivered_structured(confirmed: bool, foreground: bool, _chromium_embedder: bool) -> Value {
+    serde_json::json!({
+        "path": if foreground { "key_events_fg" } else { "key_events" },
+        "verified": confirmed,
+        "effect": if confirmed { "confirmed" } else { "unverifiable" },
+    })
+}
+
 fn action_record(
     confirmed: bool,
     foreground: bool,
     changes: Option<&Changes>,
+    _chromium_embedder: bool,
 ) -> ActionExecutionRecord {
     let effect = if confirmed {
         ActionEffect::Confirmed
@@ -218,6 +228,7 @@ fn action_record(
                 "the key events were constructed and the PID-routed post was attempted".into()
             },
         });
+
     }
     let (status, surfaces) = changes.map_or((None, None), Changes::opened_surfaces);
     record
@@ -1349,18 +1360,26 @@ impl Tool for PressKeyTool {
                 } else {
                     ""
                 };
-                let mut structured = serde_json::json!({
-                    "path": if fg { "key_events_fg" } else { "key_events" },
-                    "verified": confirmed,
-                    "effect": if confirmed { "confirmed" } else { "unverifiable" },
-                });
+                let chromium_embedder = !fg
+                    && !confirmed
+                    && tokio::task::spawn_blocking(move || {
+                        super::type_text::is_chromium_embedder(pid)
+                    })
+                    .await
+                    .unwrap_or(false);
+                let mut structured = delivered_structured(confirmed, fg, chromium_embedder);
+                let note = if chromium_embedder {
+                    format!(" {}", super::CHROMIUM_BACKGROUND_KEY_NOTE)
+                } else {
+                    String::new()
+                };
                 changes.add_window_identity(&mut structured);
                 ToolResult::text(format!(
-                    "✅ Pressed {display_key} on pid {pid}{label}.{}",
+                    "✅ Pressed {display_key} on pid {pid}{label}.{note}{}",
                     changes.result_suffix()
                 ))
                 .with_structured(structured)
-                .with_action_record(action_record(confirmed, fg, Some(&changes)))
+                .with_action_record(action_record(confirmed, fg, Some(&changes), chromium_embedder))
             }
             PressKeyDeliveryOutcome::Failed(error) => delivery_failed(error),
         };
@@ -3759,7 +3778,7 @@ pub(super) mod tests {
 
     #[test]
     fn accepted_without_oracle_has_no_escalation_but_ax_change_confirms() {
-        let unverifiable = action_record(false, false, None).public_result().unwrap();
+        let unverifiable = action_record(false, false, None, false).public_result().unwrap();
         assert_eq!(
             unverifiable.effect,
             cua_driver_contract::ActionEffect::Unverifiable
@@ -3770,7 +3789,7 @@ pub(super) mod tests {
         );
         assert!(unverifiable.escalation.is_none());
 
-        let confirmed = action_record(true, false, None).public_result().unwrap();
+        let confirmed = action_record(true, false, None, false).public_result().unwrap();
         assert_eq!(
             confirmed.effect,
             cua_driver_contract::ActionEffect::Confirmed
@@ -3884,7 +3903,7 @@ pub(super) mod tests {
                     "verified": confirmed,
                     "effect": if confirmed { "confirmed" } else { "unverifiable" }
                 }))
-                .with_action_record(action_record(confirmed, false, Some(&changes)));
+                .with_action_record(action_record(confirmed, false, Some(&changes), false));
             let wire = dispatch_press_key_wire(result).await;
             assert_ne!(wire["isError"], true, "{wire}");
             assert_eq!(
@@ -3910,6 +3929,50 @@ pub(super) mod tests {
         assert_eq!(wire["structuredContent"]["effect"], "confirmed");
         assert_eq!(wire["structuredContent"]["evidence"][0]["kind"], "window_change");
         assert_opened_window_wire(&wire);
+    }
+
+    #[test]
+    fn a_background_key_to_a_chromium_app_never_recommends_resending() {
+        let structured = delivered_structured(false, false, true);
+        assert_eq!(structured["effect"], "unverifiable");
+        assert!(structured.get("escalation").is_none());
+        let public = action_record(false, false, None, true).public_result().unwrap();
+        assert_eq!(public.effect, cua_driver_contract::ActionEffect::Unverifiable);
+        assert!(public.escalation.is_none());
+        assert!(!super::super::CHROMIUM_BACKGROUND_KEY_NOTE.contains("retry"));
+    }
+
+    #[test]
+    fn other_key_results_carry_no_escalation() {
+        for (confirmed, foreground, chromium_embedder, expected) in [
+            (
+                false,
+                false,
+                false,
+                serde_json::json!({"path": "key_events", "verified": false, "effect": "unverifiable"}),
+            ),
+            (
+                false,
+                true,
+                true,
+                serde_json::json!({"path": "key_events_fg", "verified": false, "effect": "unverifiable"}),
+            ),
+            (
+                true,
+                false,
+                true,
+                serde_json::json!({"path": "key_events", "verified": true, "effect": "confirmed"}),
+            ),
+        ] {
+            assert_eq!(
+                delivered_structured(confirmed, foreground, chromium_embedder),
+                expected
+            );
+            let public = action_record(confirmed, foreground, None, chromium_embedder)
+                .public_result()
+                .unwrap();
+            assert!(public.escalation.is_none());
+        }
     }
 
     #[test]

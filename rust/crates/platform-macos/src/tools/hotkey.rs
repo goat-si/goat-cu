@@ -57,7 +57,8 @@ fn def() -> &'static ToolDef {
                 ctrl/control, fn) first, then one non-modifier key from the `press_key` vocabulary. It does not \
                 raise the window.\n\
                 • `background` (default): posts the combo to the target pid as trusted input (Chromium/Electron \
-                accept it); with an AX target, that element is focused first. When the combo is a menu item's \
+                may drop it; use foreground for future actions when needed); with an AX target, that element \
+                is focused first. When the combo is a menu item's \
                 key equivalent (cmd+s, cmd+w, ...) in a native app, a window-only request uses the same \
                 menu chord route as press_key, including frontmost apps. Disabled Save uses the scripting \
                 route for a document window using Apple Events and per-app Automation consent; macOS may show \
@@ -967,12 +968,24 @@ impl Tool for HotkeyTool {
                 } else {
                     ""
                 };
+                let chromium_embedder = !fg
+                    && tokio::task::spawn_blocking(move || {
+                        super::type_text::is_chromium_embedder(pid)
+                    })
+                    .await
+                    .unwrap_or(false);
+                let structured = delivered_structured(fg, chromium_embedder);
+                let note = if chromium_embedder {
+                    format!(" {}", super::CHROMIUM_BACKGROUND_KEY_NOTE)
+                } else {
+                    String::new()
+                };
                 ToolResult::text(format!(
                     "Pressed {key_display} on pid {pid}{label}. Read the window before \
-                     sending it again.{}",
+                     sending it again.{note}{}",
                     changes.result_suffix()
                 ))
-                .with_structured(delivered_structured(fg))
+                .with_structured(structured)
             }
             Ok(Err(e)) if e.is::<super::press_key::WindowFocusConflictError>() => {
                 super::press_key::delivery_failed(e)
@@ -1037,7 +1050,7 @@ pub(super) fn menu_refusal_without_keys(mut result: ToolResult) -> ToolResult {
     result
 }
 
-fn delivered_structured(foreground: bool) -> Value {
+fn delivered_structured(foreground: bool, _chromium_embedder: bool) -> Value {
     serde_json::json!({
         "path": if foreground { "key_events_fg" } else { "key_events" },
         "verified": false,
@@ -1340,12 +1353,36 @@ mod tests {
 
     #[test]
     fn a_delivered_combo_suggests_no_resend() {
-        for foreground in [false, true] {
-            let structured = delivered_structured(foreground);
-            assert!(structured.get("escalation").is_none());
-            assert_eq!(structured["effect"], "unverifiable");
-            assert_eq!(structured["verified"], false);
+        for (foreground, path) in [(false, "key_events"), (true, "key_events_fg")] {
+            assert_eq!(
+                delivered_structured(foreground, false),
+                serde_json::json!({
+                    "path": path,
+                    "verified": false,
+                    "effect": "unverifiable",
+                })
+            );
         }
+    }
+
+    #[test]
+    fn a_background_combo_to_a_chromium_app_never_recommends_resending() {
+        let structured = delivered_structured(false, true);
+        assert_eq!(structured["effect"], "unverifiable");
+        assert!(structured.get("escalation").is_none());
+        assert!(!super::super::CHROMIUM_BACKGROUND_KEY_NOTE.contains("retry"));
+    }
+
+    #[test]
+    fn a_foreground_combo_to_a_chromium_app_suggests_no_resend() {
+        assert_eq!(
+            delivered_structured(true, true),
+            serde_json::json!({
+                "path": "key_events_fg",
+                "verified": false,
+                "effect": "unverifiable",
+            })
+        );
     }
 
     #[tokio::test]

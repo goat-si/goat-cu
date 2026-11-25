@@ -25,9 +25,10 @@ use cua_driver_core::snapshot_compaction::{
     UiaChildCandidate, UiaChildPlan, TAB_STRIP_COMPACTION_THRESHOLD,
 };
 use cua_driver_core::walk_budget::WalkBudget;
-use windows::core::{Interface, BSTR, HRESULT};
+use windows::core::{Interface, HRESULT};
 use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, TRUE};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_I4};
 use windows::Win32::UI::Accessibility::{
     ExpandCollapseState_Collapsed, ExpandCollapseState_Expanded,
     ExpandCollapseState_PartiallyExpanded, IUIAutomation, IUIAutomationCacheRequest,
@@ -686,8 +687,10 @@ unsafe fn walk_tree_unsafe(
                 );
 
                 if fallback_nodes.iter().any(|n| n.element_index.is_some()) {
-                    nodes = fallback_nodes;
+                    release_walk_nodes(std::mem::replace(&mut nodes, fallback_nodes));
                     lines = fallback_lines;
+                } else {
+                    release_walk_nodes(fallback_nodes);
                 }
             }
         } else {
@@ -882,10 +885,8 @@ unsafe fn walk_list_view_level(
             let condition = if dense {
                 // Filter before fetching patterns/values: offscreen rows must
                 // never enter the expensive bulk cache transaction.
-                let visible = automation.CreatePropertyCondition(
-                    UIA_IsOffscreenPropertyId,
-                    &windows::core::VARIANT::from(false),
-                )?;
+                let visible = automation
+                    .CreatePropertyCondition(UIA_IsOffscreenPropertyId, &VARIANT::from(false))?;
                 state.mark(Omission::OffscreenRowsDeferred);
                 automation.CreateAndCondition(&control, &visible)?
             } else {
@@ -945,10 +946,8 @@ unsafe fn walk_list_view_level(
             // Query mode may inspect offscreen rows too, but only one row's
             // cache at a time, after visible rows and sibling editors.
             let walker = (|| -> windows::core::Result<_> {
-                let offscreen = automation.CreatePropertyCondition(
-                    UIA_IsOffscreenPropertyId,
-                    &windows::core::VARIANT::from(true),
-                )?;
+                let offscreen = automation
+                    .CreatePropertyCondition(UIA_IsOffscreenPropertyId, &VARIANT::from(true))?;
                 automation.CreateTreeWalker(
                     &automation
                         .CreateAndCondition(&automation.ControlViewCondition()?, &offscreen)?,
@@ -1164,14 +1163,11 @@ unsafe fn walk_root_by_pid(
         // pattern below for VT_BOOL.
         let pid: u32 = match elem.GetCurrentPropertyValue(UIA_ProcessIdPropertyId) {
             Ok(v) => {
-                let raw = v.as_raw();
-                if raw.Anonymous.Anonymous.vt != 3
-                /* VT_I4 */
-                {
+                if v.vt() != VT_I4 {
                     walk_state.mark(Omission::ProcessIdUnreadable);
                     continue;
                 }
-                raw.Anonymous.Anonymous.Anonymous.lVal as u32
+                v.Anonymous.Anonymous.Anonymous.lVal as u32
             }
             Err(e) => {
                 tracing::debug!(target: "uia", "root child {i} ProcessId read failed: {e}");
@@ -1895,16 +1891,18 @@ fn read_variant(
     property_id: windows::Win32::UI::Accessibility::UIA_PROPERTY_ID,
     expected: u16,
     ctx: &UiaReadCtx<'_>,
-) -> Option<windows::core::VARIANT> {
+) -> Option<VARIANT> {
     unsafe {
         let result = element.GetCachedPropertyValue(property_id);
         let raw = match &result {
             Err(e) => RawCached::Err(e.code().0),
             Ok(v) => {
-                let variant = v.as_raw().Anonymous.Anonymous;
-                let token = if variant.vt == 13 {
-                    let ptr = variant.Anonymous.punkVal;
-                    windows::core::IUnknown::from_raw_borrowed(&ptr)
+                let variant = &v.Anonymous.Anonymous;
+                let token = if variant.vt.0 == 13 {
+                    variant
+                        .Anonymous
+                        .punkVal
+                        .as_ref()
                         .and_then(|p| p.cast::<windows::core::IUnknown>().ok())
                         .zip(ctx.not_supported)
                         .is_some_and(|(actual, expected)| actual.as_raw() == expected.as_raw())
@@ -1912,7 +1910,7 @@ fn read_variant(
                     false
                 };
                 RawCached::Ok {
-                    vt: variant.vt,
+                    vt: variant.vt.0,
                     unknown_is_not_supported_token: token,
                 }
             }
@@ -1934,9 +1932,7 @@ fn read_cached_bstr(
 ) -> Option<String> {
     unsafe {
         let variant = read_variant(element, property_id, 8, ctx)?;
-        let bstr = BSTR::from_raw(variant.as_raw().Anonymous.Anonymous.Anonymous.bstrVal);
-        let s = bstr.to_string();
-        std::mem::forget(bstr);
+        let s = variant.Anonymous.Anonymous.Anonymous.bstrVal.to_string();
         (!s.trim().is_empty()).then_some(s)
     }
 }
@@ -1948,12 +1944,11 @@ fn read_cached_bool(
     unsafe {
         Some(
             read_variant(element, property_id, 11, ctx)?
-                .as_raw()
                 .Anonymous
                 .Anonymous
                 .Anonymous
                 .boolVal
-                != 0,
+                .as_bool(),
         )
     }
 }
@@ -1966,7 +1961,7 @@ fn read_cached_is_password(element: &IUIAutomationElement) -> Option<bool> {
     unsafe {
         variant_bool(
             &element
-                .GetCachedPropertyValueEx(UIA_IsPasswordPropertyId, TRUE)
+                .GetCachedPropertyValueEx(UIA_IsPasswordPropertyId, TRUE.as_bool())
                 .ok()?,
         )
     }
@@ -1974,9 +1969,9 @@ fn read_cached_is_password(element: &IUIAutomationElement) -> Option<bool> {
 
 /// A `VT_BOOL` variant's value; `None` for any other type, including the
 /// not-supported sentinel.
-unsafe fn variant_bool(variant: &windows::core::VARIANT) -> Option<bool> {
-    if variant.as_raw().Anonymous.Anonymous.vt == 11 {
-        Some(variant.as_raw().Anonymous.Anonymous.Anonymous.boolVal != 0)
+unsafe fn variant_bool(variant: &VARIANT) -> Option<bool> {
+    if variant.vt() == VT_BOOL {
+        Some(variant.Anonymous.Anonymous.Anonymous.boolVal.as_bool())
     } else {
         None
     }

@@ -271,7 +271,7 @@ impl InputSink for PostedClick<'_> {
             };
             unsafe {
                 PostMessageW(
-                    self.target,
+                    Some(self.target),
                     message,
                     wparam,
                     make_lparam(self.client.x, self.client.y),
@@ -287,7 +287,7 @@ impl InputSink for PostedClick<'_> {
         if sent % 3 == 2 {
             let result = unsafe {
                 PostMessageW(
-                    self.target,
+                    Some(self.target),
                     self.up,
                     WPARAM(0),
                     make_lparam(self.client.x, self.client.y),
@@ -432,7 +432,7 @@ pub fn post_drag(
     };
 
     unsafe {
-        PostMessageW(root, down_msg, wparam, make_lparam(from_x, from_y))?;
+        PostMessageW(Some(root), down_msg, wparam, make_lparam(from_x, from_y))?;
     }
     sleep(Duration::from_millis(CLICK_DELAY_MS));
 
@@ -441,7 +441,7 @@ pub fn post_drag(
         let ix = from_x + ((to_x - from_x) as f64 * t).round() as i32;
         let iy = from_y + ((to_y - from_y) as f64 * t).round() as i32;
         unsafe {
-            PostMessageW(root, WM_MOUSEMOVE, wparam, make_lparam(ix, iy))?;
+            PostMessageW(Some(root), WM_MOUSEMOVE, wparam, make_lparam(ix, iy))?;
         }
         if step_delay_ms > 0 {
             sleep(Duration::from_millis(step_delay_ms));
@@ -449,7 +449,7 @@ pub fn post_drag(
     }
 
     unsafe {
-        PostMessageW(root, up_msg, WPARAM(0), make_lparam(to_x, to_y))?;
+        PostMessageW(Some(root), up_msg, WPARAM(0), make_lparam(to_x, to_y))?;
     }
     Ok(())
 }
@@ -505,12 +505,17 @@ pub fn post_drag_screen(
     unsafe {
         // Pre-drag MOUSEMOVE (wParam=0, no buttons down yet) then DOWN at from.
         PostMessageW(
-            target,
+            Some(target),
             WM_MOUSEMOVE,
             WPARAM(0),
             make_lparam(c_from.x, c_from.y),
         )?;
-        PostMessageW(target, down_msg, wparam, make_lparam(c_from.x, c_from.y))?;
+        PostMessageW(
+            Some(target),
+            down_msg,
+            wparam,
+            make_lparam(c_from.x, c_from.y),
+        )?;
     }
     sleep(Duration::from_millis(CLICK_DELAY_MS));
     for i in 1..=steps {
@@ -518,14 +523,14 @@ pub fn post_drag_screen(
         let ix = c_from.x + ((c_to.x - c_from.x) as f64 * t).round() as i32;
         let iy = c_from.y + ((c_to.y - c_from.y) as f64 * t).round() as i32;
         unsafe {
-            PostMessageW(target, WM_MOUSEMOVE, wparam, make_lparam(ix, iy))?;
+            PostMessageW(Some(target), WM_MOUSEMOVE, wparam, make_lparam(ix, iy))?;
         }
         if step_delay_ms > 0 {
             sleep(Duration::from_millis(step_delay_ms));
         }
     }
     unsafe {
-        PostMessageW(target, up_msg, WPARAM(0), make_lparam(c_to.x, c_to.y))?;
+        PostMessageW(Some(target), up_msg, WPARAM(0), make_lparam(c_to.x, c_to.y))?;
     }
     Ok(())
 }
@@ -609,7 +614,8 @@ pub fn is_chromium_target_window(hwnd: u64) -> bool {
 /// surfaces support some UIA/top-level background routes that direct Chromium
 /// frames do not, so delivery policy needs to distinguish the two shapes.
 pub fn has_chromium_descendant(hwnd: u64) -> bool {
-    use windows::Win32::Foundation::{BOOL, FALSE, LPARAM, TRUE};
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{FALSE, LPARAM, TRUE};
     use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
 
     if hwnd == 0 {
@@ -635,7 +641,7 @@ pub fn has_chromium_descendant(hwnd: u64) -> bool {
     let mut scan = Scan { found: false };
     unsafe {
         let _ = EnumChildWindows(
-            HWND(hwnd as *mut _),
+            Some(HWND(hwnd as *mut _)),
             Some(child_cb),
             LPARAM(&mut scan as *mut Scan as isize),
         );
@@ -998,7 +1004,7 @@ impl InputSink for ForegroundClick {
                 effects.push("no_activate");
                 if SetWindowPos(
                     self.target,
-                    HWND_TOPMOST,
+                    Some(HWND_TOPMOST),
                     0,
                     0,
                     0,
@@ -1103,7 +1109,7 @@ impl ForegroundClick {
             if self.noactivate.is_some() && !self.was_topmost {
                 let _ = SetWindowPos(
                     self.target,
-                    HWND_NOTOPMOST,
+                    Some(HWND_NOTOPMOST),
                     0,
                     0,
                     0,
@@ -1117,7 +1123,7 @@ impl ForegroundClick {
                 if !self.prev_fg.0.is_null() && self.prev_fg != self.target {
                     let _ = SetWindowPos(
                         self.prev_fg,
-                        HWND_TOP,
+                        Some(HWND_TOP),
                         0,
                         0,
                         0,
@@ -1402,7 +1408,7 @@ fn send_drag_synthesized_impl(
                 if !was_topmost {
                     let _ = SetWindowPos(
                         target,
-                        HWND_NOTOPMOST,
+                        Some(HWND_NOTOPMOST),
                         0,
                         0,
                         0,
@@ -1413,7 +1419,7 @@ fn send_drag_synthesized_impl(
                 if !prev_fg.0.is_null() && prev_fg != target {
                     let _ = SetWindowPos(
                         prev_fg,
-                        HWND_TOP,
+                        Some(HWND_TOP),
                         0,
                         0,
                         0,
@@ -1446,7 +1452,7 @@ fn send_drag_synthesized_impl(
             let guard = crate::input::NoActivateGuard::arm(target)?;
             let _ = SetWindowPos(
                 target,
-                HWND_TOPMOST,
+                Some(HWND_TOPMOST),
                 0,
                 0,
                 0,
@@ -1967,7 +1973,7 @@ mod wheel_tests {
                     SIZE,
                     None,
                     None,
-                    instance,
+                    Some(instance.into()),
                     None,
                 )
                 .expect("create SDL-like window");
@@ -1982,7 +1988,7 @@ mod wheel_tests {
                     }
                 }
                 let _ = DestroyWindow(hwnd);
-                let _ = UnregisterClassW(class.lpszClassName, instance);
+                let _ = UnregisterClassW(class.lpszClassName, Some(instance.into()));
                 drop(pump_trace);
                 let _ = stopped_tx.send(());
             });
@@ -2051,7 +2057,7 @@ mod wheel_tests {
                 SIZE,
                 None,
                 None,
-                instance,
+                Some(instance.into()),
                 None,
             )
             .expect("create window");
@@ -2060,7 +2066,7 @@ mod wheel_tests {
             assert!(super::SuspendedThread::suspend(hwnd).unwrap().is_none());
             post_click_on(hwnd, ON_BUTTON, ON_BUTTON, 1, "left").expect("post without pause");
             let mut msg = MSG::default();
-            while PeekMessageW(&mut msg, hwnd, 0, 0, PM_REMOVE).as_bool() {
+            while PeekMessageW(&mut msg, Some(hwnd), 0, 0, PM_REMOVE).as_bool() {
                 DispatchMessageW(&msg);
             }
             assert_eq!(
@@ -2069,7 +2075,7 @@ mod wheel_tests {
             );
             assert_eq!(trace.clicks.load(Ordering::Acquire), 1);
             DestroyWindow(hwnd).expect("destroy window");
-            UnregisterClassW(class.lpszClassName, instance).expect("unregister class");
+            UnregisterClassW(class.lpszClassName, Some(instance.into())).expect("unregister class");
         }
     }
 

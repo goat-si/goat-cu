@@ -1985,6 +1985,13 @@ pub(super) fn is_browser_pid(pid: i32) -> bool {
     crate::browser::browser_js::BrowserJs::supports(&bundle_id) || is_chromium_identity(&bundle_id)
 }
 
+/// Whether `pid` runs a Chromium renderer: a Chrome-family browser or an
+/// Electron app.
+pub(super) fn is_chromium_embedder(pid: i32) -> bool {
+    let bundle_id = apps::bundle_id_for_pid(pid).unwrap_or_default();
+    is_chromium_identity(&bundle_id) || crate::browser::electron_js::ElectronJs::is_electron(pid)
+}
+
 pub(crate) fn is_chromium_identity(bundle_id: &str) -> bool {
     bundle_id
         .to_ascii_lowercase()
@@ -4698,6 +4705,20 @@ mod tests {
         assert_eq!(indeterminate["synthesized_chars"], 0);
         assert_eq!(indeterminate["retryable"], false);
         assert_eq!(indeterminate["escalation"]["recommended"], "verify_state");
+    }
+
+    #[test]
+    fn accepted_web_writes_stay_unverifiable_for_every_engine() {
+        for engine in ["Gecko", "Chromium", "WebKit", "Electron", "Tauri"] {
+            let outcome = withheld_ax_insert_outcome(
+                "AXTextField",
+                "",
+                crate::document_edit::DocumentEdited::NotADocument,
+                WebAreaClassification::WebContent,
+            );
+            assert!(!outcome.verified, "{engine}");
+            assert_eq!(outcome.delivered_chars, None, "{engine}");
+        }
     }
 
     #[test]

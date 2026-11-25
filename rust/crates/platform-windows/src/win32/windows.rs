@@ -22,8 +22,9 @@
 
 use std::collections::HashSet;
 use std::sync::Mutex;
+use windows::core::BOOL;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
 };
@@ -89,8 +90,7 @@ fn merge_top_level_windows(
 fn top_level_handles() -> Vec<u64> {
     let mut handles = Vec::new();
     let mut after = HWND::default();
-    while let Ok(next) =
-        unsafe { FindWindowExW(HWND::default(), after, PCWSTR::null(), PCWSTR::null()) }
+    while let Ok(next) = unsafe { FindWindowExW(None, Some(after), PCWSTR::null(), PCWSTR::null()) }
     {
         if next.0.is_null() {
             break;
@@ -179,7 +179,7 @@ fn exact_window_from_probe(
 /// Return the native owner of one exact HWND without enumerating Win32 or UIA.
 pub(crate) fn window_owner_pid(hwnd: u64) -> Option<u32> {
     let hwnd = HWND(hwnd as *mut _);
-    if hwnd.0.is_null() || !unsafe { IsWindow(hwnd) }.as_bool() {
+    if hwnd.0.is_null() || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
         return None;
     }
     let mut pid = 0;
@@ -275,7 +275,7 @@ pub(crate) fn foreground_matches_target_or_owned_window(
 /// True only when the addressed HWND no longer exists; a hidden HWND is not
 /// enough to prove the original process instance still owns it.
 pub(crate) fn window_closed(hwnd: u64) -> bool {
-    !unsafe { IsWindow(HWND(hwnd as *mut _)) }.as_bool()
+    !unsafe { IsWindow(Some(HWND(hwnd as *mut _))) }.as_bool()
 }
 
 fn foreground_matches(target: ForegroundTarget, actual: u64, after_click: bool) -> bool {
@@ -530,7 +530,7 @@ pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
             found: false,
         };
         let _ = EnumChildWindows(
-            hwnd,
+            Some(hwnd),
             Some(child_cb),
             LPARAM(&mut child_scan as *mut ChildScan as isize),
         );
@@ -594,7 +594,9 @@ pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
 /// need for attribution.
 pub fn resolve_uwp_app_pid(host_pid: u32, frame_hwnd: u64) -> Option<u32> {
     let frame = HWND(frame_hwnd as *mut _);
-    if unsafe { IsWindow(frame) }.0 == 0 || window_class_name(frame) != "ApplicationFrameWindow" {
+    if unsafe { IsWindow(Some(frame)) }.0 == 0
+        || window_class_name(frame) != "ApplicationFrameWindow"
+    {
         return None;
     }
 
@@ -629,7 +631,7 @@ pub fn resolve_uwp_app_pid(host_pid: u32, frame_hwnd: u64) -> Option<u32> {
     };
     unsafe {
         let _ = EnumChildWindows(
-            frame,
+            Some(frame),
             Some(child_cb),
             LPARAM(&mut scan as *mut ChildScan as isize),
         );
@@ -876,7 +878,7 @@ mod hung_window_tests {
                 300,
                 None,
                 None,
-                instance,
+                Some(instance.into()),
                 None,
             )
             .expect("create hung window");

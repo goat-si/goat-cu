@@ -21,7 +21,8 @@
 use anyhow::{bail, Result};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE, WPARAM};
+use windows::core::BOOL;
+use windows::Win32::Foundation::{HWND, LPARAM, TRUE, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MapVirtualKeyW, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC,
@@ -269,7 +270,7 @@ fn focused_descendant(parent: HWND) -> Option<HWND> {
     let mut target_threads = vec![parent_thread];
     unsafe {
         let _ = EnumChildWindows(
-            parent,
+            Some(parent),
             Some(collect_thread),
             LPARAM(&mut target_threads as *mut Vec<u32> as isize),
         );
@@ -408,7 +409,7 @@ pub fn post_char(hwnd: u64, ch: char) -> Result<()> {
     let h = focused_descendant(h_parent).unwrap_or(h_parent);
     let code = ch as u32 as usize;
     unsafe {
-        PostMessageW(h, WM_CHAR, WPARAM(code), LPARAM(1))?;
+        PostMessageW(Some(h), WM_CHAR, WPARAM(code), LPARAM(1))?;
     }
     Ok(())
 }
@@ -438,7 +439,7 @@ unsafe fn post_vk_keystroke(h: HWND, vk: VIRTUAL_KEY) -> Result<()> {
     let lp_down = 1u32 | (scan << 16);
     let lp_up = lp_down | (1u32 << 30) | (1u32 << 31);
     PostMessageW(
-        h,
+        Some(h),
         WM_KEYDOWN,
         WPARAM(vk.0 as usize),
         LPARAM(lp_down as isize),
@@ -451,7 +452,12 @@ unsafe fn post_vk_keystroke(h: HWND, vk: VIRTUAL_KEY) -> Result<()> {
     // next character — visible in the "ABC\nDEF\nGHI" repro as "ABC / DEF /
     // (gap) / HI".
     sleep(Duration::from_millis(KEY_DELAY_MS));
-    PostMessageW(h, WM_KEYUP, WPARAM(vk.0 as usize), LPARAM(lp_up as isize))?;
+    PostMessageW(
+        Some(h),
+        WM_KEYUP,
+        WPARAM(vk.0 as usize),
+        LPARAM(lp_up as isize),
+    )?;
     Ok(())
 }
 
@@ -526,7 +532,7 @@ pub fn post_type_text_with_delay(hwnd: u64, text: &str, inter_char_ms: u64) -> R
                 // WM_CHAR is truncated by the target and shows up as garbage.
                 TextUnit::Packet(code) => {
                     unsafe {
-                        PostMessageW(h, WM_CHAR, WPARAM(*code as usize), LPARAM(1))?;
+                        PostMessageW(Some(h), WM_CHAR, WPARAM(*code as usize), LPARAM(1))?;
                     }
                     since_barrier += 1;
                     if !batched {
@@ -654,7 +660,7 @@ pub fn post_key(hwnd: u64, key: &str, modifiers: &[&str]) -> Result<()> {
             sleep(Duration::from_millis(KEY_DELAY_MS));
         }
         index += 1;
-        unsafe { PostMessageW(target, *msg, *wp, *lp) }.map_err(anyhow::Error::from)
+        unsafe { PostMessageW(Some(target), *msg, *wp, *lp) }.map_err(anyhow::Error::from)
     })?;
     Ok(())
 }
@@ -1434,7 +1440,7 @@ fn resolve_press(target: HWND, key: &str, modifiers: &[&str]) -> Result<Press> {
             return Ok(match vk {
                 Some(vk) => Press::Key {
                     vk: VIRTUAL_KEY(vk),
-                    scan: unsafe { MapVirtualKeyExW(vk as u32, MAPVK_VK_TO_VSC, hkl) },
+                    scan: unsafe { MapVirtualKeyExW(vk as u32, MAPVK_VK_TO_VSC, Some(hkl)) },
                 },
                 None => Press::Text(ch),
             });
@@ -1849,7 +1855,7 @@ mod type_text_bench {
                     200,
                     None,
                     None,
-                    instance,
+                    Some(instance.into()),
                     None,
                 )
                 .expect("create EDIT control");

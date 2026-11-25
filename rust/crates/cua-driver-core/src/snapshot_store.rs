@@ -16,6 +16,7 @@ pub use scoped::{
 };
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 /// Reserved dispatch argument marking window-relative pixels as native
@@ -90,17 +91,11 @@ struct Snapshot<S> {
     semantic_epoch: u64,
     window_id: u64,
     publisher: Option<String>,
-    /// A publisher session that ended may not authorize new rooted reads,
-    /// even if another session's screenshot keeps this full snapshot alive.
+    /// A retired publisher cannot authorize a rooted read.
     root_session_retired: bool,
-    // None is the explicitly unprotected rollout mode of the legacy publishers.
     instance: Option<InstanceCapture>,
     screenshot_owner: Option<String>,
-    screenshot_scale: Option<f64>,
-    /// Window size in points when the screenshot was taken. A tree-only read
-    /// keeps the screenshot frame only while the window still has this size.
-    screenshot_window_size: Option<(f64, f64)>,
-    zoom: Option<ZoomContext>,
+    frame: Option<ScreenshotFrame>,
     semantic: bool,
     payload: S,
     basis: Option<crate::window_basis::WindowBasis>,
@@ -120,14 +115,45 @@ impl<S> Snapshot<S> {
     }
 
     fn screenshot(&self, session: Option<&str>) -> Option<ScreenshotContext> {
-        let scale = self
-            .screenshot_scale
+        let frame = self
+            .frame
+            .as_ref()
             .filter(|_| self.screenshot_owner.as_deref() == session)?;
         Some(ScreenshotContext {
             snapshot_id: self.id,
             window_id: self.window_id,
-            scale,
+            frame_id: frame.frame_id,
+            scale: frame.scale,
         })
+    }
+
+    fn zoom(&self) -> Option<ZoomContext> {
+        self.frame.as_ref()?.zoom
+    }
+}
+
+/// The screenshot a snapshot's pixel coordinates refer to.
+#[derive(Clone, Copy, Debug)]
+struct ScreenshotFrame {
+    /// Minted for every new image, so a refresh at an unchanged scale still
+    /// retires contexts taken against the image it replaced.
+    frame_id: u64,
+    scale: f64,
+    /// Window size in points when the screenshot was taken. A tree-only read
+    /// keeps the screenshot frame only while the window still has this size.
+    window_size: Option<(f64, f64)>,
+    zoom: Option<ZoomContext>,
+}
+
+impl ScreenshotFrame {
+    fn new(scale: f64, window_size: Option<(f64, f64)>) -> Self {
+        static NEXT_FRAME_ID: AtomicU64 = AtomicU64::new(1);
+        Self {
+            frame_id: NEXT_FRAME_ID.fetch_add(1, Ordering::Relaxed),
+            scale,
+            window_size,
+            zoom: None,
+        }
     }
 }
 
@@ -135,6 +161,7 @@ impl<S> Snapshot<S> {
 pub struct ScreenshotContext {
     pub snapshot_id: u32,
     pub window_id: u64,
+    pub frame_id: u64,
     pub scale: f64,
 }
 
@@ -842,9 +869,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
             .filter(|snapshot| snapshot.semantic)?;
         snapshot.advance_basis(None, session);
         snapshot.screenshot_owner = session.map(str::to_owned);
-        snapshot.screenshot_scale = Some(screenshot_scale);
-        snapshot.screenshot_window_size = window_size;
-        snapshot.zoom = None;
+        snapshot.frame = Some(ScreenshotFrame::new(screenshot_scale, window_size));
         snapshot.ticket_floor = ticket_floor;
         let id = snapshot.id;
         inner.supersede_captures(pid, window_id);
@@ -963,19 +988,23 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
                     retired.push(lane.remove(position));
                 }
                 // A new screenshot brings its own frame. A tree-only read keeps
-                // the replaced snapshot's frame while the window keeps its size.
-                let (scale, frame_size) = match (screenshot_scale, window_size) {
-                    (Some(scale), size) => (Some(scale), size),
+                // the replaced snapshot's frame, and its frame id, while the
+                // window keeps its size: it is the same image.
+                let frame = match (screenshot_scale, window_size) {
+                    (Some(scale), size) => Some(ScreenshotFrame::new(scale, size)),
                     (None, Some(now)) => retired
                         .first()
                         .filter(|previous| previous.screenshot_owner.as_deref() == session)
                         .and_then(|previous| {
-                            let then = previous.screenshot_window_size?;
+                            let frame = previous.frame?;
+                            let then = frame.window_size?;
                             let same = (then.0 - now.0).abs() < 0.5 && (then.1 - now.1).abs() < 0.5;
-                            same.then_some((previous.screenshot_scale?, then))
-                        })
-                        .map_or((None, None), |(scale, size)| (Some(scale), Some(size))),
-                    (None, None) => (None, None),
+                            same.then_some(ScreenshotFrame {
+                                zoom: None,
+                                ..frame
+                            })
+                        }),
+                    (None, None) => None,
                 };
                 let owned = |entry: &Snapshot<S>| entry.publisher.as_deref() == session;
                 if lane.iter().filter(|entry| owned(entry)).count() == LRU_CAP_PER_PID {
@@ -996,9 +1025,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
                     root_session_retired: false,
                     instance,
                     screenshot_owner: session.map(str::to_owned),
-                    screenshot_scale: scale,
-                    screenshot_window_size: frame_size,
-                    zoom: None,
+                    frame,
                     semantic,
                     payload,
                     basis: stored.clone(),
@@ -1057,7 +1084,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
                 let Some(snapshot) = lane.iter().find(|snapshot| snapshot.window_id == window_id)
                 else {
                     let others_have_one = inner.lane(pid).iter().any(|snapshot| {
-                        snapshot.window_id == window_id && snapshot.screenshot_scale.is_some()
+                        snapshot.window_id == window_id && snapshot.frame.is_some()
                     });
                     let why = if others_have_one {
                         MissingFrame::OtherSession
@@ -1151,11 +1178,12 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         zoom: ZoomContext,
     ) -> Result<(), ToolResult> {
         let mut inner = self.inner.lock().unwrap();
-        let snapshot = inner
+        let frame = inner
             .snapshot_mut(pid, zoom.screenshot.window_id, session)
             .filter(|snapshot| snapshot.screenshot(session) == Some(zoom.screenshot))
+            .and_then(|snapshot| snapshot.frame.as_mut())
             .ok_or_else(|| zoom_context_refusal(pid, Some(zoom.screenshot.window_id)))?;
-        snapshot.zoom = Some(zoom);
+        frame.zoom = Some(zoom);
         Ok(())
     }
 
@@ -1176,7 +1204,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
                     && snapshot.publisher.as_deref() == session
                     && snapshot.screenshot_owner.as_deref() == session
             })
-            .filter_map(|snapshot| snapshot.zoom);
+            .filter_map(Snapshot::zoom);
         match (zooms.next(), zooms.next()) {
             (Some(zoom), None) => Ok(zoom),
             _ => Err(zoom_context_refusal(pid, window_id)),
@@ -2427,13 +2455,15 @@ mod tests {
             .map(|context| context.scale)
     }
 
-    fn zoom_on(snapshot: u32, scale: f64) -> ZoomContext {
+    fn current_frame(cache: &SnapshotStore<Payload>, session: &str) -> ScreenshotContext {
+        cache
+            .screenshot_context(10, Some(20), Some(session))
+            .unwrap()
+    }
+
+    fn zoom_on(screenshot: ScreenshotContext) -> ZoomContext {
         ZoomContext {
-            screenshot: ScreenshotContext {
-                snapshot_id: snapshot,
-                window_id: 20,
-                scale,
-            },
+            screenshot,
             origin_x: 100.0,
             origin_y: 50.0,
             scale_inv: 2.0,
@@ -2529,8 +2559,10 @@ mod tests {
         let cache = SnapshotStore::new();
         let size = Some((900.0, 680.0));
         cache.publish_sized_for_session(10, 20, Payload(vec![1]), Some("a"), Some(2.0), size);
+        let image = current_frame(&cache, "a").frame_id;
         cache.publish_sized_for_session(10, 20, Payload(vec![1, 2]), Some("a"), None, size);
         assert_eq!(scale(&cache, 20, "a"), Some(2.0), "same size: frame kept");
+        assert_eq!(current_frame(&cache, "a").frame_id, image, "same image");
         cache.publish_sized_for_session(10, 20, Payload(vec![1]), Some("a"), None, size);
         assert_eq!(
             scale(&cache, 20, "a"),
@@ -3106,11 +3138,8 @@ mod tests {
     #[test]
     fn zoom_context_is_bound_to_snapshot_session_and_window() {
         let cache = SnapshotStore::new();
-        let snapshot = cache
-            .publish_for_session(10, 20, Payload(vec![]), Some("client-a"), Some(7.35))
-            .unwrap()
-            .0;
-        let context = zoom_on(snapshot, 7.35);
+        cache.publish_for_session(10, 20, Payload(vec![]), Some("client-a"), Some(7.35));
+        let context = zoom_on(current_frame(&cache, "client-a"));
         cache.set_zoom(10, Some("client-a"), context).unwrap();
 
         assert_eq!(cache.zoom(10, Some(20), Some("client-a")).unwrap(), context);
@@ -3140,6 +3169,7 @@ mod tests {
                 ScreenshotContext {
                     snapshot_id: first,
                     window_id: 20,
+                    frame_id: current_frame(&cache, "client-a").frame_id,
                     scale: 2.0,
                 }
             )
@@ -3164,31 +3194,49 @@ mod tests {
     #[test]
     fn late_zoom_completion_cannot_replace_newer_valid_context() {
         let cache = SnapshotStore::new();
-        let snapshot_a = cache
-            .publish_for_session(10, 20, Payload(vec![]), Some("client-a"), Some(2.0))
-            .unwrap()
-            .0;
-        let snapshot_b = cache
-            .publish_for_session(10, 20, Payload(vec![]), Some("client-a"), Some(1.0))
-            .unwrap()
-            .0;
-        let valid_b = zoom_on(snapshot_b, 1.0);
+        cache.publish_for_session(10, 20, Payload(vec![]), Some("client-a"), Some(2.0));
+        let frame_a = current_frame(&cache, "client-a");
+        cache.publish_for_session(10, 20, Payload(vec![]), Some("client-a"), Some(1.0));
+        let valid_b = zoom_on(current_frame(&cache, "client-a"));
         cache.set_zoom(10, Some("client-a"), valid_b).unwrap();
         assert!(cache
-            .set_zoom(10, Some("client-a"), zoom_on(snapshot_a, 2.0))
+            .set_zoom(10, Some("client-a"), zoom_on(frame_a))
             .is_err());
         assert_eq!(cache.zoom(10, Some(20), Some("client-a")).unwrap(), valid_b);
     }
 
     #[test]
+    fn a_zoom_against_a_refreshed_frame_is_refused_even_at_the_same_scale() {
+        let cache = SnapshotStore::new();
+        let session = Some("client-a");
+        cache.publish_sized_for_session(10, 20, Payload(vec![1]), session, Some(2.0), None);
+        let before = cache.screenshot_context(10, Some(20), session).unwrap();
+        cache
+            .refresh_screenshot_for_session(10, 20, session, 2.0, None)
+            .unwrap();
+        let after = cache.screenshot_context(10, Some(20), session).unwrap();
+        assert_eq!(
+            (after.snapshot_id, after.scale),
+            (before.snapshot_id, before.scale)
+        );
+        let late = zoom_on(before);
+        assert_eq!(
+            refusal_code(cache.set_zoom(10, session, late).unwrap_err()),
+            "zoom_context_missing"
+        );
+        assert!(cache.zoom(10, Some(20), session).is_err());
+    }
+
+    #[test]
     fn newer_snapshot_or_session_end_retires_zoom() {
         let cache = SnapshotStore::new();
-        let snapshot = cache
-            .publish_for_session(10, 20, Payload(vec![]), Some("client-a"), Some(7.35))
-            .unwrap()
-            .0;
+        cache.publish_for_session(10, 20, Payload(vec![]), Some("client-a"), Some(7.35));
         cache
-            .set_zoom(10, Some("client-a"), zoom_on(snapshot, 7.35))
+            .set_zoom(
+                10,
+                Some("client-a"),
+                zoom_on(current_frame(&cache, "client-a")),
+            )
             .unwrap();
         cache.publish_for_session(10, 20, Payload(vec![]), Some("client-b"), Some(1.0));
         assert!(
@@ -3196,17 +3244,18 @@ mod tests {
             "another session's read leaves a's zoom"
         );
 
-        let latest = cache
-            .publish_for_session(10, 20, Payload(vec![]), Some("client-a"), Some(1.0))
-            .unwrap()
-            .0;
+        cache.publish_for_session(10, 20, Payload(vec![]), Some("client-a"), Some(1.0));
         assert_eq!(
             refusal_code(cache.zoom(10, Some(20), Some("client-a")).unwrap_err()),
             "zoom_context_missing",
             "a's own newer snapshot retires its zoom"
         );
         cache
-            .set_zoom(10, Some("client-a"), zoom_on(latest, 1.0))
+            .set_zoom(
+                10,
+                Some("client-a"),
+                zoom_on(current_frame(&cache, "client-a")),
+            )
             .unwrap();
         assert_eq!(cache.retire_session_screenshots("client-a"), 1);
         assert!(cache.zoom(10, Some(20), Some("client-a")).is_err());

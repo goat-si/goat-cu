@@ -266,9 +266,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
             .filter(|s| ticket > s.ticket_floor)?;
         snapshot.advance_basis(basis, session);
         snapshot.screenshot_owner = session.map(str::to_owned);
-        snapshot.screenshot_scale = Some(screenshot_scale);
-        snapshot.screenshot_window_size = window_size;
-        snapshot.zoom = None;
+        snapshot.frame = Some(super::ScreenshotFrame::new(screenshot_scale, window_size));
         snapshot.ticket_floor = ticket;
         let id = snapshot.id;
         let stored = snapshot.basis.clone();

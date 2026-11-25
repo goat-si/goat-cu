@@ -599,7 +599,7 @@ impl NoActivateGuard {
 
 fn root_process_identity(root: HWND) -> Option<(u32, u32)> {
     unsafe {
-        if !IsWindow(root).as_bool() {
+        if !IsWindow(Some(root)).as_bool() {
             return None;
         }
         let mut process_id = 0;
@@ -787,7 +787,7 @@ pub fn inject_click_screen(
     }
     let target_h = HWND(target as *mut _);
     unsafe {
-        if !IsWindow(target_h).as_bool() {
+        if !IsWindow(Some(target_h)).as_bool() {
             bail!("inject_click_screen: invalid or stale target HWND");
         }
     }
@@ -1190,7 +1190,7 @@ mod task_view_desktop_tests {
                 200,
                 None,
                 None,
-                instance,
+                Some(instance.into()),
                 None,
             )
             .expect("create window");
@@ -1243,7 +1243,7 @@ mod task_view_desktop_tests {
             drop(guard);
 
             DestroyWindow(hwnd).expect("destroy window");
-            UnregisterClassW(class.lpszClassName, instance).expect("unregister class");
+            UnregisterClassW(class.lpszClassName, Some(instance.into())).expect("unregister class");
             assert_eq!(landed, other, "the guard took the window off its desktop");
             assert_ne!(armed, 0, "on the user's desktop the guard still applies");
         }
@@ -1449,7 +1449,7 @@ pub fn inject_drag_screen(
     }
     let target_h = HWND(target as *mut _);
     unsafe {
-        if !IsWindow(target_h).as_bool() {
+        if !IsWindow(Some(target_h)).as_bool() {
             bail!("inject_drag_screen: invalid or stale target HWND");
         }
     }

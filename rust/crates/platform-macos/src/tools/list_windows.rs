@@ -83,6 +83,7 @@ impl Tool for ListWindowsTool {
                 app_filter.as_deref(),
                 std::process::id() as i32,
                 crate::apps::bundle_id_for_pid,
+                crate::apps::bundle_names_for_pid,
                 crate::ax::bindings::ax_window_ids_of_pid,
             );
             label_window_records(&mut structured, |pid| {
@@ -135,6 +136,7 @@ fn compose_listing(
     app_filter: Option<&str>,
     own_pid: i32,
     mut bundle_id_of: impl FnMut(i32) -> Option<String>,
+    mut bundle_names_of: impl FnMut(i32) -> Vec<String>,
     ax_window_ids_of: impl FnMut(i32) -> Option<std::collections::HashSet<u32>>,
 ) -> (Vec<crate::windows::WindowInfo>, Value) {
     let current_space_id = enumeration.current_space_id;
@@ -150,11 +152,11 @@ fn compose_listing(
             let bundle_id = bundle_ids
                 .entry(w.pid)
                 .or_insert_with(|| bundle_id_of(w.pid));
-            cua_driver_core::tool_args::app_filter_matches(
-                filter,
-                &w.app_name,
-                bundle_id.as_deref(),
-            )
+            let extra = bundle_names_of(w.pid);
+            let names: Vec<&str> = std::iter::once(w.app_name.as_str())
+                .chain(extra.iter().map(String::as_str))
+                .collect();
+            cua_driver_core::tool_args::app_filter_matches(filter, &names, bundle_id.as_deref())
         });
     }
     crate::windows::retain_ax_reachable_using(&mut windows, current_space_id, ax_window_ids_of);
@@ -561,6 +563,7 @@ mod tests {
             app,
             own_pid,
             |_| Some("com.example.app".to_owned()),
+            |_| Vec::new(),
             |pid| (pid == 7).then(|| [42, 43, 44].into_iter().collect()),
         );
         assert!(
@@ -624,6 +627,7 @@ mod tests {
             None,
             999,
             |_| None,
+            |_| Vec::new(),
             |_| None,
         );
         assert!(windows.is_empty());

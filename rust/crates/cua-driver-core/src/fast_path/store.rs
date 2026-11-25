@@ -2,19 +2,18 @@
 // Copyright (c) 2026 Cua AI, Inc.
 
 //! In-memory read-time state for the guards: element fingerprints per
-//! snapshot, and the latest window image plus window fingerprint per window.
-//! Nothing goes to disk. Fingerprints of retired snapshots stay for the same
-//! bounded window so an older token can be checked instead of refused.
-//!
-//! The store is daemon wide, so every entry carries the session that
-//! published it and a lookup only sees its own session's entries: one MCP
-//! session's read must not answer another session's target lookup.
+//! snapshot, and the latest window image plus window fingerprint per session
+//! and window. Each runtime's tool registry owns one store and clears a
+//! session's entries when that session ends. Nothing goes to disk.
+//! Fingerprints of retired snapshots stay for the same bounded window so an
+//! older token can be checked instead of refused. Every lookup sees only its
+//! publishing session, so one MCP session cannot answer another session.
 
 use super::fingerprint::ElementFingerprint;
 use super::pixel::GrayImage;
 use super::window::WindowFingerprint;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 /// Snapshots whose fingerprints are kept (8 per pid in the snapshot LRU,
 /// times a few busy pids).
@@ -24,11 +23,10 @@ pub const IMAGE_CAPACITY: usize = 16;
 
 #[derive(Clone, Debug)]
 pub struct SnapshotFingerprints {
+    /// The trusted publishing session; unnamed callers only match unnamed reads.
+    pub session: Option<String>,
     pub pid: i32,
     pub window_id: u64,
-    /// The session that published the read, as the daemon named it. `None`
-    /// is the unnamed (daemon-global) caller, and only matches `None`.
-    pub session: Option<String>,
     pub elements: Vec<ElementFingerprint>,
     /// Cheap stats for target classification.
     pub element_count: usize,
@@ -42,26 +40,37 @@ pub struct ReadImage {
     pub window: WindowFingerprint,
 }
 
+/// `(session, pid, window_id)`: each session keeps its own read of a window.
+type WindowKey = (Option<String>, i32, u64);
+
+fn key(session: Option<&str>, pid: i32, window_id: u64) -> WindowKey {
+    (session.map(str::to_owned), pid, window_id)
+}
+
 #[derive(Default)]
 struct State {
     snapshots: HashMap<u32, SnapshotFingerprints>,
     snapshot_order: VecDeque<u32>,
-    images: HashMap<(Option<String>, i32, u64), ReadImage>,
-    image_order: VecDeque<(Option<String>, i32, u64)>,
+    images: HashMap<WindowKey, ReadImage>,
+    image_order: VecDeque<WindowKey>,
     /// Latest window fingerprint even when no image was kept.
-    windows: HashMap<(Option<String>, i32, u64), WindowFingerprint>,
+    windows: HashMap<WindowKey, WindowFingerprint>,
 }
 
-/// Key of a window-scoped entry: the publishing session, the pid, and the
-/// window. Two sessions reading the same window keep separate entries.
-type WindowKey = (Option<String>, i32, u64);
-
-fn window_key(session: Option<&str>, pid: i32, window_id: u64) -> WindowKey {
-    (session.map(str::to_owned), pid, window_id)
-}
-
-fn same_window(key: &WindowKey, pid: i32, window_id: u64) -> bool {
-    key.1 == pid && key.2 == window_id
+impl State {
+    /// The session's latest snapshot of the window.
+    fn latest(
+        &self,
+        session: Option<&str>,
+        pid: i32,
+        window_id: u64,
+    ) -> Option<&SnapshotFingerprints> {
+        self.snapshot_order
+            .iter()
+            .rev()
+            .filter_map(|id| self.snapshots.get(id))
+            .find(|f| f.session.as_deref() == session && f.pid == pid && f.window_id == window_id)
+    }
 }
 
 #[derive(Default)]
@@ -112,38 +121,28 @@ impl GuardStore {
 
     pub fn latest_stats(
         &self,
+        session: Option<&str>,
         pid: i32,
         window_id: u64,
-        session: Option<&str>,
     ) -> Option<(usize, usize)> {
         let s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        s.snapshot_order
-            .iter()
-            .rev()
-            .filter_map(|id| s.snapshots.get(id))
-            .find(|f| f.pid == pid && f.window_id == window_id && f.session.as_deref() == session)
+        s.latest(session, pid, window_id)
             .map(|f| (f.element_count, f.thin_frames))
     }
 
-    /// The smallest element of the window's latest snapshot whose read-time
-    /// frame contains the screen point: what the agent saw there.
+    /// The smallest element of the session's latest snapshot of the window
+    /// whose read-time frame contains the screen point: what the agent saw
+    /// there.
     pub fn element_at(
         &self,
+        session: Option<&str>,
         pid: i32,
         window_id: u64,
         x: f64,
         y: f64,
-        session: Option<&str>,
     ) -> Option<ElementFingerprint> {
         let s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let snap = s
-            .snapshot_order
-            .iter()
-            .rev()
-            .filter_map(|id| s.snapshots.get(id))
-            .find(|f| {
-                f.pid == pid && f.window_id == window_id && f.session.as_deref() == session
-            })?;
+        let snap = s.latest(session, pid, window_id)?;
         snap.elements
             .iter()
             .filter(|fp| fp.frame.is_some_and(|f| f.contains(x, y) && f.area() > 0.0))
@@ -154,9 +153,9 @@ impl GuardStore {
             .cloned()
     }
 
-    pub fn put_window(&self, pid: i32, window: WindowFingerprint, session: Option<&str>) {
+    pub fn put_window(&self, session: Option<&str>, pid: i32, window: WindowFingerprint) {
+        let key = key(session, pid, window.window_id);
         let mut s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let key = window_key(session, pid, window.window_id);
         s.windows.insert(key.clone(), window);
         if s.windows.len() > 4 * IMAGE_CAPACITY {
             let keep: Vec<_> = s.image_order.iter().cloned().collect();
@@ -167,16 +166,16 @@ impl GuardStore {
 
     pub fn window(
         &self,
+        session: Option<&str>,
         pid: i32,
         window_id: u64,
-        session: Option<&str>,
     ) -> Option<WindowFingerprint> {
         let s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        s.windows.get(&window_key(session, pid, window_id)).copied()
+        s.windows.get(&key(session, pid, window_id)).copied()
     }
 
-    pub fn put_image(&self, pid: i32, image: ReadImage, session: Option<&str>) {
-        let key = window_key(session, pid, image.window.window_id);
+    pub fn put_image(&self, session: Option<&str>, pid: i32, image: ReadImage) {
+        let key = key(session, pid, image.window.window_id);
         let mut s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         s.windows.insert(key.clone(), image.window);
         if s.images.insert(key.clone(), image).is_none() {
@@ -192,25 +191,36 @@ impl GuardStore {
         }
     }
 
-    pub fn image(&self, pid: i32, window_id: u64, session: Option<&str>) -> Option<ReadImage> {
+    pub fn image(&self, session: Option<&str>, pid: i32, window_id: u64) -> Option<ReadImage> {
         let s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        s.images.get(&window_key(session, pid, window_id)).cloned()
+        s.images.get(&key(session, pid, window_id)).cloned()
     }
 
-    /// Drop the window's recorded state for every session: the window is gone
-    /// or was replaced, so no session's cached image may outlive it.
+    /// Forget a gone or replaced window across all sessions.
     pub fn forget_window(&self, pid: i32, window_id: u64) {
         let mut s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        s.images.retain(|k, _| !same_window(k, pid, window_id));
-        s.image_order.retain(|k| !same_window(k, pid, window_id));
-        s.windows.retain(|k, _| !same_window(k, pid, window_id));
+        let matches = |k: &WindowKey| k.1 == pid && k.2 == window_id;
+        s.images.retain(|k, _| !matches(k));
+        s.image_order.retain(|k| !matches(k));
+        s.windows.retain(|k, _| !matches(k));
     }
-}
 
-/// The daemon-wide store.
-pub fn global() -> &'static GuardStore {
-    static STORE: OnceLock<GuardStore> = OnceLock::new();
-    STORE.get_or_init(GuardStore::new)
+    /// Drop everything `session`'s reads recorded.
+    pub fn retire_session(&self, session: &str) {
+        let mut s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let owned = |k: &WindowKey| k.0.as_deref() == Some(session);
+        s.images.retain(|k, _| !owned(k));
+        s.image_order.retain(|k| !owned(k));
+        s.windows.retain(|k, _| !owned(k));
+        s.snapshots
+            .retain(|_, f| f.session.as_deref() != Some(session));
+        let State {
+            snapshots,
+            snapshot_order,
+            ..
+        } = &mut *s;
+        snapshot_order.retain(|id| snapshots.contains_key(id));
+    }
 }
 
 #[cfg(test)]
@@ -234,9 +244,9 @@ mod tests {
             store.put_snapshot(
                 id,
                 SnapshotFingerprints {
+                    session: None,
                     pid: 1,
                     window_id: 2,
-                    session: None,
                     elements: vec![ElementFingerprint {
                         role: format!("r{id}"),
                         ..Default::default()
@@ -249,7 +259,7 @@ mod tests {
         assert!(store.element(0, 0, None).is_none());
         assert_eq!(store.element(10, 0, None).unwrap().2.role, "r10");
         assert!(store.element(10, 1, None).is_none());
-        assert_eq!(store.latest_stats(1, 2, None), Some((1, 0)));
+        assert_eq!(store.latest_stats(None, 1, 2), Some((1, 0)));
     }
 
     #[test]
@@ -263,9 +273,9 @@ mod tests {
         store.put_snapshot(
             1,
             SnapshotFingerprints {
+                session: None,
                 pid: 1,
                 window_id: 2,
-                session: None,
                 elements: vec![
                     el("AXGroup", Rect::new(0.0, 0.0, 500.0, 500.0)),
                     el("AXButton", Rect::new(10.0, 10.0, 80.0, 24.0)),
@@ -275,15 +285,15 @@ mod tests {
             },
         );
         assert_eq!(
-            store.element_at(1, 2, 20.0, 20.0, None).unwrap().role,
+            store.element_at(None, 1, 2, 20.0, 20.0).unwrap().role,
             "AXButton"
         );
         assert_eq!(
-            store.element_at(1, 2, 300.0, 300.0, None).unwrap().role,
+            store.element_at(None, 1, 2, 300.0, 300.0).unwrap().role,
             "AXGroup"
         );
-        assert!(store.element_at(1, 2, 900.0, 900.0, None).is_none());
-        assert!(store.element_at(1, 3, 20.0, 20.0, None).is_none());
+        assert!(store.element_at(None, 1, 2, 900.0, 900.0).is_none());
+        assert!(store.element_at(None, 1, 3, 20.0, 20.0).is_none());
     }
 
     #[test]
@@ -291,30 +301,89 @@ mod tests {
         let store = GuardStore::new();
         for id in 0..(IMAGE_CAPACITY as u64 + 3) {
             store.put_image(
+                None,
                 1,
                 ReadImage {
                     snapshot_id: 1,
                     image: GrayImage::filled(2, 2, 0),
                     window: win(id),
                 },
-                None,
             );
         }
-        assert!(store.image(1, 0, None).is_none());
+        assert!(store.image(None, 1, 0).is_none());
         store.put_image(
+            None,
             1,
             ReadImage {
                 snapshot_id: 9,
                 image: GrayImage::filled(2, 2, 0),
                 window: win(5),
             },
-            None,
         );
-        assert_eq!(store.image(1, 5, None).unwrap().snapshot_id, 9);
+        assert_eq!(store.image(None, 1, 5).unwrap().snapshot_id, 9);
         store.forget_window(1, 5);
-        assert!(store.image(1, 5, None).is_none() && store.window(1, 5, None).is_none());
+        assert!(store.image(None, 1, 5).is_none() && store.window(None, 1, 5).is_none());
     }
 
+    fn read(store: &GuardStore, session: &str, snapshot_id: u32) {
+        store.put_snapshot(
+            snapshot_id,
+            SnapshotFingerprints {
+                session: Some(session.into()),
+                pid: 1,
+                window_id: 2,
+                elements: vec![ElementFingerprint {
+                    role: session.into(),
+                    frame: Some(Rect::new(0.0, 0.0, 10.0, 10.0)),
+                    ..Default::default()
+                }],
+                element_count: 1,
+                thin_frames: 0,
+            },
+        );
+        store.put_image(
+            Some(session),
+            1,
+            ReadImage {
+                snapshot_id,
+                image: GrayImage::filled(2, 2, 0),
+                window: win(2),
+            },
+        );
+    }
+
+    #[test]
+    fn each_session_sees_only_its_own_reads() {
+        let store = GuardStore::new();
+        read(&store, "a", 1);
+        read(&store, "b", 2);
+        assert_eq!(store.image(Some("a"), 1, 2).unwrap().snapshot_id, 1);
+        assert_eq!(store.image(Some("b"), 1, 2).unwrap().snapshot_id, 2);
+        assert!(store.image(None, 1, 2).is_none());
+        assert_eq!(
+            store.element_at(Some("a"), 1, 2, 5.0, 5.0).unwrap().role,
+            "a"
+        );
+        assert_eq!(
+            store.element_at(Some("b"), 1, 2, 5.0, 5.0).unwrap().role,
+            "b"
+        );
+        assert!(store.latest_stats(Some("c"), 1, 2).is_none());
+    }
+
+    #[test]
+    fn retiring_a_session_drops_only_its_reads() {
+        let store = GuardStore::new();
+        read(&store, "a", 1);
+        read(&store, "b", 2);
+        store.retire_session("a");
+        assert!(store.image(Some("a"), 1, 2).is_none());
+        assert!(store.window(Some("a"), 1, 2).is_none());
+        assert!(store.element(1, 0, Some("a")).is_none());
+        assert!(store.latest_stats(Some("a"), 1, 2).is_none());
+        assert_eq!(store.image(Some("b"), 1, 2).unwrap().snapshot_id, 2);
+        assert_eq!(store.element(2, 0, Some("b")).unwrap().2.role, "b");
+    }
     fn named_snapshot(session: Option<&str>) -> SnapshotFingerprints {
         SnapshotFingerprints {
             pid: 1,
@@ -335,69 +404,69 @@ mod tests {
         let store = GuardStore::new();
         store.put_snapshot(1, named_snapshot(Some("a")));
         store.put_image(
+            Some("a"),
             1,
             ReadImage {
                 snapshot_id: 1,
                 image: GrayImage::filled(2, 2, 0),
                 window: win(5),
             },
-            Some("a"),
         );
 
         // Session "b" sees none of "a"'s entries.
         assert!(store.element(1, 0, Some("b")).is_none());
         assert!(store.stats(1, Some("b")).is_none());
-        assert!(store.latest_stats(1, 2, Some("b")).is_none());
-        assert!(store.element_at(1, 2, 5.0, 5.0, Some("b")).is_none());
-        assert!(store.image(1, 5, Some("b")).is_none());
-        assert!(store.window(1, 5, Some("b")).is_none());
+        assert!(store.latest_stats(Some("b"), 1, 2).is_none());
+        assert!(store.element_at(Some("b"), 1, 2, 5.0, 5.0).is_none());
+        assert!(store.image(Some("b"), 1, 5).is_none());
+        assert!(store.window(Some("b"), 1, 5).is_none());
 
         // "a" still sees its own.
         assert_eq!(store.element(1, 0, Some("a")).unwrap().2.role, "AXButton");
         assert_eq!(store.stats(1, Some("a")), Some((1, 0)));
-        assert_eq!(store.latest_stats(1, 2, Some("a")), Some((1, 0)));
+        assert_eq!(store.latest_stats(Some("a"), 1, 2), Some((1, 0)));
         assert_eq!(
-            store.element_at(1, 2, 5.0, 5.0, Some("a")).unwrap().role,
+            store.element_at(Some("a"), 1, 2, 5.0, 5.0).unwrap().role,
             "AXButton"
         );
-        assert_eq!(store.image(1, 5, Some("a")).unwrap().snapshot_id, 1);
-        assert_eq!(store.window(1, 5, Some("a")).unwrap().window_id, 5);
+        assert_eq!(store.image(Some("a"), 1, 5).unwrap().snapshot_id, 1);
+        assert_eq!(store.window(Some("a"), 1, 5).unwrap().window_id, 5);
 
         // An unnamed entry is invisible to a named session, and the other way
         // round.
         store.put_snapshot(2, named_snapshot(None));
         store.put_image(
+            None,
             3,
             ReadImage {
                 snapshot_id: 2,
                 image: GrayImage::filled(2, 2, 0),
                 window: win(6),
             },
-            None,
         );
         assert!(store.element(2, 0, Some("a")).is_none());
         assert!(store.stats(2, Some("a")).is_none());
         assert!(store.element(1, 0, None).is_none());
-        assert!(store.image(3, 6, Some("a")).is_none());
-        assert!(store.window(3, 6, Some("a")).is_none());
+        assert!(store.image(Some("a"), 3, 6).is_none());
+        assert!(store.window(Some("a"), 3, 6).is_none());
         assert!(store.element(2, 0, None).is_some());
-        assert!(store.image(3, 6, None).is_some());
+        assert!(store.image(None, 3, 6).is_some());
 
         // forget_window drops every session's entries for the window.
         store.put_image(
+            Some("b"),
             1,
             ReadImage {
                 snapshot_id: 4,
                 image: GrayImage::filled(2, 2, 0),
                 window: win(5),
             },
-            Some("b"),
         );
         store.forget_window(1, 5);
-        assert!(store.image(1, 5, Some("a")).is_none());
-        assert!(store.image(1, 5, Some("b")).is_none());
-        assert!(store.window(1, 5, Some("a")).is_none());
-        assert!(store.window(1, 5, Some("b")).is_none());
+        assert!(store.image(Some("a"), 1, 5).is_none());
+        assert!(store.image(Some("b"), 1, 5).is_none());
+        assert!(store.window(Some("a"), 1, 5).is_none());
+        assert!(store.window(Some("b"), 1, 5).is_none());
     }
 
     /// #288 review: the capacity and retention paths (image eviction, the
@@ -411,37 +480,37 @@ mod tests {
         let images = IMAGE_CAPACITY as u64 + 4;
         for id in 0..images {
             store.put_image(
+                Some(own(id)),
                 1,
                 ReadImage {
                     snapshot_id: id as u32,
                     image: GrayImage::filled(2, 2, 0),
                     window: win(id),
                 },
-                Some(own(id)),
             );
         }
         for id in 0..images {
-            assert!(store.image(1, id, Some(other(id))).is_none(), "{id}");
+            assert!(store.image(Some(other(id)), 1, id).is_none(), "{id}");
             assert_eq!(
-                store.image(1, id, Some(own(id))).map(|i| i.snapshot_id),
+                store.image(Some(own(id)), 1, id).map(|i| i.snapshot_id),
                 (id >= 4).then_some(id as u32),
                 "{id}"
             );
         }
         let windows = 100..(100 + 4 * IMAGE_CAPACITY as u64);
         for id in windows.clone() {
-            store.put_window(1, win(id), Some(own(id)));
+            store.put_window(Some(own(id)), 1, win(id));
         }
         for id in 4..images {
             assert_eq!(
-                store.window(1, id, Some(own(id))).map(|w| w.window_id),
+                store.window(Some(own(id)), 1, id).map(|w| w.window_id),
                 Some(id),
                 "{id}"
             );
-            assert!(store.window(1, id, Some(other(id))).is_none(), "{id}");
+            assert!(store.window(Some(other(id)), 1, id).is_none(), "{id}");
         }
         for id in windows {
-            assert!(store.window(1, id, Some(other(id))).is_none(), "{id}");
+            assert!(store.window(Some(other(id)), 1, id).is_none(), "{id}");
         }
         let snapshots = SNAPSHOT_CAPACITY as u32 + 6;
         for id in 0..snapshots {

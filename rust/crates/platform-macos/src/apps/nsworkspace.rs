@@ -137,7 +137,26 @@ pub fn open_application(
         ws.openApplicationAtURL_configuration_completionHandler(&url, &config, Some(&block));
     }
 
-    wait_for_completion(rx, reconciliation)
+    let existing_pids = reconciliation.pids_before_request.clone();
+    let may_unhide = !cfg.creates_new_instance;
+    let running = wait_for_completion(rx, reconciliation)?;
+    if may_unhide && existing_pids.contains(&unsafe { running.processIdentifier() }) {
+        unhide_without_activating(&running);
+    }
+    Ok(running)
+}
+
+/// A reopen event only asks the app to show a window. Whether a hidden app
+/// does so is its own choice (a bare AppKit app that was not started through
+/// LaunchServices ignores it), so unhide it here. `unhide` never activates,
+/// which keeps the previous frontmost app on top.
+fn unhide_without_activating(running: &NSRunningApplication) {
+    unsafe {
+        if running.isHidden() && !running.unhide() {
+            tracing::debug!(target: "platform_macos::apps::nsworkspace",
+                "NSRunningApplication.unhide was refused for a reopened app");
+        }
+    }
 }
 
 /// Launch the application bundle at `app_url` and hand it `urls` via

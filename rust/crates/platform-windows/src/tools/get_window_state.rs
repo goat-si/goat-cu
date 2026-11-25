@@ -590,7 +590,7 @@ impl Tool for GetWindowStateTool {
                 // Bracket the walk with process/window identity reads so the
                 // published snapshot is bound to the instance it was read from.
                 let identity_before = crate::process_instance::probe(pid, hwnd);
-                let tree =
+                let mut tree =
                     crate::uia::walk_tree_budgeted(hwnd, q.as_deref(), max_depth, &mut budget);
                 let identity_after = crate::process_instance::probe(pid, hwnd);
                 let kind = if tree.nodes.iter().any(|node| node.msaa_role.is_some()) {
@@ -598,7 +598,7 @@ impl Tool for GetWindowStateTool {
                 } else {
                     crate::uia::snapshot::SnapshotKind::Uia
                 };
-                let payload = crate::uia::snapshot::UiaSnapshot::from_nodes(&tree.nodes, kind)
+                let payload = crate::uia::snapshot::UiaSnapshot::from_nodes(&mut tree.nodes, kind)
                     .with_read_while_minimized(
                         iconic_before || crate::input::window_is_iconic(hwnd),
                     );
@@ -627,7 +627,7 @@ impl Tool for GetWindowStateTool {
                         elements_complete: false,
                     };
                     let payload = crate::uia::snapshot::UiaSnapshot::from_nodes(
-                        &[],
+                        &mut [],
                         crate::uia::snapshot::SnapshotKind::Uia,
                     );
                     Some((
@@ -917,7 +917,7 @@ impl Tool for GetWindowStateTool {
                     }
                     if refreshed.is_none() {
                         let payload = crate::uia::snapshot::UiaSnapshot::from_nodes(
-                            &[],
+                            &mut [],
                             crate::uia::snapshot::SnapshotKind::Uia,
                         );
                         // A screenshot-only read binds its new empty snapshot to
