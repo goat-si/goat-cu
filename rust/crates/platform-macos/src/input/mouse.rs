@@ -1317,13 +1317,8 @@ impl BackgroundDragStep {}
 /// window AppKit-key without raising it first
 /// ([`prepare_background_pixel_click`]).
 ///
-/// `session_open` runs after each drag step and reports whether a system
-/// drag-and-drop session is showing (the drag tool watches for its drag
-/// image). AppKit ends such a session on its own soon after it starts,
-/// dropping at the last point it was dragged to. So once a session shows, the
-/// rest of the path is skipped: the gesture moves straight to the drop point
-/// and repeats the drag there until the session ends or [`DRAG_SESSION_HOLD`]
-/// runs out, then releases at the drop point.
+/// `keep_going` runs after each drag step; returning false stops the gesture
+/// and releases the button at its current position.
 #[allow(clippy::too_many_arguments)]
 pub fn drag_at_xy_background<F, G>(
     pid: i32,
@@ -1677,6 +1672,8 @@ where
     }
 }
 
+/// Observe a native drag session after each step. Once one appears, move to
+/// the drop point and hold there until it ends or [`DRAG_SESSION_HOLD`] expires.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn drag_at_xy_background_session_with_origin<F, G>(
     pid: i32,
@@ -3625,6 +3622,47 @@ mod tests {
                 ("RightMouseDown", 1),
                 ("RightMouseDragged", 1),
                 ("RightMouseUp", 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn background_drag_stopped_early_releases_where_it_stands() {
+        let capture = Capture::start(true);
+        let mut checks = 0;
+        let outcome = drag_at_xy_background_with_origin(
+            42,
+            (0.0, 0.0),
+            (100.0, 0.0),
+            7,
+            0,
+            4,
+            &[],
+            DragButton::Left,
+            |_, _| {},
+            || {
+                checks += 1;
+                checks < 2
+            },
+            (0.0, 0.0),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            BackgroundDragOutcome::StoppedEarly { at: (50.0, 0.0) }
+        );
+        let events: Vec<_> = capture
+            .posted()
+            .iter()
+            .map(|posted| posted.event.clone())
+            .collect();
+        assert_eq!(
+            events[3..],
+            [
+                "LeftMouseDown",
+                "LeftMouseDragged",
+                "LeftMouseDragged",
+                "LeftMouseUp"
             ]
         );
     }

@@ -1124,12 +1124,35 @@ pub(crate) async fn refuse_point_under_own_popup(
         crate::windows::same_app_surface_over(pid, window_id, x, y)
     })
     .await
-    .ok()
-    .flatten();
+    .map_err(|_| ());
+    popup_check_result(cover, pid, window_id, x, y)
+}
+
+fn popup_check_result(
+    cover: Result<Option<Option<crate::windows::WindowDescription>>, ()>,
+    pid: i32,
+    window_id: u32,
+    x: f64,
+    y: f64,
+) -> Result<(), cua_driver_core::protocol::ToolResult> {
+    let cover = cover.ok().flatten().ok_or_else(|| {
+        cua_driver_core::protocol::ToolResult::error(
+            "Background pointer press refused: popup occlusion could not be checked.",
+        )
+        .with_structured(serde_json::json!({
+            "code": "target_occlusion_unknown", "effect": "refused"
+        }))
+    })?;
     match cover {
         Some(cover) => Err(own_popup_refusal(pid, window_id, x, y, &cover)),
         None => Ok(()),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn failed_popup_check_refuses_input() {
+    assert!(popup_check_result(Err(()), 42, 10, 0.0, 0.0).is_err());
 }
 
 fn own_popup_refusal(

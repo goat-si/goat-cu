@@ -2047,6 +2047,7 @@ fn finalize_walk(
 /// Resolve requested scope from environment observations using the shared
 /// production decisions. Values returned for walking are borrowed aliases;
 /// only the first vector owns retain credits.
+#[allow(clippy::type_complexity)]
 fn resolve_top_level_with<E: AxWalkEnvironment>(
     environment: &E,
     app_elem: E::Application,

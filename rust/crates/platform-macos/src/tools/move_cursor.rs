@@ -152,10 +152,12 @@ impl MoveCursorTool {
             Err(e) => return e,
         };
         let cursor_id = super::cursor_tools::resolve_cursor_key(&args);
-        crate::cursor::overlay::send_command(
+        if !crate::cursor::overlay::send_required(
             cursor_id.clone(),
             cursor_overlay::OverlayCommand::Unpin,
-        );
+        ) {
+            return ToolResult::error("Cursor move refused: overlay command queue unavailable.");
+        }
 
         self.state.cursor_registry.update_position(&cursor_id, x, y);
         // Drive the DRAWN cursor via the same path as click's animation. A raw
@@ -366,6 +368,7 @@ async fn route_window_hover_after_overlay(
 /// hover, and the browser tools are the route that delivers one without the
 /// user's pointer. Bench v2 PR-03 agents read the generic note's desktop
 /// option as the way forward and moved the user's pointer.
+#[allow(clippy::too_many_arguments)]
 fn browser_hover_result(
     cursor_id: &str,
     args: &Value,

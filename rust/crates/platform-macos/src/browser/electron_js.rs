@@ -10,27 +10,6 @@ use super::cdp_client::{listening_ports, CdpClient};
 
 pub struct ElectronJs;
 
-#[cfg(test)]
-mod identity_tests {
-    use super::executable_bundle_has_electron_framework;
-
-    #[test]
-    fn another_bundles_matching_name_cannot_authorize_electron() {
-        let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("target/App.app/Contents/MacOS/App");
-        let other = temp.path().join("other/App.app/Contents/MacOS/App");
-        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(
-            temp.path()
-                .join("other/App.app/Contents/Frameworks/Electron Framework.framework"),
-        )
-        .unwrap();
-        assert!(!executable_bundle_has_electron_framework(&target));
-        assert!(executable_bundle_has_electron_framework(&other));
-    }
-}
-
 impl ElectronJs {
     /// Binding authority requires evidence from this PID's executable, not a
     /// same-named application found elsewhere on disk.
@@ -187,4 +166,25 @@ fn find_bundle_path_for_app(name: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::executable_bundle_has_electron_framework;
+
+    #[test]
+    fn another_bundles_matching_name_cannot_authorize_electron() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target/App.app/Contents/MacOS/App");
+        let other = temp.path().join("other/App.app/Contents/MacOS/App");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(
+            temp.path()
+                .join("other/App.app/Contents/Frameworks/Electron Framework.framework"),
+        )
+        .unwrap();
+        assert!(!executable_bundle_has_electron_framework(&target));
+        assert!(executable_bundle_has_electron_framework(&other));
+    }
 }

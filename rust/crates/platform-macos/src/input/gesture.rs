@@ -234,7 +234,7 @@ pub(super) fn run_prepared_with_drag_hook<I: GestureIo>(
                 }
                 let (handled_wait, destination) = if step.kind == Kind::Dragged && stopped.is_none()
                 {
-                    hook(&mut *io.borrow_mut(), &step, &mut button.step.placement)?
+                    hook(*io.borrow_mut(), &step, &mut button.step.placement)?
                 } else {
                     (false, None)
                 };

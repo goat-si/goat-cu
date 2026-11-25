@@ -499,11 +499,9 @@ impl Dispatcher {
 
 /// Register the NSWorkspace.didActivateApplicationNotification observer.
 ///
-/// The returned token and the queue are intentionally `mem::forget`-leaked
-/// — the singleton is process-lifetime, so we never tear the observer
-/// down. Forgetting avoids having to thread `!Send` `Retained<...>`
-/// handles through `FocusStealPreventer` (which lives in `Arc<...>` /
-/// `OnceLock<...>` and therefore needs to be `Send + Sync`).
+/// The token and observer queue live for the lifetime of the process.
+static OBSERVER_QUEUE: OnceLock<objc2::rc::Retained<NSOperationQueue>> = OnceLock::new();
+
 fn install_observer(dispatcher: &Arc<Dispatcher>) {
     use block2::RcBlock;
     use objc2_foundation::NSNotification;
@@ -541,11 +539,9 @@ fn install_observer(dispatcher: &Arc<Dispatcher>) {
         )
     };
 
-    // Intentionally leak both — the observer needs to outlive any
-    // particular `Arc<FocusStealPreventer>` and the singleton has
-    // process lifetime.
+    // Keep the observer and its serial queue for the process lifetime.
     std::mem::forget(token);
-    std::mem::forget(queue);
+    let _ = OBSERVER_QUEUE.set(queue);
 }
 
 /// App activations seen since the observer was installed.
@@ -634,7 +630,21 @@ impl ActivationRecord {
     }
 
     pub fn seen(&self) -> bool {
-        self.seen.load(std::sync::atomic::Ordering::SeqCst)
+        let Some(queue) = OBSERVER_QUEUE.get() else {
+            return true;
+        };
+        self.seen_after(|| {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let barrier = block2::RcBlock::new(move || {
+                let _ = tx.send(());
+            });
+            unsafe { queue.addBarrierBlock(&barrier) };
+            rx.recv().is_ok()
+        })
+    }
+
+    fn seen_after(&self, drain: impl FnOnce() -> bool) -> bool {
+        !drain() || self.seen.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -681,6 +691,25 @@ mod tests {
 
     /// An activation record sees only its own pid's activation, keeps it
     /// after the pid loses the front again, and stops recording when dropped.
+    #[test]
+    fn activation_record_drains_queued_notification_before_finish() {
+        let record = ActivationRecord::start(-4820);
+        let (release, queued) = std::sync::mpsc::sync_channel::<()>(0);
+        let (done, delivered) = std::sync::mpsc::sync_channel::<()>(0);
+        let callback = std::thread::spawn(move || {
+            queued.recv().unwrap();
+            note_activation(-4820);
+            done.send(()).unwrap();
+        });
+        let seen = record.seen_after(|| {
+            release.send(()).unwrap();
+            delivered.recv().unwrap();
+            true
+        });
+        assert!(seen);
+        callback.join().unwrap();
+    }
+
     #[test]
     fn activation_record_keeps_a_brief_activation_of_its_pid() {
         let record = ActivationRecord::start(-4810);

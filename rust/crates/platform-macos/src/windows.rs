@@ -198,15 +198,8 @@ pub(crate) fn pid_windows_with_space_snapshot(pid: i32, on_screen_only: bool) ->
     )
 }
 
-/// On-screen windows of `pid` on every layer, without the Space snapshot.
-/// Cheap enough to poll during a gesture (the drag tool watches for a
-/// drag-image window at the dragging level).
-pub(crate) fn pid_on_screen_windows_any_layer(pid: i32) -> Vec<WindowInfo> {
-    pid_on_screen_windows_any_layer_enumeration(pid).windows
-}
-
-/// [`pid_on_screen_windows_any_layer`] with its completeness: an empty list
-/// from a failed WindowServer read is not "no windows".
+/// On-screen windows of `pid` on every layer, with read completeness: an
+/// empty list from a failed WindowServer read is not "no windows".
 pub(crate) fn pid_on_screen_windows_any_layer_enumeration(pid: i32) -> WindowEnumeration {
     enumerate_windows(
         kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
@@ -246,12 +239,26 @@ pub(crate) fn same_app_surface_over(
     target: u32,
     x: f64,
     y: f64,
-) -> Option<WindowDescription> {
-    surface_over_in(on_screen_descriptions(), pid, target, x, y)
+) -> Option<Option<WindowDescription>> {
+    checked_surface_over(on_screen_descriptions(), pid, target, x, y)
+}
+
+fn checked_surface_over(
+    windows: Option<Vec<WindowDescription>>,
+    pid: i32,
+    target: u32,
+    x: f64,
+    y: f64,
+) -> Option<Option<WindowDescription>> {
+    let windows = windows?;
+    windows
+        .iter()
+        .find(|window| window.window_id == target && window.pid == pid)?;
+    Some(surface_over_in(windows, pid, target, x, y))
 }
 
 /// Every on-screen window, front to back, as WindowServer describes it.
-fn on_screen_descriptions() -> Vec<WindowDescription> {
+fn on_screen_descriptions() -> Option<Vec<WindowDescription>> {
     use core_foundation::{
         array::CFArray,
         base::{CFTypeRef, TCFType},
@@ -263,12 +270,14 @@ fn on_screen_descriptions() -> Vec<WindowDescription> {
         )
     };
     if raw_ref.is_null() {
-        return Vec::new();
+        return None;
     }
     let raw: CFArray<CFTypeRef> = unsafe { CFArray::wrap_under_create_rule(raw_ref as _) };
-    raw.iter()
-        .filter_map(|item| parse_description(*item))
-        .collect()
+    Some(
+        raw.iter()
+            .filter_map(|item| parse_description(*item))
+            .collect(),
+    )
 }
 
 /// [`same_app_surface_over`] over a front-to-back on-screen window list.
@@ -1628,6 +1637,16 @@ mod tests {
             },
             ..surface(10, 42, "Issue 4242", 0, 0., 0.)
         }
+    }
+
+    #[test]
+    fn popup_check_requires_window_list_and_target() {
+        assert!(checked_surface_over(None, 42, 10, 150., 80.).is_none());
+        assert!(checked_surface_over(Some(vec![chrome_main()]), 42, 99, 150., 80.).is_none());
+        assert_eq!(
+            checked_surface_over(Some(vec![chrome_main()]), 42, 10, 150., 80.),
+            Some(None)
+        );
     }
 
     #[test]

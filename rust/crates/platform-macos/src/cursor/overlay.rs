@@ -514,6 +514,35 @@ pub fn send_command(key: CursorKey, cmd: OverlayCommand) {
     }
 }
 
+fn send_required_to(
+    tx: &std::sync::mpsc::SyncSender<OverlayMsg>,
+    key: CursorKey,
+    cmd: OverlayCommand,
+) -> bool {
+    tx.try_send(OverlayMsg::Cmd(KeyedOverlayCommand { key, cmd }))
+        .is_ok()
+}
+
+pub(crate) fn send_required(key: CursorKey, cmd: OverlayCommand) -> bool {
+    if !draws_cursor(&key) {
+        return true;
+    }
+    CMD_TX
+        .get()
+        .is_some_and(|tx| send_required_to(tx, key, cmd))
+}
+
+#[test]
+fn required_unpin_refuses_full_queue() {
+    let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+    tx.try_send(OverlayMsg::Wake).unwrap();
+    assert!(!send_required_to(
+        &tx,
+        "test".to_owned(),
+        OverlayCommand::Unpin
+    ));
+}
+
 /// Convenience for callsites not yet threaded with a session key: drives the
 /// seeded `"default"` cursor (the anonymous / one-shot identity).
 pub fn send_command_default(cmd: OverlayCommand) {
