@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.55.5](https://github.com/trycua/cua/compare/cua-driver-rs-v0.55.4...cua-driver-rs-v0.55.5) (2026-11-20)
+
+
+### Bug Fixes
+
+* **cua-driver:** let nightly builds satisfy extension Driver requirements ([#8361](https://github.com/trycua/cua/issues/8361)) ([a7307c2](https://github.com/trycua/cua/commit/a7307c2e8ac6df2d12b4cc10b76a8c852f58598d)), closes [#6692](https://github.com/trycua/cua/issues/6692)
+
+## [0.55.4](https://github.com/trycua/cua/compare/cua-driver-rs-v0.55.3...cua-driver-rs-v0.55.4) (2026-11-20)
+
+
+### Bug Fixes
+
+* **cua-driver:** stop only serve daemons on Linux update and append PATH once ([#8343](https://github.com/trycua/cua/issues/8343)) ([2dae431](https://github.com/trycua/cua/commit/2dae4316b9c3e49362ac89e558a316c40372a9cd))
+
+## [0.55.3](https://github.com/trycua/cua/compare/cua-driver-rs-v0.55.2...cua-driver-rs-v0.55.3) (2026-11-20)
+
+
+### Bug Fixes
+
+* **cua-driver:** fall back on what a run_steps step last sent ([#8282](https://github.com/trycua/cua/issues/8282)) ([a367c3b](https://github.com/trycua/cua/commit/a367c3bfc673fee66f62e4e49423eb07b89bd1ba))
+
+## [0.55.2](https://github.com/trycua/cua/compare/cua-driver-rs-v0.55.1...cua-driver-rs-v0.55.2) (2026-11-20)
+
+
+### Bug Fixes
+
+* **cua-driver:** match running Windows Store apps to their bundle_id grant ([#8127](https://github.com/trycua/cua/issues/8127)) ([3aefd3b](https://github.com/trycua/cua/commit/3aefd3b5790c0f51bad08d0d1230485e8fc5b9d7))
+
 ## [0.55.1](https://github.com/trycua/cua/compare/cua-driver-rs-v0.55.0...cua-driver-rs-v0.55.1) (2026-11-20)
 
 

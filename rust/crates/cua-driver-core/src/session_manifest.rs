@@ -514,8 +514,9 @@ impl SessionManifest {
             .and_then(serde_json::Value::as_str);
         // The process path the platform adapter read from the OS for this
         // exact pid. Unlike `bundle_id` and `launch_path`, which come from
-        // `list_apps` (and on Windows are matched to a running process by file
-        // name only), this cannot be influenced by naming a program.
+        // `list_apps` (and on Windows are matched to a running unpackaged
+        // process by file name only), this cannot be influenced by naming a
+        // program.
         let attested_executable = resource
             .pointer("/fingerprint/executable")
             .and_then(serde_json::Value::as_str);
