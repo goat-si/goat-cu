@@ -63,7 +63,7 @@ pub(crate) const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5_000;
 pub(crate) const DEFAULT_EXPECT_TIMEOUT_MS: u64 = 2_000;
 /// Longest wait any single check may ask for.
 pub(crate) const MAX_CHECK_TIMEOUT_MS: u64 = 10_000;
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
+use crate::expectation::STATE_POLL_INTERVAL as POLL_INTERVAL;
 const CANDIDATES_SHOWN: usize = 5;
 /// Most windows of one app a lookup reads per poll.
 const MAX_WINDOWS_SEARCHED: usize = 4;
@@ -298,11 +298,11 @@ impl Check {
         } else {
             out.push_str(" is shown");
         }
-        if let Some(value) = &self.value {
-            out.push_str(&format!(", value \"{value}\""));
+        if self.value.is_some() {
+            out.push_str(", value matches");
         }
-        if let Some(value) = &self.value_contains {
-            out.push_str(&format!(", value contains \"{value}\""));
+        if self.value_contains.is_some() {
+            out.push_str(", value contains expected text");
         }
         if let Some(enabled) = self.enabled {
             out.push_str(if enabled { ", enabled" } else { ", disabled" });
@@ -1655,6 +1655,28 @@ impl<'a> Locator<'a> {
 
     /// Poll until the check holds or its timeout passes.
     pub async fn check(&self, check: &Check, fallback: &WindowSpec) -> Result<Checked, Miss> {
+        let redact = |text: &str| {
+            [check.value.as_deref(), check.value_contains.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|value| !value.is_empty())
+                .fold(text.to_owned(), |text, value| {
+                    text.replace(value, "[redacted]")
+                })
+        };
+        match self.check_inner(check, fallback).await {
+            Ok(mut result) => {
+                result.observed = result.observed.as_deref().map(redact);
+                Ok(result)
+            }
+            Err(mut miss) => {
+                miss.message = redact(&miss.message);
+                Err(miss)
+            }
+        }
+    }
+
+    async fn check_inner(&self, check: &Check, fallback: &WindowSpec) -> Result<Checked, Miss> {
         let window_spec = if check.window.is_empty() {
             fallback.clone()
         } else {
@@ -2666,6 +2688,12 @@ pub(crate) fn call_target(args: &Value) -> (Option<i64>, Option<u64>) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn check_description_does_not_disclose_expected_values() {
+        let check = Check::parse(&json!({"role":"textbox", "value":"sentinel-secret", "value_contains":"sentinel-secret"}), 0).unwrap();
+        assert!(!check.describe().contains("sentinel-secret"));
+    }
+
     #[derive(Default)]
     struct TestClock(std::sync::atomic::AtomicU64);
     impl TestClock {
@@ -2892,7 +2920,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(miss.code, "incomplete_observation");
         assert_eq!(clock.0.load(std::sync::atomic::Ordering::SeqCst), 600);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 6);
     }
 
     #[tokio::test]
@@ -3915,6 +3943,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(pick(&twins, &ok).unwrap_err().code, "ambiguous");
+    }
+
+    #[test]
+    fn a_display_only_row_is_never_an_action_target() {
+        let mut caption = element(4, "AXStaticText", "Total");
+        caption["display_only"] = json!(true);
+        let total = ElementSpec {
+            name: Some("Total".into()),
+            action: Some("click"),
+            ..Default::default()
+        };
+        let alone = read(vec![caption.clone()], "");
+        assert_eq!(pick(&alone, &total).unwrap_err().code, "not_found");
+        let with_control = read(vec![caption, element(5, "AXButton", "Total")], "");
+        assert_eq!(
+            pick(&with_control, &total).unwrap().element["element_index"],
+            5
+        );
     }
 
     #[test]

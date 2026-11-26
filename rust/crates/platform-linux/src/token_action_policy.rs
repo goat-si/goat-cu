@@ -392,3 +392,30 @@ mod write_tests {
         );
     }
 }
+
+// A sent but unconfirmed setup toggle cannot safely be undone or declared restored.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn setup_abort_cleanup_safe(attempted: bool, confirmed: bool) -> bool {
+    !attempted || confirmed
+}
+
+#[cfg(test)]
+#[test]
+fn unconfirmed_setup_toggle_never_claims_cleanup_or_sends_another_action() {
+    assert!(!setup_abort_cleanup_safe(true, false));
+    assert!(setup_abort_cleanup_safe(false, false));
+    assert!(setup_abort_cleanup_safe(true, true));
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn consent_action_acknowledged(suspected_noop: bool, unacknowledged: bool) -> bool {
+    !suspected_noop && !unacknowledged
+}
+
+#[cfg(test)]
+#[test]
+fn unanswered_or_declined_consent_action_is_not_reported_as_accepted() {
+    assert!(consent_action_acknowledged(false, false));
+    assert!(!consent_action_acknowledged(false, true));
+    assert!(!consent_action_acknowledged(true, false));
+}

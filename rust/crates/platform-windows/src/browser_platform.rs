@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::os::windows::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -25,8 +26,8 @@ use cua_driver_core::browser::types::{
     NativeOwnershipProof, NativeWindowInfo, OwnedEndpoint, ProcessFingerprint, Rect,
 };
 use cua_driver_core::browser::{
-    existing_profile_setup_descriptor, fetch_json_version_ws_url, is_firefox,
-    parse_devtools_active_port, BrowserCursorTracker,
+    existing_profile_setup_descriptor, fetch_json_version_ws_url, is_electron_app_layout,
+    is_firefox, parse_devtools_active_port, BrowserCursorTracker,
 };
 
 use crate::browser_installation_path::{
@@ -41,9 +42,9 @@ use crate::browser_standard_user::{
     browser_launch_context, require_profile_writable, spawn_with_token, with_impersonation,
     BrowserLaunchContext,
 };
-use windows::core::PCWSTR;
+use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, BOOL, ERROR_INSUFFICIENT_BUFFER, E_ACCESSDENIED, FILETIME, HANDLE, HWND, LPARAM,
+    CloseHandle, ERROR_INSUFFICIENT_BUFFER, E_ACCESSDENIED, FILETIME, HANDLE, HWND, LPARAM,
     NO_ERROR, RECT,
 };
 use windows::Win32::Graphics::Gdi::{
@@ -64,8 +65,8 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, CREATE_NO_WINDOW,
+    PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::{
@@ -390,6 +391,7 @@ fn authenticode_output(executable: &std::path::Path) -> std::io::Result<std::pro
     };
     let powershell = system32.join(r"WindowsPowerShell\v1.0\powershell.exe");
     std::process::Command::new(powershell)
+        .creation_flags(CREATE_NO_WINDOW.0)
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -763,6 +765,7 @@ async fn browser_command_line(pid: u32) -> Result<String, BrowserRefusal> {
         "$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); (Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}' -ErrorAction Stop).CommandLine"
     );
     let output = tokio::process::Command::new(powershell)
+        .creation_flags(CREATE_NO_WINDOW.0)
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -1096,7 +1099,7 @@ fn physical_displays() -> Vec<PhysicalDisplay> {
     let mut displays: Vec<PhysicalDisplay> = Vec::new();
     unsafe {
         let _ = EnumDisplayMonitors(
-            HDC::default(),
+            None,
             None,
             Some(collect),
             LPARAM(&mut displays as *mut Vec<PhysicalDisplay> as isize),
@@ -1988,6 +1991,10 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         }
     }
 
+    fn managed_extension_policy(&self, executable: &str) -> Option<String> {
+        crate::browser_managed_policy::managed_extension_policy(executable)
+    }
+
     fn spawn_isolated_browser(
         &self,
         mut command: std::process::Command,
@@ -2103,11 +2110,18 @@ impl BrowserPlatform for WindowsBrowserPlatform {
                 format!("pid {pid} is outside the Windows process-id range"),
             )
         })?;
-        let name = tokio::task::spawn_blocking(move || {
-            crate::win32::list_processes()
+        let (name, electron_app) = tokio::task::spawn_blocking(move || {
+            let name = crate::win32::list_processes()
                 .into_iter()
                 .find(|process| process.pid == pid_u32)
-                .map(|process| process.name)
+                .map(|process| process.name)?;
+            let electron_app = process_identity(pid_u32)
+                .ok()
+                .and_then(|(_, executable)| executable)
+                .is_some_and(|executable| {
+                    is_electron_app_layout(std::path::Path::new(&executable))
+                });
+            Some((name, electron_app))
         })
         .await
         .ok()
@@ -2118,9 +2132,13 @@ impl BrowserPlatform for WindowsBrowserPlatform {
                 format!("browser process {pid} is no longer available"),
             )
         })?;
-        let chromium = is_chromium(&name);
         let gecko = is_firefox(&name);
-        let product_kind = browser_product(&name);
+        let product_kind = cua_driver_core::browser::classify_electron_runtime(
+            browser_product(&name),
+            cua_driver_core::browser::is_consumer_browser_name(&name),
+            electron_app,
+        );
+        let chromium = !gecko && (product_kind == BrowserProduct::Electron || is_chromium(&name));
         let command_line = if chromium {
             browser_command_line(pid_u32).await.ok()
         } else {
@@ -2585,6 +2603,24 @@ impl BrowserPlatform for WindowsBrowserPlatform {
                 format!("could not roll back exact browser setup: {join_error}"),
             )
         })
+    }
+
+    async fn dismiss_abandoned_existing_profile_consent(
+        &self,
+        pid: i64,
+        window_id: u64,
+    ) -> Result<bool, BrowserRefusal> {
+        let Ok(pid) = u32::try_from(pid) else {
+            return Ok(false);
+        };
+        tokio::task::spawn_blocking(move || crate::browser_consent_ui::dismiss(pid, window_id))
+            .await
+            .unwrap_or_else(|join_error| {
+                Err(BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserRouteUnavailable,
+                    format!("could not close the abandoned browser consent prompt: {join_error}"),
+                ))
+            })
     }
 
     async fn handle_existing_profile_consent(

@@ -596,16 +596,12 @@ mod agent_instruction_tests {
     }
 
     #[test]
-    fn the_start_guide_gates_permission_approval_on_owner_authorization() {
+    fn the_start_guide_leaves_permission_approval_to_the_user() {
         for (_, guide) in start_guides() {
-            // Keeps the narrow exception narrow: ask first, own prompts only,
-            // explicit owner authorization; MACOS.md holds the detail.
             assert!(guide.contains("`check_permissions`"));
             assert!(guide.contains("ask the user"));
-            assert!(guide.contains(
-                "approve Cua Driver's own prompts only if the owner explicitly authorized it"
-            ));
-            assert!(guide.contains("(MACOS.md)"));
+            assert!(guide.contains("ask the user to approve the prompts"));
+            assert!(guide.contains("Never approve them on the user's behalf"));
         }
     }
 

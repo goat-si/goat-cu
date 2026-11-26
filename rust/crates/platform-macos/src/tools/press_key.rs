@@ -176,10 +176,20 @@ fn dispatch_with_ax_oracle(
     Ok(false)
 }
 
+/// A sent key has an unknown effect and never offers an automatic retry.
+fn delivered_structured(confirmed: bool, foreground: bool, _chromium_embedder: bool) -> Value {
+    serde_json::json!({
+        "path": if foreground { "key_events_fg" } else { "key_events" },
+        "verified": confirmed,
+        "effect": if confirmed { "confirmed" } else { "unverifiable" },
+    })
+}
+
 fn action_record(
     confirmed: bool,
     foreground: bool,
     changes: Option<&Changes>,
+    _chromium_embedder: bool,
 ) -> ActionExecutionRecord {
     let effect = if confirmed {
         ActionEffect::Confirmed
@@ -306,36 +316,42 @@ fn with_confirmed_key_focus<T>(
 
 fn with_confirmed_key_focus_or_fallback<T>(
     target: Option<usize>,
-    mut focus: impl FnMut(usize) -> anyhow::Result<()>,
-    mut is_focused: impl FnMut(usize) -> bool,
-    mut fallback_focus: impl FnMut(usize) -> anyhow::Result<bool>,
+    focus: impl FnMut(usize) -> anyhow::Result<()>,
+    is_focused: impl FnMut(usize) -> bool,
+    fallback_focus: impl FnMut(usize) -> anyhow::Result<bool>,
     dispatch: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    with_confirmed_key_focus_with_clock(
+        target,
+        focus,
+        is_focused,
+        fallback_focus,
+        dispatch,
+        || std::time::Instant::now() >= deadline,
+        || std::thread::sleep(std::time::Duration::from_millis(10)),
+    )
+}
+
+fn with_confirmed_key_focus_with_clock<T>(
+    target: Option<usize>,
+    mut focus: impl FnMut(usize) -> anyhow::Result<()>,
+    mut is_focused: impl FnMut(usize) -> bool,
+    _fallback_focus: impl FnMut(usize) -> anyhow::Result<bool>,
+    dispatch: impl FnOnce() -> anyhow::Result<T>,
+    mut expired: impl FnMut() -> bool,
+    mut wait: impl FnMut(),
+) -> anyhow::Result<T> {
     if let Some(target) = target {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        focus(target)?;
         loop {
-            focus(target)?;
             if is_focused(target) {
                 break;
             }
-            if std::time::Instant::now() >= deadline {
-                if fallback_focus(target)? {
-                    let fallback_deadline =
-                        std::time::Instant::now() + std::time::Duration::from_millis(120);
-                    loop {
-                        if is_focused(target) {
-                            return dispatch();
-                        }
-                        if std::time::Instant::now() >= fallback_deadline {
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                    return Err(KeyFocusUnconfirmedAfterClick.into());
-                }
+            if expired() {
                 return Err(KeyFocusUnconfirmed.into());
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            wait();
         }
     }
     dispatch()
@@ -542,6 +558,9 @@ pub(super) fn delivery_failed(error: anyhow::Error) -> ToolResult {
     if let Some(refusal) = crate::security_prompt::tool_result(&error) {
         return refusal;
     }
+    if let Some(refusal) = super::key_focus_unconfirmed_error(&error) {
+        return refusal;
+    }
     if let Some(conflict) = error.downcast_ref::<WindowFocusConflictError>() {
         return match *conflict {
             WindowFocusConflictError::AddressedElementOutsideWindow {
@@ -584,8 +603,9 @@ pub(super) fn delivery_failed(error: anyhow::Error) -> ToolResult {
         };
     }
     if error.is::<KeyFocusUnconfirmed>() {
-        return ToolResult::error(error.to_string()).with_structured(serde_json::json!({
-            "code": "target_focus_unconfirmed", "effect": "refused", "dispatched": false,
+        return ToolResult::text(error.to_string()).with_structured(serde_json::json!({
+            "code": "target_focus_unconfirmed", "effect": "unverifiable", "keys_sent": false,
+            "retryable": false,
             "message": error.to_string(),
         }));
     }
@@ -620,7 +640,7 @@ fn def() -> &'static ToolDef {
             "type": "object",
             "required": ["key"],
             "properties": {
-                "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it." },
+                "session": cua_driver_core::tool_schema::session_schema(),
                 "pid": { "type": "integer", "description": "Target process ID." },
                 "key": { "type": "string", "description": "Key name." },
                 "duration_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "description": "Key-down hold in milliseconds; omitted uses the configured key gap." },
@@ -681,6 +701,10 @@ impl Tool for PressKeyTool {
             let key_for_input = key.clone();
             let display_key = pressed_key_display(&input.key, &key, &modifiers);
             let early_front_pid = crate::apps::frontmost_pid();
+            let checked_start = early_front_pid.and_then(|pid| {
+                crate::process_identity::process_fingerprint(i64::from(pid))
+                    .and_then(|f| f.start_time)
+            });
             if printable_request(&key, &modifiers) {
                 // Desktop scope dispatches globally: check the frontmost
                 // app's focused element and fail closed before any key.
@@ -701,8 +725,25 @@ impl Tool for PressKeyTool {
                     }
                 }
             }
-            let checked_pid = early_front_pid.unwrap_or_default();
+            let (Some(checked_pid), Some(checked_start)) = (early_front_pid, checked_start) else {
+                return ToolResult::error(
+                    "the frontmost process instance could not be proven; no keys were sent",
+                );
+            };
             let printable_desktop = printable_request(&key, &modifiers);
+            if let Some(refusal) = super::hotkey::browser_refusal_after_cursor(
+                super::cursor_tools::position_desktop_keyboard_cursor(&self.state, &args),
+                || {
+                    cua_driver_core::browser::protection::frontmost_app_refusal(
+                        "press_key",
+                        early_front_pid.map(i64::from),
+                    )
+                },
+            )
+            .await
+            {
+                return refusal;
+            }
             let prompt = PromptInput::from_args(&args);
             let control = Arc::new(crate::input::key_hold::HoldControl::default());
             let result =
@@ -714,7 +755,7 @@ impl Tool for PressKeyTool {
                     crate::security_prompt::refuse_frontmost_keys(prompt)?;
                     let modifier_refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
                     crate::input::key_hold::deliver(
-                        crate::input::key_hold::KeyRoute::Global(None),
+                        crate::input::key_hold::KeyRoute::GuardedGlobal(checked_pid, checked_start),
                         &key_for_input,
                         &modifier_refs,
                         duration,
@@ -1334,18 +1375,31 @@ impl Tool for PressKeyTool {
                 } else {
                     ""
                 };
-                let mut structured = serde_json::json!({
-                    "path": if fg { "key_events_fg" } else { "key_events" },
-                    "verified": confirmed,
-                    "effect": if confirmed { "confirmed" } else { "unverifiable" },
-                });
+                let chromium_embedder = !fg
+                    && !confirmed
+                    && tokio::task::spawn_blocking(move || {
+                        super::type_text::is_chromium_embedder(pid)
+                    })
+                    .await
+                    .unwrap_or(false);
+                let mut structured = delivered_structured(confirmed, fg, chromium_embedder);
+                let note = if chromium_embedder {
+                    format!(" {}", super::CHROMIUM_BACKGROUND_KEY_NOTE)
+                } else {
+                    String::new()
+                };
                 changes.add_window_identity(&mut structured);
                 ToolResult::text(format!(
-                    "✅ Pressed {display_key} on pid {pid}{label}.{}",
+                    "✅ Pressed {display_key} on pid {pid}{label}.{note}{}",
                     changes.result_suffix()
                 ))
                 .with_structured(structured)
-                .with_action_record(action_record(confirmed, fg, Some(&changes)))
+                .with_action_record(action_record(
+                    confirmed,
+                    fg,
+                    Some(&changes),
+                    chromium_embedder,
+                ))
             }
             PressKeyDeliveryOutcome::Failed(error) => delivery_failed(error),
         };
@@ -3604,6 +3658,29 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn the_oracle_returns_unverified_after_one_dispatch() {
+        let sends = std::cell::Cell::new(0);
+        let confirmed = dispatch_with_ax_oracle(1, Some(2), Some(3), || {
+            sends.set(sends.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert!(!confirmed);
+        assert_eq!(sends.get(), 1);
+    }
+
+    #[test]
+    fn the_oracle_propagates_a_dispatch_failure_without_retry() {
+        let sends = std::cell::Cell::new(0);
+        let result = dispatch_with_ax_oracle(1, Some(2), Some(3), || {
+            sends.set(sends.get() + 1);
+            anyhow::bail!("not delivered")
+        });
+        assert!(result.is_err());
+        assert_eq!(sends.get(), 1);
+    }
+
+    #[test]
     fn targeted_key_requires_focus_readback_before_dispatch() {
         use std::cell::RefCell;
         let events = RefCell::new(Vec::new());
@@ -3629,13 +3706,12 @@ pub(super) mod tests {
         );
         assert_eq!(
             failure.structured_content.as_ref().unwrap()["effect"],
-            "refused"
+            "unverifiable"
         );
         let events = events.borrow();
         assert!(events.len() >= 4);
-        for pair in events.chunks(2) {
-            assert_eq!(pair, &[("focus", 42), ("verify", 42)]);
-        }
+        assert_eq!(events[0], ("focus", 42));
+        assert!(events[1..].iter().all(|event| *event == ("verify", 42)));
     }
 
     #[test]
@@ -3643,7 +3719,7 @@ pub(super) mod tests {
         use std::cell::RefCell;
         let events = RefCell::new(Vec::new());
         let mut checks = 0;
-        with_confirmed_key_focus(
+        crate::input::ax_actions::with_confirmed_key_focus(
             Some(42),
             |target| {
                 events.borrow_mut().push(("focus", target));
@@ -3677,7 +3753,7 @@ pub(super) mod tests {
         use std::cell::Cell;
         let sent = Cell::new(0);
         for target in [Some(42), None] {
-            with_confirmed_key_focus(
+            crate::input::ax_actions::with_confirmed_key_focus(
                 target,
                 |_| Ok(()),
                 |_| true,
@@ -3689,14 +3765,14 @@ pub(super) mod tests {
             .unwrap();
         }
         assert_eq!(sent.get(), 2);
-        let failed = with_confirmed_key_focus(
+        let failed = crate::input::ax_actions::with_confirmed_key_focus(
             Some(42),
             |_| anyhow::bail!("focus unavailable"),
             |_| panic!("must not confirm failed focus"),
             || -> anyhow::Result<()> { panic!("must not dispatch") },
         );
         assert_eq!(failed.unwrap_err().to_string(), "focus unavailable");
-        with_confirmed_key_focus(
+        crate::input::ax_actions::with_confirmed_key_focus(
             None,
             |_| panic!("window key has no element"),
             |_| panic!("window key has no element"),
@@ -3721,7 +3797,9 @@ pub(super) mod tests {
 
     #[test]
     fn accepted_without_oracle_has_no_escalation_but_ax_change_confirms() {
-        let unverifiable = action_record(false, false, None).public_result().unwrap();
+        let unverifiable = action_record(false, false, None, false)
+            .public_result()
+            .unwrap();
         assert_eq!(
             unverifiable.effect,
             cua_driver_contract::ActionEffect::Unverifiable
@@ -3732,7 +3810,9 @@ pub(super) mod tests {
         );
         assert!(unverifiable.escalation.is_none());
 
-        let confirmed = action_record(true, false, None).public_result().unwrap();
+        let confirmed = action_record(true, false, None, false)
+            .public_result()
+            .unwrap();
         assert_eq!(
             confirmed.effect,
             cua_driver_contract::ActionEffect::Confirmed
@@ -3752,7 +3832,11 @@ pub(super) mod tests {
         }
 
         async fn invoke(&self, _args: Value) -> ToolResult {
-            self.result.lock().unwrap().take().expect("one probe result")
+            self.result
+                .lock()
+                .unwrap()
+                .take()
+                .expect("one probe result")
         }
     }
 
@@ -3832,7 +3916,10 @@ pub(super) mod tests {
             "{wire}"
         );
         let summary = structured["summary"].as_str().unwrap_or_default();
-        assert!(summary.contains("After the previous action returned"), "{wire}");
+        assert!(
+            summary.contains("After the previous action returned"),
+            "{wire}"
+        );
         assert!(summary.contains("Action opened new window(s)"), "{wire}");
     }
 
@@ -3846,12 +3933,16 @@ pub(super) mod tests {
                     "verified": confirmed,
                     "effect": if confirmed { "confirmed" } else { "unverifiable" }
                 }))
-                .with_action_record(action_record(confirmed, false, Some(&changes)));
+                .with_action_record(action_record(confirmed, false, Some(&changes), false));
             let wire = dispatch_press_key_wire(result).await;
             assert_ne!(wire["isError"], true, "{wire}");
             assert_eq!(
                 wire["structuredContent"]["effect"],
-                if confirmed { "confirmed" } else { "unverifiable" }
+                if confirmed {
+                    "confirmed"
+                } else {
+                    "unverifiable"
+                }
             );
             assert_opened_window_wire(&wire);
         }
@@ -3870,8 +3961,60 @@ pub(super) mod tests {
         let wire = dispatch_press_key_wire(result).await;
         assert_ne!(wire["isError"], true, "{wire}");
         assert_eq!(wire["structuredContent"]["effect"], "confirmed");
-        assert_eq!(wire["structuredContent"]["evidence"][0]["kind"], "window_change");
+        assert_eq!(
+            wire["structuredContent"]["evidence"][0]["kind"],
+            "window_change"
+        );
         assert_opened_window_wire(&wire);
+    }
+
+    #[test]
+    fn a_background_key_to_a_chromium_app_never_recommends_resending() {
+        let structured = delivered_structured(false, false, true);
+        assert_eq!(structured["effect"], "unverifiable");
+        assert!(structured.get("escalation").is_none());
+        let public = action_record(false, false, None, true)
+            .public_result()
+            .unwrap();
+        assert_eq!(
+            public.effect,
+            cua_driver_contract::ActionEffect::Unverifiable
+        );
+        assert!(public.escalation.is_none());
+        assert!(!super::super::CHROMIUM_BACKGROUND_KEY_NOTE.contains("retry"));
+    }
+
+    #[test]
+    fn other_key_results_carry_no_escalation() {
+        for (confirmed, foreground, chromium_embedder, expected) in [
+            (
+                false,
+                false,
+                false,
+                serde_json::json!({"path": "key_events", "verified": false, "effect": "unverifiable"}),
+            ),
+            (
+                false,
+                true,
+                true,
+                serde_json::json!({"path": "key_events_fg", "verified": false, "effect": "unverifiable"}),
+            ),
+            (
+                true,
+                false,
+                true,
+                serde_json::json!({"path": "key_events", "verified": true, "effect": "confirmed"}),
+            ),
+        ] {
+            assert_eq!(
+                delivered_structured(confirmed, foreground, chromium_embedder),
+                expected
+            );
+            let public = action_record(confirmed, foreground, None, chromium_embedder)
+                .public_result()
+                .unwrap();
+            assert!(public.escalation.is_none());
+        }
     }
 
     #[test]
@@ -3891,12 +4034,47 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn web_or_safari_fallback_runs_once_when_ax_focus_fails_to_stick() {
+    fn focus_write_timeout_never_repeats_or_sends_pointer_or_key() {
+        use std::cell::Cell;
+        let writes = Cell::new(0);
+        let clicks = Cell::new(0);
+        let keys = Cell::new(0);
+        let reads = Cell::new(0);
+        let result = with_confirmed_key_focus_with_clock(
+            Some(99),
+            |_| {
+                writes.set(writes.get() + 1);
+                Ok(())
+            },
+            |_| {
+                reads.set(reads.get() + 1);
+                false
+            },
+            |_| {
+                clicks.set(clicks.get() + 1);
+                Ok(true)
+            },
+            || {
+                keys.set(keys.get() + 1);
+                Ok(())
+            },
+            || reads.get() >= 3,
+            || {},
+        );
+        assert!(result.is_err());
+        assert_eq!((writes.get(), clicks.get(), keys.get()), (1, 0, 0));
+        assert_eq!(reads.get(), 3);
+        let result = delivery_failed(result.unwrap_err());
+        assert_eq!(result.structured_content.unwrap()["effect"], "unverifiable");
+    }
+
+    #[test]
+    fn web_or_safari_fallback_does_not_run_when_ax_focus_fails_to_stick() {
         use std::cell::Cell;
         let fallback_calls = Cell::new(0usize);
         let focused = Cell::new(false);
         let dispatched = Cell::new(0usize);
-        with_confirmed_key_focus_or_fallback(
+        let result = with_confirmed_key_focus_or_fallback(
             Some(99),
             |_| Ok(()),
             |_| focused.get(),
@@ -3910,14 +4088,13 @@ pub(super) mod tests {
                 dispatched.set(dispatched.get() + 1);
                 Ok(())
             },
-        )
-        .unwrap();
-        assert_eq!(fallback_calls.get(), 1);
-        assert_eq!(dispatched.get(), 1);
+        );
+        assert!(result.is_err());
+        assert_eq!(fallback_calls.get(), 0);
+        assert_eq!(dispatched.get(), 0);
     }
 
-    /// Returns what press_key reports when its pointer focus fallback clicked
-    /// but focus still did not stick, so the test sees the published result.
+    /// Projects a previously delivered focus click through the registry.
     struct ClickedButUnfocusedProbe;
 
     #[async_trait::async_trait]
@@ -3927,15 +4104,7 @@ pub(super) mod tests {
         }
 
         async fn invoke(&self, _args: serde_json::Value) -> ToolResult {
-            let error = with_confirmed_key_focus_or_fallback(
-                Some(99),
-                |_| Ok(()),
-                |_| false,
-                |_| Ok(true),
-                || -> anyhow::Result<()> { panic!("no key may be sent without focus") },
-            )
-            .unwrap_err();
-            delivery_failed(error)
+            delivery_failed(KeyFocusUnconfirmedAfterClick.into())
         }
     }
 

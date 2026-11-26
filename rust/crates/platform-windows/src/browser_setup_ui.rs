@@ -316,6 +316,12 @@ fn confirm_setup_navigation(
 
     let target = HWND(hwnd as *mut _);
     let prior = unsafe { GetForegroundWindow() };
+    let identity = crate::win32::capture_foreground_target(hwnd).ok_or_else(|| {
+        BrowserRefusal::new(
+            BrowserRefusalCode::BrowserWrongTargetRefused,
+            "the exact setup window identity could not be read",
+        )
+    })?;
     let navigation = (|| {
         let (fronted, injected) = force_setup_foreground(target);
         *injected_global_input |= injected;
@@ -364,9 +370,37 @@ fn confirm_setup_navigation(
     let restored = if prior.0.is_null() || prior == target || *input_may_be_unread {
         true
     } else {
-        let (restored, injected) = force_setup_foreground(prior);
-        *injected_global_input |= injected;
-        restored
+        let actual = unsafe { GetForegroundWindow() };
+        if actual == prior {
+            true
+        } else {
+            match crate::keyboard_dispatch::attempt_setup_restore(
+                || (unsafe { GetForegroundWindow() }) == target,
+                || {
+                    let current = unsafe { GetForegroundWindow() };
+                    current == target
+                        && crate::win32::foreground_matches_target_or_owned_window(
+                            identity,
+                            current.0 as usize as u64,
+                        )
+                },
+                || {
+                    let _ = unsafe {
+                        windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(prior)
+                    };
+                    (unsafe { GetForegroundWindow() }) == prior
+                },
+            ) {
+                Some(restored) => restored,
+                None => {
+                    *input_may_be_unread = true;
+                    return Err(BrowserRefusal::new(
+                        BrowserRefusalCode::BrowserWrongTargetRefused,
+                        "another window took the foreground during setup; it was left unchanged and input may have been delivered",
+                    ));
+                }
+            }
+        }
     };
     if !restored {
         return Err(BrowserRefusal::new(
@@ -823,6 +857,7 @@ mod tests {
             selected: None,
             checked: None,
             expanded: None,
+            is_password: None,
             element_ptr: 7,
             center_x: 0,
             center_y: 0,

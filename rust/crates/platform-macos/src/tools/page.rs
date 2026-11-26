@@ -17,6 +17,7 @@ use cua_driver_core::page::{PageBackend, PageReadResult};
 use std::{future::Future, sync::Arc};
 
 use super::ToolState;
+use crate::browser::ax_page_reader::{AxRoleFilter, AX_SELECTORS};
 use crate::browser::{is_wk_web_view_app, AXPageReader, BrowserJs, CdpClient, ElectronJs};
 
 pub struct MacOsPageBackend {
@@ -248,9 +249,9 @@ async fn ax_query_fallback(
     selector: &str,
     require_web_area: bool,
 ) -> anyhow::Result<(String, bool)> {
+    let filter = ax_role_filter(selector)?;
     let window_id = u32::try_from(window_id)
         .map_err(|_| anyhow::anyhow!("macOS window_id {window_id} is out of u32 range"))?;
-    let sel = selector.to_owned();
     let (rows, truncated) = page_rows_off_thread(
         move || crate::ax::tree::walk_tree(pid, Some(window_id), None),
         require_web_area,
@@ -258,9 +259,23 @@ async fn ax_query_fallback(
     .await
     .map_err(|e| anyhow::anyhow!("AX walk task failed: {e}"))??;
     Ok((
-        format_ax_elements(&AXPageReader::query(&sel, &rows)),
+        format_ax_elements(&AXPageReader::query(filter, &rows)),
         truncated,
     ))
+}
+
+/// The AX fallback answers only selectors it can apply. Any other selector
+/// is refused rather than read as `*`, which would return every element of
+/// the window as if it matched.
+fn ax_role_filter(selector: &str) -> anyhow::Result<AxRoleFilter> {
+    AxRoleFilter::from_css(selector).ok_or_else(|| {
+        anyhow::anyhow!(
+            "css_selector '{selector}' was not applied: this window has no JavaScript or CDP \
+             route to its DOM, and the accessibility-tree fallback matches only bare tag \
+             selectors ({AX_SELECTORS}). Query with one of those, use get_window_state with \
+             query, or attach CDP with browser_prepare for full DOM access."
+        )
+    })
 }
 
 fn format_ax_elements(elements: &[crate::browser::ax_page_reader::AXElement]) -> String {
@@ -307,7 +322,15 @@ fn build_query_selector_js(selector: &str, attributes: &[String]) -> String {
   var els = Array.from(document.querySelectorAll(sel));
   return JSON.stringify(els.map(function(el){{
     var obj = {{}};
-    attrs.forEach(function(a){{ obj[a] = el[a] !== undefined ? el[a] : el.getAttribute(a); }});
+    attrs.forEach(function(a){{
+      if (String(a).toLowerCase() === 'value') {{
+        var tag, type;
+        try {{ tag = el.tagName; type = el.type; }} catch (_) {{ return; }}
+        if (typeof tag !== 'string' || (tag.toLowerCase() === 'input' &&
+            (typeof type !== 'string' || type.toLowerCase() === 'password'))) return;
+      }}
+      obj[a] = el[a] !== undefined ? el[a] : el.getAttribute(a);
+    }});
     obj.textContent = (el.textContent||'').trim().substring(0,200);
     return obj;
   }}));
@@ -328,6 +351,29 @@ fn json_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_dom_suppresses_password_values() {
+        use std::io::Write;
+        for attrs in [vec![], vec!["value".to_owned()]] {
+            let script = build_query_selector_js("input", &attrs);
+            let mut child = std::process::Command::new(
+                "/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc",
+            )
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+            let expression = script.trim_end_matches(';');
+            write!(child.stdin.take().unwrap(), "var document = {{querySelectorAll: function() {{ return [{{tagName:'INPUT',type:'PaSsWoRd',value:'sentinel-secret',getAttribute:function(){{return null}}}},{{tagName:'INPUT',value:'sentinel-unknown',getAttribute:function(){{return null}}}},{{tagName:'INPUT',type:'text',value:'visible-control',getAttribute:function(){{return null}}}}]; }}}}; print({expression});").unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success());
+            let result = String::from_utf8(output.stdout).unwrap();
+            assert!(!result.contains("sentinel-secret"), "{result}");
+            assert!(!result.contains("sentinel-unknown"), "{result}");
+            assert!(result.contains("visible-control"), "{result}");
+        }
+    }
 
     const MENU_ONLY: &str = "- [0] AXMenuBar\n  - [1] AXMenuBarItem \"Apple\"\n";
 
@@ -415,6 +461,19 @@ mod tests {
     #[test]
     fn web_view_apps_keep_the_whole_tree_without_a_web_area() {
         assert_eq!(page_rows(MENU_ONLY.to_owned(), false).unwrap(), MENU_ONLY);
+    }
+
+    #[test]
+    fn an_unmappable_selector_fails_the_ax_fallback_with_the_reason() {
+        let ax = ax_role_filter("select#model").map(|_| (String::new(), false));
+        let error = finish_page_read("cdp", None, Some("no CDP port".into()), ax)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("'select#model' was not applied"), "{error}");
+        assert!(
+            error.contains("JavaScript read failed first: no CDP port"),
+            "{error}"
+        );
     }
 
     #[test]

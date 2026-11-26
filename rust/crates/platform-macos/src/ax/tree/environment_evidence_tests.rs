@@ -155,6 +155,7 @@ pub(super) enum Scenario {
     ProviderRecovered,
     ScopeRecovered,
     ScopeUnresolved,
+    BatchFailure,
 }
 
 pub(super) struct Environment {
@@ -438,6 +439,18 @@ impl super::AxWalkEnvironment for Environment {
             99
         };
         let candidate = crate::ax::window_scope::TopLevelCandidate::new("AXWindow", Some(id));
+        if matches!(self.scenario, Scenario::BatchFailure) && element == 3 {
+            return crate::ax::evidence::Observed {
+                legacy: candidate,
+                evidence: vec![crate::ax::evidence::ReadEvidence {
+                    owner: Some(element),
+                    site: ReadSite::ScopeCandidate("AXBatch"),
+                    status: EvidenceStatus::Unknown(crate::ax::tree_source::ReadFailure::WrongType),
+                    attempt: 0,
+                    listing: None,
+                }],
+            };
+        }
         if matches!(
             self.scenario,
             Scenario::ScopeRecovered | Scenario::ScopeUnresolved
@@ -511,6 +524,20 @@ impl super::AxWalkEnvironment for Environment {
             .push(format!("pause {}", duration.as_millis()));
         self.now.set(self.now.get() + duration);
     }
+}
+
+#[test]
+fn failed_scope_batch_refuses_even_when_another_candidate_matches() {
+    let env = Environment::new(Scenario::BatchFailure);
+    let evidence = crate::ax::evidence::EvidenceScope::start();
+    let (decision, failed) = super::scope_top_level_with(&env, &[2, 3], 42, 99);
+    let _ = evidence.finish(());
+    assert!(failed);
+    assert!(matches!(
+        decision.scope,
+        crate::ax::window_scope::WindowScope::AxUnresolved { .. }
+    ));
+    assert!(decision.walk.is_empty());
 }
 
 #[test]
@@ -672,7 +699,7 @@ fn top_level_enumeration_preserves_unknown_and_empty() {
     let environment = Environment::new(Scenario::Union);
     let scope = EvidenceScope::start();
     let ledger = super::SkipLedger::start();
-    let roots = super::top_level_with(&environment, 1, 42, None, None);
+    let roots = super::top_level_with(&environment, 1, 42, None, None).0;
     assert_eq!(roots, [2, 3]);
     assert!(!ledger.finish());
     let observed = scope.finish(roots);
@@ -784,7 +811,7 @@ fn recovery_probe_preserves_failure_and_no_match() {
     ] {
         let environment = Environment::new(scenario);
         let scope = crate::ax::evidence::EvidenceScope::start();
-        let roots = super::top_level_with(&environment, 1, 42, Some(99), None);
+        let roots = super::top_level_with(&environment, 1, 42, Some(99), None).0;
         assert_eq!(roots, expected_roots);
         let observed = scope.finish(roots);
         assert!(observed
@@ -865,7 +892,8 @@ fn scope_candidate_reads_preserve_unknown_and_absent() {
             });
             let role_present = name != "AXRole" || case == 1;
             assert_eq!(id_calls.get(), usize::from(role_present));
-            let decision = decide_window_scope(&[observed.legacy], 42, None, || WindowOwner::SamePid);
+            let decision =
+                decide_window_scope(&[observed.legacy], 42, None, || WindowOwner::SamePid);
             if role_present {
                 assert_eq!(decision.scope, WindowScope::Matched);
             } else {
@@ -924,7 +952,7 @@ fn provider_enablement_preserves_failed_and_cached_outcomes() {
             trace.borrow_mut().push("opt-in");
             AccessibilityOptIn::ManualAccessibility
         },
-        || {
+        |_| {
             trace.borrow_mut().push("wait");
             false
         },
@@ -944,7 +972,7 @@ fn provider_enablement_preserves_failed_and_cached_outcomes() {
         Some(stamp),
         now + Duration::from_secs(1),
         || panic!("cached failure must not re-enable"),
-        || panic!("cached failure must not wait"),
+        |_| panic!("cached failure must not wait"),
         |_, _| panic!("cached failure must not write"),
         Some(7),
     );
@@ -969,7 +997,7 @@ fn provider_enablement_preserves_failed_and_cached_outcomes() {
         Some(stamp),
         now,
         || AccessibilityOptIn::EnhancedUserInterface,
-        || true,
+        |_| true,
         |stamp, wait| ready_cache.set(Some(ProcessEnablement { stamp, wait })),
         Some(7),
     );
@@ -984,7 +1012,7 @@ fn provider_enablement_preserves_failed_and_cached_outcomes() {
         Some(stamp),
         now + Duration::from_secs(1),
         || panic!("cached ready must not re-enable"),
-        || panic!("cached ready must not wait"),
+        |_| panic!("cached ready must not wait"),
         |_, _| panic!("cached ready must not write"),
         Some(7),
     );
@@ -999,7 +1027,7 @@ fn provider_enablement_preserves_failed_and_cached_outcomes() {
         Some(stamp),
         now,
         || AccessibilityOptIn::NotAccepted,
-        || panic!("rejected opt-in must not wait"),
+        |_| panic!("rejected opt-in must not wait"),
         |_, _| panic!("rejected opt-in must not cache"),
         Some(7),
     );

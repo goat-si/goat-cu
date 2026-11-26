@@ -137,7 +137,26 @@ pub fn open_application(
         ws.openApplicationAtURL_configuration_completionHandler(&url, &config, Some(&block));
     }
 
-    wait_for_completion(rx, reconciliation)
+    let existing_pids = reconciliation.pids_before_request.clone();
+    let may_unhide = !cfg.creates_new_instance;
+    let running = wait_for_completion(rx, reconciliation)?;
+    if may_unhide && existing_pids.contains(&unsafe { running.processIdentifier() }) {
+        unhide_without_activating(&running);
+    }
+    Ok(running)
+}
+
+/// A reopen event only asks the app to show a window. Whether a hidden app
+/// does so is its own choice (a bare AppKit app that was not started through
+/// LaunchServices ignores it), so unhide it here. `unhide` never activates,
+/// which keeps the previous frontmost app on top.
+fn unhide_without_activating(running: &NSRunningApplication) {
+    unsafe {
+        if running.isHidden() && !running.unhide() {
+            tracing::debug!(target: "platform_macos::apps::nsworkspace",
+                "NSRunningApplication.unhide was refused for a reopened app");
+        }
+    }
 }
 
 /// Launch the application bundle at `app_url` and hand it `urls` via
@@ -529,6 +548,32 @@ mod tests {
             reconciliation_pid(&HashSet::from([100]), &before, false),
             Some(100)
         );
+    }
+    #[test]
+    fn running_existing_app_keeps_background_open_event() {
+        let production = include_str!("nsworkspace.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(production.contains("config.setActivates(false)"));
+        assert!(!production.contains("K_AE_REOPEN_APPLICATION"));
+        assert!(!production.contains("b\"rapp\""));
+    }
+
+    #[test]
+    fn not_running_app_uses_open_event() {
+        assert_eq!(super::K_AE_OPEN_APPLICATION, super::fourcc(b"oapp"));
+    }
+
+    #[test]
+    fn new_instance_uses_open_event_even_when_app_is_running() {
+        let production = include_str!("nsworkspace.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(production
+            .contains("config.setCreatesNewApplicationInstance(cfg.creates_new_instance)"));
+        assert!(production.contains("apple_event::open_application_event(bid)"));
     }
 }
 

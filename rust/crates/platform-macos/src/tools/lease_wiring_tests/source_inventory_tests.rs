@@ -66,7 +66,13 @@ fn check_reviewed_glob_targets(root: &Path) {
     for (path, expected) in [
         // Re-audited at d0e90760+: three items moved above the test module
         // (clippy items_after_test_module), no export added or removed.
-        (root.join("ax/bindings.rs"), 16574817398429486645_u64),
+        // S4 re-audited AX bindings: opt-in narrows to Chromium/Electron;
+        // added AX helpers do not export worker launchers.
+        // S9 adds bounded AX attribute reads and an absence probe; neither
+        // exports a worker launcher or mutating dispatch entry point.
+        // S13 adds only a strict AXChildren reader for sheet admission;
+        // it neither launches workers nor dispatches input.
+        (root.join("ax/bindings.rs"), 2932961717859938868_u64),
         (
             root.join("../../cua-driver-contract/src/vocabulary.rs"),
             7383688377390068226_u64,

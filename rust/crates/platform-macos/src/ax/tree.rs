@@ -23,7 +23,8 @@ use super::dense_rows::{
 use super::launch::{is_still_launching, LaunchStep, LaunchWait};
 #[cfg(test)]
 use super::snapshot::RetainedElement;
-use super::tree_source::{AxTreeSource, Read};
+use super::tree_source::AxTreeSource;
+pub(crate) use super::tree_source::Read;
 use super::window_scope::{
     decide_window_scope, is_window_like_role, ScopeDecision, TopLevelCandidate, WindowScope,
 };
@@ -65,7 +66,11 @@ pub const DEFAULT_MAX_ELEMENTS: usize = 2_000;
 /// `AXUIElementCopyAttributeValue` after `spawn_blocking` starts, so the native
 /// messaging timeout is what keeps an unresponsive app from retaining a worker
 /// indefinitely.
-const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 2.0;
+pub(crate) const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 2.0;
+
+/// Most windows of one app a walk brings up to date (see
+/// [`super::enablement::flush_pending_web_updates`]).
+const MAX_WEB_FLUSH_WINDOWS: usize = 4;
 
 pub(crate) unsafe fn set_messaging_timeout(element: AXUIElementRef) {
     let _ = AXUIElementSetMessagingTimeout(element, AX_MESSAGING_TIMEOUT_SECONDS);
@@ -208,11 +213,12 @@ pub struct AXNode {
     pub identifier: Option<String>,
     pub help: Option<String>,
     pub actions: Vec<String>,
+    pub custom_actions: Vec<super::actions::CustomAction>,
     /// The raw AXUIElementRef pointer value, for caching.
     pub element_ptr: usize,
     /// Depth in the rendered markdown tree (matches the indent level used in
-    /// `tree_markdown`). Layout containers AXScrollArea/AXGroup collapse so
-    /// children share the parent's depth.
+    /// `tree_markdown`). Unnamed AXScrollArea/AXGroup layout wrappers collapse
+    /// so children share the parent's depth; named ones keep their own row.
     pub depth: usize,
     /// `element_index` of the nearest actionable ancestor, if any. Walks the
     /// rendered tree (so it skips collapsed layout containers).
@@ -235,6 +241,9 @@ pub struct AXNode {
     pub enabled: Option<bool>,
     /// AXSelected. `None` when the app doesn't report the attribute.
     pub selected: Option<bool>,
+    /// AXURL of a link — the target a press would navigate to. Read only for
+    /// actionable `AXLink` nodes; `None` everywhere else.
+    pub url: Option<String>,
     /// True when this node is an AX web-document root or descends from one.
     /// This trust marker is independent of actionable ancestry because
     /// AXWebArea is commonly non-actionable and therefore has no element index.
@@ -276,6 +285,14 @@ struct ControlState {
     max_value: Option<f64>,
     enabled: Option<bool>,
     selected: Option<bool>,
+    url: Option<String>,
+}
+
+/// Roles whose `AXURL` names a navigation target worth surfacing. `AXWebArea`
+/// also carries `AXURL` (the document URL) but is not actionable, so it never
+/// reaches the structured `elements` array.
+fn role_exposes_link_url(role: &str) -> bool {
+    role == "AXLink"
 }
 
 fn read_control_state_if_actionable<F>(is_actionable: bool, read: F) -> ControlState
@@ -286,6 +303,57 @@ where
         read()
     } else {
         ControlState::default()
+    }
+}
+
+/// AXTitle, or, for a control with neither AXTitle nor AXDescription, the
+/// text of its AXTitleUIElement. A SwiftUI grouped `Form` names its toggles
+/// only through that separate label (#6697), and VoiceOver reads it the same
+/// way. Following it costs round trips only for unnamed controls.
+pub(crate) fn title_or_title_element(
+    title: Option<&str>,
+    description: Option<&str>,
+    title_element_text: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let named = |text: Option<&str>| text.is_some_and(|t| !t.trim().is_empty());
+    if named(title) || named(description) {
+        return title.map(str::to_owned);
+    }
+    title_element_text()
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+}
+
+/// The text of `element`'s AXTitleUIElement: its AXValue (a static text
+/// label), else its AXTitle.
+///
+/// # Safety
+///
+/// `element` must be a valid `AXUIElementRef`.
+pub(crate) unsafe fn copy_title_element_text(
+    element: AXUIElementRef,
+    timeout_seconds: f32,
+) -> Read<String> {
+    super::tree_source::native::with_borrowed(element, |source, element| {
+        read_title_element_text(source, element, timeout_seconds)
+    })
+}
+
+fn read_title_element_text<S: AxTreeSource>(
+    source: &S,
+    element: &S::Element,
+    timeout_seconds: f32,
+) -> Read<String> {
+    let label = match source.element_attribute(element, "AXTitleUIElement") {
+        Read::Known(label) => label,
+        Read::Absent => return Read::Absent,
+        Read::Unknown(error) => return Read::Unknown(error),
+    };
+    source.set_optional_timeout(&label, timeout_seconds);
+    match source.text(&label, "AXValue") {
+        Read::Known(value) if !value.trim().is_empty() => Read::Known(value),
+        Read::Unknown(error) => Read::Unknown(error),
+        _ => source.text(&label, "AXTitle"),
     }
 }
 
@@ -669,6 +737,25 @@ pub struct TreeWalkResult {
     /// Offscreen rows a windowed read left unwalked, one entry per summary
     /// line. Empty when every row was walked.
     pub offscreen_rows: Vec<super::dense_rows::OffscreenRows>,
+    /// Top-level AX counts when the requested window could not be resolved.
+    pub ax_enumeration: Option<AXEnumerationSummary>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AXEnumerationSummary {
+    pub children_count: usize,
+    pub windows_count: usize,
+    pub union_count: usize,
+    pub ax_window_count: usize,
+    pub mapped_window_count: usize,
+}
+
+impl AXEnumerationSummary {
+    fn count_windows(&mut self, candidates: &[TopLevelCandidate]) {
+        let windows = candidates.iter().filter(|c| c.role == "AXWindow");
+        self.ax_window_count = windows.clone().count();
+        self.mapped_window_count = windows.filter(|c| c.ax_window_id.is_some()).count();
+    }
 }
 
 #[cfg(test)]
@@ -684,6 +771,7 @@ impl TreeWalkResult {
             walk: cua_driver_core::walk_budget::WalkBudget::nodes_only(usize::MAX).outcome(),
             window_scope: None,
             offscreen_rows: Vec::new(),
+            ax_enumeration: None,
         }
     }
 }
@@ -705,6 +793,7 @@ impl AXNode {
             identifier: None,
             help: None,
             actions: vec![],
+            custom_actions: vec![],
             element_ptr,
             depth: 0,
             parent_element_index: None,
@@ -715,6 +804,7 @@ impl AXNode {
             max_value: None,
             enabled: None,
             selected: None,
+            url: None,
             in_web_content: false,
         }
     }
@@ -1018,6 +1108,7 @@ type MenuObservation<E> = (E, Option<[f64; 4]>, Option<super::context_menus::Men
 trait WalkOrchestration<S: AxTreeSource>:
     AxWalkEnvironment + WalkElementBorrow<S, Raw = <Self as AxWalkEnvironment>::Element>
 {
+    fn flush_web_window(&self, pid: i32, element: Self::Element);
     fn release_application(&self, application: Self::Application);
     fn menu_frames(&self, pid: i32) -> super::evidence::Observed<Option<Vec<[f64; 4]>>>;
     fn menu_in_window(
@@ -1029,6 +1120,13 @@ trait WalkOrchestration<S: AxTreeSource>:
 }
 
 impl WalkOrchestration<super::tree_source::native::NativeSource> for NativeWalkEnvironment {
+    fn flush_web_window(&self, pid: i32, element: Self::Element) {
+        unsafe {
+            if copy_string_attr(element, "AXRole").as_deref() == Some("AXWindow") {
+                super::enablement::flush_pending_web_updates(pid, element);
+            }
+        }
+    }
     fn release_application(&self, application: Self::Application) {
         unsafe { CFRelease(application as CFTypeRef) }
     }
@@ -1220,10 +1318,54 @@ impl AxWalkEnvironment for NativeWalkEnvironment {
         &self,
         element: Self::Element,
     ) -> super::evidence::Observed<TopLevelCandidate> {
-        unsafe {
-            super::tree_source::native::with_borrowed(element, |source, child| {
-                scope_candidate_with(source, child, || ax_get_window_id(element))
-            })
+        use super::evidence::{EvidenceStatus, Observed, ReadEvidence, ReadSite};
+        unsafe { set_messaging_timeout(element) };
+        let values = unsafe {
+            super::batch_attrs::copy_string_attrs(element, ["AXRole", "AXSubrole", "AXIdentifier"])
+        };
+        let Some([Some(role), subrole, identifier]) = values else {
+            return Observed {
+                legacy: TopLevelCandidate::new("", None),
+                evidence: vec![ReadEvidence {
+                    owner: Some(element as usize),
+                    site: ReadSite::ScopeCandidate("AXBatch"),
+                    status: EvidenceStatus::Unknown(super::tree_source::ReadFailure::WrongType),
+                    attempt: 0,
+                    listing: None,
+                }],
+            };
+        };
+        let ax_window_id = if is_window_like_role(&role) {
+            unsafe { ax_get_window_id(element) }
+        } else {
+            None
+        };
+        let evidence = [
+            ("AXRole", true),
+            ("AXSubrole", subrole.is_some()),
+            ("AXIdentifier", identifier.is_some()),
+        ]
+        .into_iter()
+        .map(|(name, present)| ReadEvidence {
+            owner: Some(element as usize),
+            site: ReadSite::ScopeCandidate(name),
+            status: if present {
+                EvidenceStatus::Known
+            } else {
+                EvidenceStatus::Absent
+            },
+            attempt: 0,
+            listing: None,
+        })
+        .collect();
+        Observed {
+            legacy: TopLevelCandidate {
+                role,
+                subrole,
+                identifier,
+                ax_window_id,
+            },
+            evidence,
         }
     }
     fn window_owner(&self, pid: i32, window_id: u32) -> crate::windows::WindowOwner {
@@ -1304,6 +1446,7 @@ where
     let offscreen_rows;
     let mut batching_disabled = false;
     let window_scope;
+    let ax_enumeration;
 
     {
         let Some(app_elem) = create_application_with(environment, pid).into_walk_legacy() else {
@@ -1314,6 +1457,7 @@ where
             return (
                 TreeWalkResult {
                     offscreen_rows: Vec::new(),
+                    ax_enumeration: None,
                     tree_markdown: String::new(),
                     nodes,
                     truncated: false,
@@ -1331,16 +1475,29 @@ where
             );
         };
 
-        let (mut top_level, walk_these, resolved_scope) =
+        let (mut top_level, walk_these, resolved_scope, enumeration) =
             resolve_top_level_with(environment, app_elem, pid, window_id, &mut budget);
         window_scope = resolved_scope;
+        ax_enumeration = enumeration;
 
         let mut label_claims = Vec::new();
 
         // Walk each top-level child at depth 0. Its own frame, read only if
         // a large container needs it, bounds what is on screen for children
         // whose app does not list the visible ones.
-        for child in walk_these {
+
+        // A hidden or covered Chromium window holds back the page changes of
+        // the last action until it is asked something; ask first so the walk
+        // reads the page as it is now.
+        if include_web_content {
+            for &child in walk_these.iter().take(MAX_WEB_FLUSH_WINDOWS) {
+                environment.flush_web_window(pid, child);
+            }
+        }
+
+        let shares = SiblingShares::reserve(&mut budget, false, walk_these.len());
+        for (position, child) in walk_these.into_iter().enumerate() {
+            budget.release(shares.of(position));
             environment.with_walk_element(source, child, |source, child| {
                 walk_root(
                     source,
@@ -1464,6 +1621,7 @@ where
                         menu,
                         menu,
                         0,
+                        0,
                         None,
                         None,
                         LabelPath::Inactive,
@@ -1505,7 +1663,7 @@ where
         environment.release_application(app_elem);
     }
 
-    let (result, sample) = finalize_with_deadline_sample(
+    let (mut result, sample) = finalize_with_deadline_sample(
         lines,
         nodes,
         offscreen_rows,
@@ -1515,6 +1673,7 @@ where
         window_scope,
         |budget| environment.budget_expired(budget),
     );
+    result.ax_enumeration = ax_enumeration;
     (result, Some(sample))
 }
 
@@ -1578,6 +1737,7 @@ fn finalize_with_deadline_sample(
             nodes_skipped,
             depth_truncated,
             window_scope,
+            None,
         ),
         final_deadline_sample,
     )
@@ -1764,6 +1924,7 @@ fn walk_root<S: AxTreeSource>(
             root,
             root,
             0,
+            0,
             None,
             None,
             LabelPath::Inactive,
@@ -1813,6 +1974,7 @@ fn finish_deferred<S: AxTreeSource>(
                     &row.element,
                     &row.element,
                     row.depth,
+                    row.walk_depth,
                     row.parent_index,
                     Some(&row.parent_role),
                     row.label_path,
@@ -1853,6 +2015,7 @@ fn finalize_walk(
     nodes_skipped: bool,
     depth_truncated: bool,
     window_scope: Option<WindowScope>,
+    ax_enumeration: Option<AXEnumerationSummary>,
 ) -> TreeWalkResult {
     nodes.retain(|n| n.role != "AXTabStripSummary");
     let mut line_nodes = align_line_nodes(&lines, &nodes);
@@ -1877,19 +2040,26 @@ fn finalize_walk(
         depth_truncated,
         walk,
         window_scope,
+        ax_enumeration,
     }
 }
 
 /// Resolve requested scope from environment observations using the shared
 /// production decisions. Values returned for walking are borrowed aliases;
 /// only the first vector owns retain credits.
+#[allow(clippy::type_complexity)]
 fn resolve_top_level_with<E: AxWalkEnvironment>(
     environment: &E,
     app_elem: E::Application,
     pid: i32,
     window_id: Option<u32>,
     budget: &mut WalkBudget,
-) -> (Vec<E::Element>, Vec<E::Element>, Option<WindowScope>) {
+) -> (
+    Vec<E::Element>,
+    Vec<E::Element>,
+    Option<WindowScope>,
+    Option<AXEnumerationSummary>,
+) {
     let mut launch_wait = LaunchWait::new(budget.time_limit());
     loop {
         let attempt_started = environment.now();
@@ -1897,14 +2067,15 @@ fn resolve_top_level_with<E: AxWalkEnvironment>(
         let recovery_deadline = budget
             .time_limit()
             .and_then(|limit| attempt_started.checked_add(limit));
-        let mut top_level =
+        let (mut top_level, mut enumeration) =
             top_level_with(environment, app_elem, pid, window_id, recovery_deadline);
         let Some(wid) = window_id else {
             let walk = top_level.clone();
-            return (top_level, walk, None);
+            return (top_level, walk, None, None);
         };
-        let mut decision = scope_top_level_with(environment, &top_level, pid, wid);
-        if matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
+        let (mut decision, incomplete_scope) =
+            scope_top_level_counted(environment, &top_level, pid, wid, &mut enumeration);
+        if !incomplete_scope && matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
             if let Some((parent_window_id, sheet)) =
                 window_holding_sheet_with(environment, &top_level, wid)
             {
@@ -1934,7 +2105,9 @@ fn resolve_top_level_with<E: AxWalkEnvironment>(
             .iter()
             .map(|&index| top_level[index])
             .collect();
-        return (top_level, walk, Some(decision.scope));
+        let diagnostic =
+            matches!(decision.scope, WindowScope::AxUnresolved { .. }).then_some(enumeration);
+        return (top_level, walk, Some(decision.scope), diagnostic);
     }
 }
 
@@ -1950,17 +2123,29 @@ fn top_level_with<E: AxWalkEnvironment>(
     pid: i32,
     window_id: Option<u32>,
     recovery_deadline: Option<Instant>,
-) -> Vec<E::Element> {
+) -> (Vec<E::Element>, AXEnumerationSummary) {
     let children = environment.children(app_elem);
+    let children_count = match &children.legacy {
+        Read::Known(items) => items.len(),
+        _ => 0,
+    };
+    let windows = environment.windows(app_elem, pid, window_id);
+    let windows_count = windows.legacy.len();
     // A requested window on another Space is absent from AXWindows; the
     // `_including` variant recovers it by exact CGWindowID.
     let mut top_level = top_level_union_with(
         children,
-        || environment.windows(app_elem, pid, window_id),
+        || windows,
         |existing, candidate| environment.same(*existing, *candidate),
         |duplicate| environment.release(duplicate),
     );
 
+    let enumeration = AXEnumerationSummary {
+        children_count,
+        windows_count,
+        union_count: top_level.len(),
+        ..Default::default()
+    };
     if let Some(wid) = window_id {
         let already_present = top_level.iter().any(|&element| {
             environment.set_element_timeout(element);
@@ -1988,7 +2173,7 @@ fn top_level_with<E: AxWalkEnvironment>(
             }
         }
     }
-    top_level
+    (top_level, enumeration)
 }
 
 /// Union retained observations by identity; duplicates surrender their own
@@ -2160,21 +2345,72 @@ fn children_or_skipped<T>(read: Option<Vec<T>>) -> Vec<T> {
 }
 
 /// Decide which of `top_level` a walk scoped to `wid` covers.
+#[cfg(test)]
 fn scope_top_level_with<E: AxWalkEnvironment>(
     environment: &E,
     top_level: &[E::Element],
     pid: i32,
     wid: u32,
-) -> ScopeDecision {
-    let candidates: Vec<TopLevelCandidate> = top_level
-        .iter()
-        .map(|&child| environment.scope_candidate(child).into_walk_legacy())
-        .collect();
-    // GOAT's walk keeps the AXWindows read in its evidence; the AX error
-    // name (upstream #7192) is not threaded into the scope decision.
-    decide_window_scope(&candidates, wid, None, || environment.window_owner(pid, wid))
+) -> (ScopeDecision, bool) {
+    scope_top_level_counted(
+        environment,
+        top_level,
+        pid,
+        wid,
+        &mut AXEnumerationSummary::default(),
+    )
 }
 
+fn scope_top_level_counted<E: AxWalkEnvironment>(
+    environment: &E,
+    top_level: &[E::Element],
+    pid: i32,
+    wid: u32,
+    enumeration: &mut AXEnumerationSummary,
+) -> (ScopeDecision, bool) {
+    let observations: Vec<_> = top_level
+        .iter()
+        .map(|&child| environment.scope_candidate(child))
+        .collect();
+    let incomplete = observations.iter().any(|o| {
+        o.evidence.iter().any(|e| {
+            e.site == super::evidence::ReadSite::ScopeCandidate("AXBatch")
+                && matches!(
+                    e.status,
+                    super::evidence::EvidenceStatus::Unknown(_)
+                        | super::evidence::EvidenceStatus::Unavailable
+                        | super::evidence::EvidenceStatus::DeadlineExpired
+                )
+        })
+    });
+    let candidates: Vec<TopLevelCandidate> = observations
+        .into_iter()
+        .map(|o| o.into_walk_legacy())
+        .collect();
+    enumeration.count_windows(&candidates);
+    // GOAT's walk keeps the AXWindows read in its evidence; the AX error
+    // name (upstream #7192) is not threaded into the scope decision.
+    if incomplete {
+        return (
+            ScopeDecision {
+                scope: WindowScope::AxUnresolved {
+                    ax_window_count: 0,
+                    ax_windows_error: None,
+                },
+                walk: Vec::new(),
+            },
+            true,
+        );
+    }
+    (
+        decide_window_scope(&candidates, wid, None, || {
+            environment.window_owner(pid, wid)
+        }),
+        false,
+    )
+}
+
+#[cfg(test)]
 fn scope_candidate_with<S: AxTreeSource>(
     source: &S,
     element: &S::Element,
@@ -2309,12 +2545,80 @@ fn known<T>(read: Read<T>) -> Option<T> {
     }
 }
 
+fn is_layout_container(role: &str) -> bool {
+    matches!(role, "AXGroup" | "AXScrollArea")
+}
+
+/// Whether an AXGroup/AXScrollArea is only a layout wrapper to collapse. One
+/// that carries content (AXTitle or AXDescription, such as a "Profile" or
+/// "Billing" section, or a non-empty AXValue or AXHelp) keeps its row, so
+/// identical controls in different sections can be told apart, and its own
+/// actions (a SwiftUI row's press or custom actions) stay addressable.
+fn collapse_layout_container(
+    role: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    has_value_or_help: bool,
+) -> bool {
+    is_layout_container(role)
+        && title.is_none_or(|text| text.trim().is_empty())
+        && description.is_none_or(|text| text.trim().is_empty())
+        && !has_value_or_help
+}
+
+/// Whether a node gets a row of its own. A node with no action and nothing to
+/// show collapses into its parent, except a window or sheet, and a group or
+/// scroll area kept for its help: with no action it is an unindexed display
+/// row, and its help is the content that row shows.
+fn keeps_row(role: &str, is_actionable: bool, has_content: bool, has_help: bool) -> bool {
+    is_actionable
+        || has_content
+        || role == "AXWindow"
+        || role == "AXSheet"
+        || (has_help && is_layout_container(role))
+}
+
+/// The actions a node is addressable by. A named group or scroll area whose
+/// only actions are the generic menu and scroll ones every section carries
+/// (SwiftUI, Catalyst and web content) is a section label, not a target, so
+/// it stays an unindexed display row and indexes after it do not shift. One
+/// with an action of its own (a press, an app's custom action) is a target,
+/// and so is a group kept for its value or help, which only an indexed row
+/// shows.
+fn layout_group_actions(
+    role: &str,
+    named: bool,
+    mut advertised: super::actions::ElementActions,
+) -> super::actions::ElementActions {
+    let generic = |action: &String| action == "AXShowMenu" || action.starts_with("AXScroll");
+    if is_layout_container(role)
+        && named
+        && advertised.custom.is_empty()
+        && advertised.standard.iter().all(generic)
+    {
+        advertised.standard.clear();
+    }
+    advertised
+}
+
+/// `max_depth` budget a node's children are walked at. A named layout group
+/// kept as a row indents its children but spends no budget, so `max_depth`
+/// admits the same elements as when every group collapsed.
+fn child_walk_depth(role: &str, walk_depth: usize) -> usize {
+    if is_layout_container(role) {
+        walk_depth
+    } else {
+        walk_depth + 1
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn walk_element<S: AxTreeSource>(
     source: &S,
     element: &S::Element,
     surface: &S::Element,
     depth: usize,
+    walk_depth: usize,
     parent_index: Option<usize>,
     parent_role: Option<&str>,
     parent_path: LabelPath,
@@ -2329,7 +2633,7 @@ fn walk_element<S: AxTreeSource>(
     deferred: &mut Vec<DeferredRow<S::Element>>,
     label_claims: &mut Vec<(usize, String)>,
 ) {
-    if depth > max_depth {
+    if walk_depth > max_depth {
         note_depth_cut();
         budget.record_cut(IncompleteReason {
             kind: IncompleteReasonKind::PolicyOmission,
@@ -2504,6 +2808,7 @@ fn walk_element<S: AxTreeSource>(
                     .into_walk_legacy(),
                 )
                 .unwrap_or_default(),
+                custom_actions: vec![],
                 element_ptr: snapshot_key,
                 depth,
                 parent_element_index: parent_index,
@@ -2530,6 +2835,7 @@ fn walk_element<S: AxTreeSource>(
                 max_value: shown.and_then(|bar| bar.range).map(|(_, max)| max),
                 enabled: None,
                 selected: None,
+                url: None,
                 in_web_content,
             };
             lines.push((depth, format_node_line(&node)));
@@ -2540,6 +2846,7 @@ fn walk_element<S: AxTreeSource>(
                 surface,
                 &role,
                 depth + 1,
+                walk_depth + 1,
                 Some(idx),
                 label_path,
                 in_web_content,
@@ -2558,73 +2865,102 @@ fn walk_element<S: AxTreeSource>(
         scroll_attrs = Some(attrs);
     }
 
-    // Skip pure layout containers that have no interesting content.
-    if role == "AXScrollArea" || role == "AXGroup" {
-        // An exhaustive walk keeps the container as a display-only row, so a
-        // selector naming it is answered rather than assumed absent.
-        if exhaustive_nodes() {
-            let attrs = match scroll_attrs.take() {
-                Some(attrs) => Some(attrs),
-                None => super::content_attrs::read_content_attrs_with(
-                    source,
-                    element,
-                    &role,
-                    budget,
-                    batching_disabled,
-                ),
-            };
-            let mut node = match attrs {
-                Some(attrs) => {
-                    if attrs.read_failed {
-                        note_skipped();
+    // Named layout containers are display rows. Their children gain visual
+    // indentation without consuming an extra walk-depth level.
+    let mut layout_attrs = None;
+    let mut layout_actions = None;
+    if is_layout_container(&role) {
+        let attrs = match scroll_attrs.take() {
+            Some(attrs) => Some(attrs),
+            None => super::content_attrs::read_content_attrs_with(
+                source,
+                element,
+                &role,
+                budget,
+                batching_disabled,
+            ),
+        };
+        let named = attrs.as_ref().is_some_and(|attrs| {
+            !collapse_layout_container(
+                &role,
+                attrs.title.as_deref(),
+                attrs.description.as_deref(),
+                attrs.value.is_some() || attrs.help.is_some(),
+            )
+        });
+        let actions = if named {
+            known(
+                super::evidence::observe_read(
+                    Some(element_key),
+                    super::evidence::ReadSite::ActionNames,
+                    source.action_names(element),
+                )
+                .into_walk_legacy(),
+            )
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let actionable =
+            !layout_group_actions(&role, named, super::actions::split(actions.clone())).is_empty();
+        if actionable && attrs.is_some() {
+            layout_attrs = attrs;
+            layout_actions = Some(actions);
+        } else {
+            if named || exhaustive_nodes() {
+                let mut node = match attrs {
+                    Some(attrs) => {
+                        if attrs.read_failed {
+                            note_skipped();
+                        }
+                        display_node(
+                            &role,
+                            attrs,
+                            source.key(element),
+                            depth,
+                            parent_index,
+                            in_web_content,
+                        )
                     }
-                    display_node(
-                        &role,
-                        attrs,
-                        source.key(element),
-                        depth,
-                        parent_index,
-                        in_web_content,
-                    )
-                }
-                None => {
-                    note_skipped();
-                    role_only_node(
-                        role.clone(),
-                        source.key(element),
-                        depth,
-                        parent_index,
-                        in_web_content,
-                    )
-                }
-            };
-            node.canonical.role_read = role_read;
-            lines.push((depth, format_node_line(&node)));
-            nodes.push(node);
+                    None => {
+                        note_skipped();
+                        role_only_node(
+                            role.clone(),
+                            source.key(element),
+                            depth,
+                            parent_index,
+                            in_web_content,
+                        )
+                    }
+                };
+                node.canonical.role_read = role_read;
+                lines.push((depth, format_node_line(&node)));
+                nodes.push(node);
+            } else if attrs.as_ref().is_some_and(|attrs| attrs.read_failed) || attrs.is_none() {
+                note_skipped();
+            }
+            walk_children(
+                source,
+                element,
+                surface,
+                &role,
+                depth + usize::from(named),
+                child_walk_depth(&role, walk_depth),
+                parent_index,
+                child_label_path,
+                in_web_content,
+                nodes,
+                lines,
+                counter,
+                budget,
+                batching_disabled,
+                max_depth,
+                include_web_content,
+                deferred,
+                label_claims,
+            );
+            return;
         }
-        // Still recurse — children may be interesting. Layout containers
-        // collapse, so children inherit the parent's depth AND the same
-        // parent_index (no actionable node was emitted here).
-        walk_children(
-            source,
-            element,
-            surface,
-            &role,
-            depth,
-            parent_index,
-            child_label_path,
-            in_web_content,
-            nodes,
-            lines,
-            counter,
-            budget,
-            batching_disabled,
-            max_depth,
-            include_web_content,
-            deferred,
-            label_claims,
-        );
-        return;
     }
 
     // Keep AXTitle and AXDescription SEPARATE so that the tree format matches
@@ -2646,13 +2982,15 @@ fn walk_element<S: AxTreeSource>(
         read_failed,
         secure,
         value_unknown,
-    }) = super::content_attrs::read_content_attrs_with(
-        source,
-        element,
-        &role,
-        budget,
-        batching_disabled,
-    )
+    }) = layout_attrs.or_else(|| {
+        super::content_attrs::read_content_attrs_with(
+            source,
+            element,
+            &role,
+            budget,
+            batching_disabled,
+        )
+    })
     else {
         // Only the role is known: a selector on its label cannot be answered.
         note_skipped();
@@ -2672,15 +3010,34 @@ fn walk_element<S: AxTreeSource>(
         // A label read failed: a selector on it cannot be answered.
         note_skipped();
     }
-    let actions = known(
-        super::evidence::observe_read(
-            Some(element_key),
-            super::evidence::ReadSite::ActionNames,
-            source.action_names(element),
+    let actions = layout_actions.unwrap_or_else(|| {
+        known(
+            super::evidence::observe_read(
+                Some(element_key),
+                super::evidence::ReadSite::ActionNames,
+                source.action_names(element),
+            )
+            .into_walk_legacy(),
         )
-        .into_walk_legacy(),
-    )
-    .unwrap_or_default();
+        .unwrap_or_default()
+    });
+    let title_lookup_failed = std::cell::Cell::new(false);
+    let title = title_or_title_element(title.as_deref(), description.as_deref(), || {
+        if budget.expired() {
+            title_lookup_failed.set(true);
+            note_skipped();
+            return None;
+        }
+        match read_title_element_text(source, element, AX_MESSAGING_TIMEOUT_SECONDS) {
+            Read::Known(value) => Some(value),
+            Read::Absent => None,
+            Read::Unknown(_) => {
+                title_lookup_failed.set(true);
+                note_skipped();
+                None
+            }
+        }
+    });
     let visible_title = title.as_deref().unwrap_or("").trim().to_owned();
     let visible_description = description.as_deref().unwrap_or("").trim().to_owned();
     let visible_value = value.as_deref().unwrap_or("").trim().to_owned();
@@ -2784,14 +3141,15 @@ fn walk_element<S: AxTreeSource>(
         None
     };
     let enabled = control.as_ref().and_then(|control| control.enabled);
-    let is_actionable = is_addressable(
-        &role,
-        !actions.is_empty() || actionless_control,
-        value_settable,
-        enabled,
-    );
+    let is_actionable = !title_lookup_failed.get()
+        && is_addressable(
+            &role,
+            !actions.is_empty() || actionless_control,
+            value_settable,
+            enabled,
+        );
 
-    if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" {
+    if !keeps_row(&role, is_actionable, has_content, help.is_some()) {
         if exhaustive_nodes() {
             let mut node = AXNode {
                 canonical: super::vocabulary::CanonicalEvidence {
@@ -2825,6 +3183,7 @@ fn walk_element<S: AxTreeSource>(
             surface,
             &role,
             depth + 1,
+            walk_depth + 1,
             parent_index,
             child_label_path,
             in_web_content,
@@ -2910,6 +3269,14 @@ fn walk_element<S: AxTreeSource>(
             max_value: control.max_value,
             enabled,
             selected: control.selected,
+            url: if role_exposes_link_url(&role) && !secure && !value_unknown {
+                control
+                    .url
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty())
+            } else {
+                None
+            },
         }
     });
     let (redacted_value, redacted_value_state) = if secure {
@@ -2947,6 +3314,7 @@ fn walk_element<S: AxTreeSource>(
             identifier: identifier.clone(),
             help: help.clone(),
             actions: actions.clone(),
+            custom_actions: super::actions::split(actions.clone()).custom,
             element_ptr,
             depth,
             parent_element_index: parent_index,
@@ -2957,6 +3325,7 @@ fn walk_element<S: AxTreeSource>(
             max_value: control_state.max_value,
             enabled: control_state.enabled,
             selected: control_state.selected,
+            url: control_state.url.clone(),
             in_web_content,
         }
     } else {
@@ -2981,6 +3350,7 @@ fn walk_element<S: AxTreeSource>(
             identifier: identifier.clone(),
             help: help.clone(),
             actions: vec![],
+            custom_actions: vec![],
             element_ptr,
             depth,
             parent_element_index: parent_index,
@@ -2991,6 +3361,7 @@ fn walk_element<S: AxTreeSource>(
             max_value: control_state.max_value,
             enabled: control_state.enabled,
             selected: control_state.selected,
+            url: control_state.url.clone(),
             in_web_content,
         }
     };
@@ -3054,6 +3425,7 @@ fn walk_element<S: AxTreeSource>(
         surface,
         &role,
         depth + 1,
+        child_walk_depth(&role, walk_depth),
         next_parent,
         child_label_path,
         in_web_content,
@@ -3076,6 +3448,7 @@ fn walk_children<S: AxTreeSource>(
     surface: &S::Element,
     role: &str,
     depth: usize,
+    walk_depth: usize,
     parent_index: Option<usize>,
     label_path: LabelPath,
     in_web_content: bool,
@@ -3089,7 +3462,7 @@ fn walk_children<S: AxTreeSource>(
     deferred: &mut Vec<DeferredRow<S::Element>>,
     label_claims: &mut Vec<(usize, String)>,
 ) {
-    if depth > max_depth {
+    if walk_depth > max_depth {
         // A tree that ends exactly at the cap is still complete.
         match observed_walk_children(source, element, budget) {
             Read::Absent => {}
@@ -3130,7 +3503,9 @@ fn walk_children<S: AxTreeSource>(
     } else {
         None
     };
+    let shares = SiblingShares::reserve(budget, in_web_content, children.len());
     for (index, child) in children.into_iter().enumerate() {
+        budget.release(shares.of(index));
         if let Some(ref tp) = tab_plan {
             if index == tp.first_omitted_index {
                 lines.push((depth, format_omitted_tabs_line(tp.omitted_count)));
@@ -3160,6 +3535,7 @@ fn walk_children<S: AxTreeSource>(
                 collection: source.key(element),
                 element: child.clone(),
                 depth,
+                walk_depth,
                 parent_index,
                 parent_role: role.to_owned(),
                 label_path,
@@ -3172,6 +3548,7 @@ fn walk_children<S: AxTreeSource>(
                 &child,
                 surface,
                 depth,
+                walk_depth,
                 parent_index,
                 Some(role),
                 label_path,
@@ -3472,6 +3849,7 @@ mod secure_value_tests {
             .get("value")
             .is_none());
         let ctx = ViewContext {
+            session: None,
             pid: 260105,
             window_id: 260105,
             key: ViewKey {
@@ -3510,6 +3888,7 @@ mod secure_value_tests {
             collection: 0,
             element: unsafe { RetainedElement::retain(0) },
             depth: 0,
+            walk_depth: 0,
             parent_index: None,
             parent_role: "AXTable".into(),
             label_path: LabelPath::Inactive,
@@ -3603,6 +3982,7 @@ fn role_only_node(
         identifier: None,
         help: None,
         actions: Vec::new(),
+        custom_actions: Vec::new(),
         element_ptr,
         depth,
         parent_element_index,
@@ -3613,6 +3993,7 @@ fn role_only_node(
         max_value: None,
         enabled: None,
         selected: None,
+        url: None,
         in_web_content,
     }
 }
@@ -3672,6 +4053,50 @@ fn display_node(
     }
 }
 
+/// Most children a node holds nodes for (see [`SiblingShares`]). A pane,
+/// toolbar or button row is this small; a list or table is not.
+const MAX_RESERVED_SIBLINGS: usize = 16;
+
+/// Most nodes held for one sibling: enough for a later container's own row
+/// and a few controls nested in it (a button bar inside an unnamed group).
+const MAX_SHARE_PER_SIBLING: usize = 8;
+
+/// Nodes of the budget held for a native node's children before the first is
+/// walked, so a deep early child cannot use up `max_elements` before the
+/// children after it get rows. An Open panel's file browser holds hundreds of
+/// rows and took the whole default budget ahead of the panel's Cancel and Open
+/// buttons, so a read of the panel showed no way to answer it (#3351).
+///
+/// Each child's share is at most [`MAX_SHARE_PER_SIBLING`], spread evenly
+/// over what is free. Lists and tables (more than [`MAX_RESERVED_SIBLINGS`]
+/// children) and web content keep their depth-first order, so their first
+/// rows still show their cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SiblingShares {
+    held: usize,
+    children: usize,
+}
+
+impl SiblingShares {
+    fn reserve(budget: &mut WalkBudget, in_web_content: bool, children: usize) -> Self {
+        let held = if in_web_content || children > MAX_RESERVED_SIBLINGS {
+            0
+        } else {
+            budget.reserve(children * MAX_SHARE_PER_SIBLING)
+        };
+        Self { held, children }
+    }
+
+    /// The nodes held for the child at `position`; the walker releases them
+    /// just before walking it. The shares add up to `held`.
+    fn of(self, position: usize) -> usize {
+        if self.children == 0 {
+            return 0;
+        }
+        self.held / self.children + usize::from(position < self.held % self.children)
+    }
+}
+
 fn is_web_content_role(role: &str) -> bool {
     let normalized = role
         .chars()
@@ -3679,6 +4104,54 @@ fn is_web_content_role(role: &str) -> bool {
         .flat_map(char::to_lowercase)
         .collect::<String>();
     normalized.contains("webarea") || normalized.contains("documentweb") || normalized == "document"
+}
+
+#[cfg(test)]
+mod sibling_reservation_tests {
+    use super::{SiblingShares, MAX_RESERVED_SIBLINGS, MAX_SHARE_PER_SIBLING};
+    use cua_driver_core::walk_budget::WalkBudget;
+
+    #[test]
+    fn a_pane_holds_nodes_for_each_child_but_a_list_does_not() {
+        let mut budget = WalkBudget::nodes_only(250);
+        let pane = SiblingShares::reserve(&mut budget, false, 5);
+        assert_eq!(pane.of(0), MAX_SHARE_PER_SIBLING);
+        let list = SiblingShares::reserve(&mut budget, false, MAX_RESERVED_SIBLINGS + 1);
+        assert_eq!(list.of(0), 0);
+        let web = SiblingShares::reserve(&mut budget, true, 5);
+        assert_eq!(web.of(0), 0);
+    }
+
+    #[test]
+    fn a_short_budget_is_spread_evenly_and_fully_released() {
+        let mut budget = WalkBudget::nodes_only(8);
+        assert!(budget.admit());
+        // 7 free nodes over 3 children: 3, 2, 2.
+        let shares = SiblingShares::reserve(&mut budget, false, 3);
+        assert_eq!((0..3).map(|i| shares.of(i)).collect::<Vec<_>>(), [3, 2, 2]);
+    }
+
+    /// A deep first child, then a group whose two buttons sit one level down:
+    /// the group's share leaves room for both buttons.
+    #[test]
+    fn a_later_group_keeps_rows_for_its_nested_controls() {
+        let mut budget = WalkBudget::nodes_only(40);
+        assert!(budget.admit(), "sheet");
+        let sheet = SiblingShares::reserve(&mut budget, false, 2);
+        budget.release(sheet.of(0));
+        let mut deep = 0;
+        while budget.admit() {
+            deep += 1;
+        }
+        assert!(deep > 0, "the file list still gets the free nodes");
+        budget.release(sheet.of(1));
+        assert!(budget.admit(), "button group");
+        let group = SiblingShares::reserve(&mut budget, false, 2);
+        for button in 0..2 {
+            budget.release(group.of(button));
+            assert!(budget.admit(), "button {button}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3813,8 +4286,17 @@ fn format_node_line_inner(node: &AXNode, bounded: bool) -> String {
         parts.push_str(&format!(" ({})", sanitize_node_text(d, char_limit)));
     }
 
-    // Bracketed metadata block (identifier, help, actions).
-    if node.element_index.is_some() {
+    // Bracketed metadata block (identifier, help, actions). An unindexed row
+    // shows only its help, which a group kept for its help has no other way
+    // to show.
+    if node.element_index.is_none() {
+        if let Some(h) = &node.help {
+            parts.push_str(&format!(
+                " [help=\"{}\"]",
+                sanitize_node_text(h, char_limit)
+            ));
+        }
+    } else {
         let mut attrs: Vec<String> = Vec::new();
         if node.enabled == Some(false) {
             attrs.push("disabled".into());
@@ -3837,6 +4319,15 @@ fn format_node_line_inner(node: &AXNode, bounded: bool) -> String {
             .collect();
         if !shown.is_empty() {
             attrs.push(format!("actions=[{}]", shown.join(",")));
+        }
+        if !node.custom_actions.is_empty() {
+            let action_str = node
+                .custom_actions
+                .iter()
+                .map(|action| serde_json::to_string(&action.name).expect("string serialization"))
+                .collect::<Vec<_>>()
+                .join(",");
+            attrs.push(format!("custom_actions=[{}]", action_str));
         }
         if !attrs.is_empty() {
             parts.push_str(" [");
@@ -4027,6 +4518,9 @@ fn prune_echo_text_rows(
             continue;
         };
         let parent = &nodes[parent_index];
+        if parent.element_index.is_none() {
+            continue;
+        }
         let displayed_help = parent
             .element_index
             .is_some()
@@ -4108,7 +4602,15 @@ fn filter_tree(markdown: &str, query: &str) -> String {
 }
 
 fn filter_tree_pair(markdown: &str, search_markdown: &str, query: &str) -> String {
-    let needle = query.to_lowercase();
+    let lowercase = query.to_lowercase();
+    let mut alternatives: Vec<&str> = lowercase
+        .split('|')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if alternatives.is_empty() {
+        alternatives.push(&lowercase);
+    }
     let lines: Vec<&str> = markdown.lines().collect();
     let search_lines: Vec<&str> = search_markdown.lines().collect();
 
@@ -4132,7 +4634,10 @@ fn filter_tree_pair(markdown: &str, search_markdown: &str, query: &str) -> Strin
         current_ancestor[depth] = line;
 
         let search_line = search_lines.get(index).copied().unwrap_or(line);
-        if search_line.to_lowercase().contains(&needle) {
+        if alternatives
+            .iter()
+            .any(|needle| search_line.to_lowercase().contains(needle))
+        {
             for ancestor_depth in 0..depth {
                 let ancestor = current_ancestor[ancestor_depth];
                 if ancestor.is_empty() {
@@ -4194,12 +4699,165 @@ mod tests {
     }
     use std::cell::Cell;
 
+    /// Issue #4039: an unresolved scope reports how many top-level AXWindows
+    /// the SPI mapped to any CGWindowID, apart from how many there were.
+    #[test]
+    fn enumeration_counts_windows_and_mapped_windows_only() {
+        let mut enumeration = AXEnumerationSummary {
+            children_count: 3,
+            windows_count: 2,
+            union_count: 4,
+            ..AXEnumerationSummary::default()
+        };
+        enumeration.count_windows(&[
+            TopLevelCandidate::new("AXMenuBar", None),
+            TopLevelCandidate::new("AXWindow", Some(11)),
+            TopLevelCandidate::new("AXWindow", None),
+            TopLevelCandidate::new("AXSheet", Some(12)),
+        ]);
+        assert_eq!(
+            enumeration,
+            AXEnumerationSummary {
+                children_count: 3,
+                windows_count: 2,
+                union_count: 4,
+                ax_window_count: 2,
+                mapped_window_count: 1,
+            }
+        );
+    }
+
     #[test]
     fn querying_spliced_rows_keeps_ancestors_and_never_matches_offscreen_hints() {
         let md = "- [0] AXWindow \"Example\"\n  - [1] AXTable \"History\"\n    - (offscreen rows: 2; scroll the list, or pass query to search them)\n    - (11 inactive tabs omitted)\n    - [2] AXRow \"Message\"\n      - AXStaticText = \"needle\"\n  - [3] AXTextArea \"Compose\"\n";
         assert_eq!(filter_tree(md, "needle"), "- [0] AXWindow \"Example\"\n  - [1] AXTable \"History\"\n    - [2] AXRow \"Message\"\n      - AXStaticText = \"needle\"\n");
         assert_eq!(filter_tree(md, "scroll"), "");
         assert_eq!(filter_tree(md, "inactive tabs"), "");
+    }
+
+    #[test]
+    fn named_layout_groups_keep_their_row_and_unnamed_wrappers_collapse() {
+        for role in ["AXGroup", "AXScrollArea"] {
+            assert!(!collapse_layout_container(
+                role,
+                Some("Billing"),
+                None,
+                false
+            ));
+            assert!(!collapse_layout_container(
+                role,
+                None,
+                Some("Profile"),
+                false
+            ));
+            assert!(!collapse_layout_container(
+                role,
+                Some("  "),
+                Some("Billing"),
+                false
+            ));
+            // An unnamed group with its own value or help is content, not a
+            // wrapper.
+            assert!(!collapse_layout_container(role, None, None, true));
+            assert!(collapse_layout_container(role, None, None, false));
+            assert!(collapse_layout_container(
+                role,
+                Some(" "),
+                Some("\n\t"),
+                false
+            ));
+        }
+        assert!(!collapse_layout_container("AXButton", None, None, false));
+        assert!(!collapse_layout_container("AXWebArea", None, None, false));
+        assert!(is_layout_container("AXGroup") && is_layout_container("AXScrollArea"));
+        assert!(!is_layout_container("AXButton"));
+    }
+
+    #[test]
+    fn a_kept_group_is_addressable_only_by_an_action_of_its_own() {
+        let actions = |names: &[&str]| {
+            super::super::actions::split(names.iter().map(|n| (*n).to_owned()).collect())
+        };
+        // Web and SwiftUI sections advertise only menu and scroll actions:
+        // the group stays a display row, so an echoing text child keeps
+        // its own index (#7780).
+        for generic in [
+            &["AXShowMenu", "AXScrollToVisible"][..],
+            &["AXScrollUpByPage", "AXScrollDownByPage"][..],
+            &[][..],
+        ] {
+            assert!(layout_group_actions("AXGroup", true, actions(generic)).is_empty());
+            assert!(layout_group_actions("AXScrollArea", true, actions(generic)).is_empty());
+        }
+        let pressable = layout_group_actions("AXGroup", true, actions(&["AXPress", "AXShowMenu"]));
+        assert_eq!(pressable.standard, ["AXPress", "AXShowMenu"]);
+        let custom = layout_group_actions(
+            "AXGroup",
+            true,
+            actions(&["AXShowMenu", "Name:Pin List\nTarget:0x0\nSelector:(null)"]),
+        );
+        assert_eq!(custom.standard, ["AXShowMenu"]);
+        assert_eq!(custom.custom.len(), 1);
+        // A group kept for its help or value has no name to show as a
+        // display row, so it keeps its actions and its index.
+        let help_only = layout_group_actions("AXGroup", false, actions(&["AXShowMenu"]));
+        assert_eq!(help_only.standard, ["AXShowMenu"]);
+        // Other roles keep every action they advertise.
+        let menu_only = layout_group_actions("AXImage", true, actions(&["AXShowMenu"]));
+        assert_eq!(menu_only.standard, ["AXShowMenu"]);
+    }
+
+    #[test]
+    fn a_help_only_group_with_no_action_keeps_an_unindexed_row() {
+        for role in ["AXGroup", "AXScrollArea"] {
+            assert!(keeps_row(role, false, false, true));
+            assert!(!keeps_row(role, false, false, false));
+        }
+        // Help alone does not keep a row for another role's empty node.
+        assert!(!keeps_row("AXImage", false, false, true));
+        assert!(keeps_row("AXWindow", false, false, false));
+
+        let node = AXNode {
+            owned_row_label: None,
+            canonical: Default::default(),
+            element_index: None,
+            role: "AXGroup".into(),
+            title: None,
+            value: None,
+            description: None,
+            placeholder: None,
+            subrole: None,
+            identifier: Some("grp-help-only".into()),
+            help: Some("Swipe left to archive.".into()),
+            actions: vec![],
+            custom_actions: vec![],
+            element_ptr: 0,
+            depth: 1,
+            parent_element_index: None,
+            frame: None,
+            value_state: None,
+            value_description: None,
+            min_value: None,
+            max_value: None,
+            enabled: None,
+            selected: None,
+            url: None,
+            in_web_content: false,
+        };
+        assert_eq!(
+            format_node_line(&node),
+            "- AXGroup [help=\"Swipe left to archive.\"]"
+        );
+    }
+
+    #[test]
+    fn a_kept_named_group_spends_no_max_depth_budget() {
+        // A button at walk depth 3 under a named group stays within
+        // max_depth=3, as it did when the group collapsed.
+        assert_eq!(child_walk_depth("AXGroup", 3), 3);
+        assert_eq!(child_walk_depth("AXScrollArea", 3), 3);
+        assert_eq!(child_walk_depth("AXWindow", 2), 3);
+        assert_eq!(child_walk_depth("AXButton", 2), 3);
     }
 
     #[test]
@@ -4215,6 +4873,49 @@ mod tests {
             format_node_line(&node),
             "- [7] AXCheckBox \"Reset\" [disabled actions=[press]]"
         );
+    }
+
+    #[test]
+    fn a_custom_action_name_cannot_add_tree_rows() {
+        let node = AXNode {
+            owned_row_label: None,
+            canonical: Default::default(),
+            element_index: Some(4),
+            role: "AXCell".into(),
+            title: None,
+            value: None,
+            description: None,
+            placeholder: None,
+            subrole: None,
+            identifier: None,
+            help: None,
+            actions: vec!["AXPress".into()],
+            custom_actions: crate::ax::actions::split(vec![
+                "Name:Pin List\nTarget:0x0\nSelector:(null)".into(),
+                "Name:Move Down\nTarget:0x0\nSelector:(null)".into(),
+            ])
+            .custom,
+            element_ptr: 0,
+            depth: 0,
+            parent_element_index: None,
+            frame: None,
+            value_state: None,
+            value_description: None,
+            min_value: None,
+            max_value: None,
+            enabled: Some(true),
+            selected: None,
+            url: None,
+            in_web_content: false,
+        };
+        let rendered = format_node_line(&node);
+        assert_eq!(rendered.lines().count(), 1, "{rendered}");
+        assert!(rendered.contains("actions=[press]"), "{rendered}");
+        assert!(
+            rendered.contains("custom_actions=[\"Pin List\",\"Move Down\"]"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Selector"), "{rendered}");
     }
 
     #[test]
@@ -4389,6 +5090,34 @@ mod tests {
     }
 
     #[test]
+    fn an_unnamed_control_takes_its_title_element_text() {
+        let label = || Some(" Launch at login ".to_owned());
+        assert_eq!(
+            title_or_title_element(None, None, label).as_deref(),
+            Some("Launch at login")
+        );
+        assert_eq!(
+            title_or_title_element(Some(" "), Some(""), label).as_deref(),
+            Some("Launch at login")
+        );
+        assert_eq!(title_or_title_element(None, None, || None), None);
+        assert_eq!(
+            title_or_title_element(None, None, || Some("  ".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn a_named_control_never_reads_its_title_element() {
+        let unread = || -> Option<String> { panic!("AXTitleUIElement read for a named control") };
+        assert_eq!(
+            title_or_title_element(Some("Save"), None, unread).as_deref(),
+            Some("Save")
+        );
+        assert_eq!(title_or_title_element(None, Some("2"), unread), None);
+    }
+
+    #[test]
     fn wave_400b_window_chrome_names_are_mapped_and_read_lazily() {
         for (subrole, expected) in [
             ("AXCloseButton", "close button"),
@@ -4461,6 +5190,19 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
 
+    #[test]
+    fn link_url_is_read_only_for_links() {
+        assert!(role_exposes_link_url("AXLink"));
+        for role in [
+            "AXWebArea",
+            "AXButton",
+            "AXStaticText",
+            "AXImage",
+            "AXTextField",
+        ] {
+            assert!(!role_exposes_link_url(role), "{role}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4551,6 +5293,26 @@ mod lean_row_tests {
                 "- [12] AXStaticText = \"Inbox\"",
             ]
         );
+    }
+
+    #[test]
+    fn echo_text_under_an_unindexed_group_is_kept_as_the_target() {
+        let nodes = vec![
+            node("AXWindow", Some(0), Some("Harness"), None, &[]),
+            node("AXGroup", None, Some("scroll-tall"), None, &[]),
+            node("AXStaticText", Some(33), None, Some("top marker"), &[]),
+            node("AXStaticText", Some(34), None, Some("scroll-tall"), &[]),
+            node("AXStaticText", Some(35), None, Some("line 02"), &[]),
+        ];
+        let mut lines = vec![
+            (0, format_node_line(&nodes[0])),
+            (1, format_node_line(&nodes[1])),
+            (2, format_node_line(&nodes[2])),
+            (2, format_node_line(&nodes[3])),
+            (2, format_node_line(&nodes[4])),
+        ];
+        prune(&mut lines, &nodes);
+        assert_eq!(lines.len(), 5);
     }
 
     #[test]
@@ -4860,6 +5622,7 @@ mod lean_row_tests {
                 identifier: None,
                 help: None,
                 actions: vec!["AXRaise".into()],
+                custom_actions: vec![],
                 element_ptr: 0,
                 depth: 0,
                 parent_element_index: None,
@@ -4870,6 +5633,7 @@ mod lean_row_tests {
                 max_value: None,
                 enabled: Some(true),
                 selected: None,
+                url: None,
                 in_web_content: false,
             },
             AXNode {
@@ -4885,6 +5649,7 @@ mod lean_row_tests {
                 identifier: None,
                 help: None,
                 actions: vec![],
+                custom_actions: vec![],
                 element_ptr: 0,
                 depth: 1,
                 parent_element_index: Some(0),
@@ -4895,6 +5660,7 @@ mod lean_row_tests {
                 max_value: None,
                 enabled: None,
                 selected: None,
+                url: None,
                 in_web_content: false,
             },
             AXNode {
@@ -4910,6 +5676,7 @@ mod lean_row_tests {
                 identifier: None,
                 help: None,
                 actions: vec![],
+                custom_actions: vec![],
                 element_ptr: 0,
                 depth: 2,
                 parent_element_index: Some(0),
@@ -4920,6 +5687,7 @@ mod lean_row_tests {
                 max_value: None,
                 enabled: None,
                 selected: None,
+                url: None,
                 in_web_content: false,
             },
             AXNode {
@@ -4935,6 +5703,7 @@ mod lean_row_tests {
                 identifier: None,
                 help: None,
                 actions: vec![],
+                custom_actions: vec![],
                 element_ptr: 0,
                 depth: 2,
                 parent_element_index: Some(0),
@@ -4945,6 +5714,7 @@ mod lean_row_tests {
                 max_value: None,
                 enabled: None,
                 selected: None,
+                url: None,
                 in_web_content: false,
             },
             AXNode {
@@ -4960,6 +5730,7 @@ mod lean_row_tests {
                 identifier: None,
                 help: None,
                 actions: vec!["AXConfirm".into()],
+                custom_actions: vec![],
                 element_ptr: 0,
                 depth: 1,
                 parent_element_index: Some(0),
@@ -4970,6 +5741,7 @@ mod lean_row_tests {
                 max_value: None,
                 enabled: Some(true),
                 selected: None,
+                url: None,
                 in_web_content: false,
             },
         ];
@@ -5188,6 +5960,7 @@ mod selectable_row_tests {
             collection: 0,
             element: unsafe { RetainedElement::retain(0) },
             depth: 1,
+            walk_depth: 1,
             parent_index: None,
             parent_role: "AXGroup".into(),
             label_path: LabelPath::Inactive,

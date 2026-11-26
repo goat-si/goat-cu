@@ -105,6 +105,16 @@ impl Tool for TypeTextTool {
                 Ok(hwnd) => hwnd,
                 Err(error) => return ToolResult::error(error.to_string()),
             };
+            // Follow the user's foreground after the cursor wait.
+            let hwnd = match crate::desktop_target::after_cursor(
+                position_keyboard_cursor(&self.state, &args, hwnd, None),
+                crate::input::mouse::foreground_window,
+            )
+            .await
+            {
+                Ok(hwnd) => hwnd,
+                Err(error) => return ToolResult::error(error.to_string()),
+            };
             let text_len = text.chars().count();
             if args.get("element_token").is_none()
                 && args.get("x").is_none()
@@ -284,7 +294,7 @@ impl Tool for TypeTextTool {
         // Refuse known background drops before the final WM_CHAR path. WPF is
         // conditional: indexed text still has a working UIA ValuePattern route,
         // while unindexed text would be posted to the top-level and disappear.
-        if delivery == DeliveryMode::Background
+        if delivery.is_background()
             && (crate::input::delivery::would_be_silently_dropped(hwnd, EventKind::TextInput)
                 || (elem_idx.is_none() && crate::input::delivery::is_wpf_target_window(hwnd)))
         {

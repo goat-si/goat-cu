@@ -232,6 +232,19 @@ impl AxTreeSource for Fake {
         }
     }
     fn element_attribute(&self, e: &Handle, name: &str) -> Read<Handle> {
+        // Existing fixtures describe controls without a separate title element.
+        // A fixture that exercises this new lookup scripts it explicitly.
+        if name == "AXTitleUIElement"
+            && self
+                .state
+                .borrow()
+                .scripts
+                .front()
+                .map(|s| s.operation.as_str())
+                != Some(format!("element {} {name}", e.id).as_str())
+        {
+            return Read::Absent;
+        }
         match self.step(format!("element {} {name}", e.id)) {
             Reply::Element(Read::Known(id)) => Read::Known(self.handle(id)),
             Reply::Element(Read::Absent) => Read::Absent,
@@ -438,6 +451,7 @@ fn run_fake_inner(
         ledger.finish(),
         depth_truncated,
         None,
+        None,
     )
 }
 
@@ -478,7 +492,89 @@ const CONTENT: &str =
     "AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription";
 const FRAME: &str = "AXPosition,AXSize";
 const CONTROL: &str =
-    "AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected";
+    "AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL";
+
+#[test]
+fn title_element_labels_the_addressable_control() {
+    let source = Fake::new(
+        &[(1, 1, 1, &[]), (2, 2, 2, &[])],
+        vec![
+            step("timeout 1", Reply::Unit),
+            step("text 1 AXRole", Reply::Text(Read::Known("AXButton".into()))),
+            step(
+                &format!("batch 1 {CONTENT}"),
+                Reply::Batch(Ok(content(None))),
+            ),
+            step("value 1", Reply::Value(Ok(None))),
+            step(
+                "actions 1",
+                Reply::Actions(Read::Known(vec!["AXPress".into()])),
+            ),
+            step("element 1 AXTitleUIElement", Reply::Element(Read::Known(2))),
+            step("optional_timeout 2 set", Reply::Unit),
+            step(
+                "text 2 AXValue",
+                Reply::Text(Read::Known("Launch at login".into())),
+            ),
+            step(
+                &format!("batch 1 {CONTROL}"),
+                Reply::Batch(Ok(control_batch())),
+            ),
+            step("snapshot 1", Reply::Unit),
+            step("children 1", Reply::Children(Read::Absent)),
+        ],
+    );
+    let root = source.handle(1);
+    let result = run_fake(&source, &root, None, 10, WalkBudget::nodes_only(100), true);
+    drop(root);
+    source.assert_consumed();
+    source.assert_lifetimes(&[(1, 1)]);
+    assert_eq!(result.nodes[0].title.as_deref(), Some("Launch at login"));
+    assert_eq!(result.nodes[0].element_index, Some(0));
+}
+
+#[test]
+fn unknown_title_element_marks_the_walk_incomplete() {
+    let source = Fake::new(
+        &[(1, 1, 1, &[])],
+        vec![
+            step("timeout 1", Reply::Unit),
+            step("text 1 AXRole", Reply::Text(Read::Known("AXButton".into()))),
+            step(
+                &format!("batch 1 {CONTENT}"),
+                Reply::Batch(Ok(content(None))),
+            ),
+            step("value 1", Reply::Value(Ok(None))),
+            step(
+                "actions 1",
+                Reply::Actions(Read::Known(vec!["AXPress".into()])),
+            ),
+            step(
+                "element 1 AXTitleUIElement",
+                Reply::Element(Read::Unknown(
+                    super::super::tree_source::ReadFailure::WrongType,
+                )),
+            ),
+            step(
+                &format!("batch 1 {CONTROL}"),
+                Reply::Batch(Ok(control_batch())),
+            ),
+            step("children 1", Reply::Children(Read::Absent)),
+        ],
+    );
+    let root = source.handle(1);
+    let result = run_fake(&source, &root, None, 10, WalkBudget::nodes_only(100), true);
+    drop(root);
+    source.assert_consumed();
+    assert!(
+        result.nodes_skipped,
+        "an unreadable label must not yield a complete walk"
+    );
+    assert!(
+        result.nodes.iter().all(|node| node.element_index.is_none()),
+        "an unreadable identity must not be published"
+    );
+}
 
 // Baseline 36279fdc: a collapsed layout wrapper preserves document order,
 // addressable controls, display text and native emission credits.
@@ -505,6 +601,11 @@ fn representative_window_markdown_and_nodes_are_pinned() {
             step("children 1", Reply::Children(Read::Known(vec![2]))),
             step("timeout 2", Reply::Unit),
             step("text 2 AXRole", Reply::Text(Read::Known("AXGroup".into()))),
+            step(
+                &format!("batch 2 {CONTENT}"),
+                Reply::Batch(Ok(content(None))),
+            ),
+            step("value 2", Reply::Value(Ok(None))),
             step("children 2", Reply::Children(Read::Known(vec![3, 4, 5]))),
             step("timeout 3", Reply::Unit),
             step("text 3 AXRole", Reply::Text(Read::Known("AXButton".into()))),
@@ -576,8 +677,55 @@ fn representative_window_markdown_and_nodes_are_pinned() {
         "AXNode { owned_row_label: None, element_index: Some(1), role: \"AXTextField\", title: Some(\"Name\"), value: Some(\"Ada\"), description: None, identifier: None, help: None, actions: [], element_ptr: 5, depth: 1, parent_element_index: None, frame: None, value_state: Some(\"Ada\"), value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }",
     ]);
     assert_eq!(source.trace(), [
-        "adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXPosition,AXSize", "children 1", "adopt 2", "timeout 2", "text 2 AXRole", "children 2", "adopt 3", "adopt 4", "adopt 5", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 3", "children 3", "release 3", "timeout 4", "text 4 AXRole", "batch 4 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 4", "actions 4", "batch 4 AXPosition,AXSize", "children 4", "release 4", "timeout 5", "text 5 AXRole", "batch 5 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 5", "actions 5", "value_settable 5", "batch 5 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 5", "children 5", "release 5", "release 2", "release 1",
+        "adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXPosition,AXSize", "children 1", "adopt 2", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "children 2", "adopt 3", "adopt 4", "adopt 5", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 3", "children 3", "release 3", "timeout 4", "text 4 AXRole", "batch 4 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 4", "actions 4", "batch 4 AXPosition,AXSize", "children 4", "release 4", "timeout 5", "text 5 AXRole", "batch 5 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 5", "actions 5", "value_settable 5", "batch 5 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 5", "children 5", "release 5", "release 2", "release 1",
     ]);
+}
+
+#[test]
+fn named_group_is_visible_without_consuming_walk_depth_or_an_index() {
+    let source = Fake::new(
+        &[(1, 1, 1, &[2]), (2, 2, 2, &[])],
+        vec![
+            step("timeout 1", Reply::Unit),
+            step("text 1 AXRole", Reply::Text(Read::Known("AXGroup".into()))),
+            step(
+                &format!("batch 1 {CONTENT}"),
+                Reply::Batch(Ok(content(Some("Billing")))),
+            ),
+            step("value 1", Reply::Value(Ok(None))),
+            step("actions 1", Reply::Actions(Read::Known(vec![]))),
+            step("children 1", Reply::Children(Read::Known(vec![2]))),
+            step("timeout 2", Reply::Unit),
+            step("text 2 AXRole", Reply::Text(Read::Known("AXButton".into()))),
+            step(
+                &format!("batch 2 {CONTENT}"),
+                Reply::Batch(Ok(content(Some("Save")))),
+            ),
+            step("value 2", Reply::Value(Ok(None))),
+            step(
+                "actions 2",
+                Reply::Actions(Read::Known(vec!["AXPress".into()])),
+            ),
+            step(
+                &format!("batch 2 {CONTROL}"),
+                Reply::Batch(Ok(control_batch())),
+            ),
+            step("snapshot 2", Reply::Unit),
+            step("children 2", Reply::Children(Read::Absent)),
+        ],
+    );
+    let root = source.handle(1);
+    let result = run_fake(&source, &root, None, 0, WalkBudget::nodes_only(20), true);
+    drop(root);
+    source.assert_consumed();
+    source.assert_lifetimes(&[(2, 1)]);
+    assert_eq!(
+        result.tree_markdown,
+        "- AXGroup \"Billing\"\n  - [0] AXButton \"Save\" [actions=[press]]\n"
+    );
+    assert_eq!(result.nodes[0].element_index, None);
+    assert_eq!(result.nodes[1].element_index, Some(0));
+    assert!(!result.truncated);
 }
 
 pub(super) fn closed_menu_fixture() -> TreeWalkResult {
@@ -764,7 +912,7 @@ fn collapsed_menu_keeps_legacy_skip() {
             "AXNode { owned_row_label: None, element_index: Some(0), role: \"AXMenuBarItem\", title: Some(\"File\"), value: None, description: None, identifier: None, help: None, actions: [\"AXPress\"], element_ptr: 1, depth: 0, parent_element_index: None, frame: None, value_state: None, value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }",
         ]);
         assert_eq!(source.trace(), [
-            "adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 1", "bool 1 AXSelected", "release 1",
+            "adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 1", "bool 1 AXSelected", "release 1",
         ]);
     }
 }
@@ -842,7 +990,7 @@ fn open_menu_case(collapse: bool, selected: bool, expected_trace: &[&str]) {
 #[test]
 fn selected_open_menu_is_walked() {
     open_menu_case(true, true, &[
-        "adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 1", "bool 1 AXSelected", "children 1", "adopt 2", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 2", "children 2", "release 2", "release 1",
+        "adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 1", "bool 1 AXSelected", "children 1", "adopt 2", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 2", "children 2", "release 2", "release 1",
     ]);
 }
 
@@ -850,7 +998,7 @@ fn selected_open_menu_is_walked() {
 #[test]
 fn expanded_menu_request_walks_closed_items() {
     open_menu_case(false, false, &[
-        "adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 1", "children 1", "adopt 2", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 2", "children 2", "release 2", "release 1",
+        "adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 1", "children 1", "adopt 2", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 2", "children 2", "release 2", "release 1",
     ]);
 }
 // Baseline 36279fdc: the first admission starts the clock and a zero timeout
@@ -1022,7 +1170,7 @@ fn secure_fields_never_request_axvalue() {
                 .collect::<Vec<_>>(),
             [expected_node]
         );
-        assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "actions 1", "value_settable 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 1", "children 1", "release 1"]);
+        assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "actions 1", "value_settable 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 1", "children 1", "release 1"]);
     }
 }
 
@@ -1066,7 +1214,7 @@ fn unknown_security_evidence_never_requests_axvalue() {
         assert_eq!(result.nodes.iter().map(|node| format!("{node:?}")).collect::<Vec<_>>(), [
             "AXNode { owned_row_label: None, element_index: Some(0), role: \"AXTextField\", title: Some(\"Secret\"), value: None, description: None, identifier: None, help: None, actions: [], element_ptr: 1, depth: 0, parent_element_index: None, frame: None, value_state: None, value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }",
         ]);
-        assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "actions 1", "value_settable 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 1", "children 1", "release 1"]);
+        assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "actions 1", "value_settable 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 1", "children 1", "release 1"]);
     }
     let source = Fake::new(
         &[(1, 1, 1, &[])],
@@ -1117,7 +1265,7 @@ fn unknown_security_evidence_never_requests_axvalue() {
     assert!(result.nodes_skipped && !result.truncated);
     assert_eq!(result.tree_markdown, "- [0] AXTextField \"Secret\"\n");
     assert_eq!(result.nodes.iter().map(|node| format!("{node:?}")).collect::<Vec<_>>(), ["AXNode { owned_row_label: None, element_index: Some(0), role: \"AXTextField\", title: Some(\"Secret\"), value: None, description: None, identifier: None, help: None, actions: [], element_ptr: 1, depth: 0, parent_element_index: None, frame: None, value_state: None, value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }"]);
-    assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "status 1 AXTitle", "status 1 AXPlaceholderValue", "status 1 AXDescription", "status 1 AXIdentifier", "status 1 AXHelp", "status 1 AXSubrole", "status 1 AXRoleDescription", "actions 1", "value_settable 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 1", "children 1", "release 1"]);
+    assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "status 1 AXTitle", "status 1 AXPlaceholderValue", "status 1 AXDescription", "status 1 AXIdentifier", "status 1 AXHelp", "status 1 AXSubrole", "status 1 AXRoleDescription", "actions 1", "value_settable 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 1", "children 1", "release 1"]);
 }
 
 // Baseline 36279fdc: web exclusion stops at its role, notes a skip and keeps
@@ -1176,7 +1324,7 @@ fn web_content_exclusion_preserves_legacy_skip() {
         "AXNode { owned_row_label: None, element_index: None, role: \"AXWindow\", title: Some(\"Window\"), value: None, description: None, identifier: None, help: None, actions: [], element_ptr: 1, depth: 0, parent_element_index: None, frame: None, value_state: None, value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }",
         "AXNode { owned_row_label: None, element_index: Some(0), role: \"AXButton\", title: Some(\"Back\"), value: None, description: None, identifier: None, help: None, actions: [\"AXPress\"], element_ptr: 2, depth: 1, parent_element_index: None, frame: None, value_state: None, value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }",
     ]);
-    assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXPosition,AXSize", "children 1", "adopt 2", "adopt 3", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 2", "children 2", "release 2", "timeout 3", "text 3 AXRole", "release 3", "release 1"]);
+    assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXPosition,AXSize", "children 1", "adopt 2", "adopt 3", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 2", "children 2", "release 2", "timeout 3", "text 3 AXRole", "release 3", "release 1"]);
 }
 
 // Baseline 36279fdc: listed generic failures for description and identifier
@@ -1259,6 +1407,11 @@ fn node_budget_cut_preserves_pending_counts() {
         vec![
             step("timeout 1", Reply::Unit),
             step("text 1 AXRole", Reply::Text(Read::Known("AXGroup".into()))),
+            step(
+                &format!("batch 1 {CONTENT}"),
+                Reply::Batch(Ok(content(None))),
+            ),
+            step("value 1", Reply::Value(Ok(None))),
             step("children 1", Reply::Children(Read::Known(vec![2, 3, 4]))),
             step("timeout 2", Reply::Unit),
             step("text 2 AXRole", Reply::Text(Read::Known("AXButton".into()))),
@@ -1293,7 +1446,7 @@ fn node_budget_cut_preserves_pending_counts() {
     assert_eq!(result.nodes.iter().map(|node| format!("{node:?}")).collect::<Vec<_>>(), [
         "AXNode { owned_row_label: None, element_index: Some(0), role: \"AXButton\", title: Some(\"Run\"), value: None, description: None, identifier: None, help: None, actions: [\"AXPress\"], element_ptr: 2, depth: 0, parent_element_index: None, frame: None, value_state: None, value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }",
     ]);
-    assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "children 1", "adopt 2", "adopt 3", "adopt 4", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 2", "children 2", "release 2", "release 3", "release 4", "release 1"]);
+    assert_eq!(source.trace(), ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "children 1", "adopt 2", "adopt 3", "adopt 4", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 2", "children 2", "release 2", "release 3", "release 4", "release 1"]);
     assert_deferred_budget();
 }
 
@@ -1720,7 +1873,7 @@ fn assert_dense_result(result: &TreeWalkResult, search: bool) {
 fn deferred_rows_keep_order_indices_parents_and_labels() {
     let (result, trace) = dense_case(false, false);
     assert_dense_result(&result, false);
-    assert_eq!(trace, ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 1", "children 1", "adopt 2", "adopt 3", "adopt 4", "set 1 AXRows", "set 1 AXVisibleRows", "contains 2 [2, 4]", "contains 2 [2]", "contains 3 [2, 4]", "contains 4 [2, 4]", "contains 4 [2]", "retain 2", "release 2", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 3", "children 3", "release 3", "retain 4", "release 4", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 2", "children 2", "adopt 5", "timeout 5", "text 5 AXRole", "batch 5 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 5", "actions 5", "batch 5 AXPosition,AXSize", "children 5", "release 5", "release 2", "release 4", "release 1"]);
+    assert_eq!(trace, ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 1", "children 1", "adopt 2", "adopt 3", "adopt 4", "set 1 AXRows", "set 1 AXVisibleRows", "contains 2 [2, 4]", "contains 2 [2]", "contains 3 [2, 4]", "contains 4 [2, 4]", "contains 4 [2]", "retain 2", "release 2", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 3", "children 3", "release 3", "retain 4", "release 4", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 2", "children 2", "adopt 5", "timeout 5", "text 5 AXRole", "batch 5 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 5", "actions 5", "batch 5 AXPosition,AXSize", "children 5", "release 5", "release 2", "release 4", "release 1"]);
 }
 
 // Baseline 36279fdc: a query also walks offscreen deferred rows while
@@ -1729,7 +1882,7 @@ fn deferred_rows_keep_order_indices_parents_and_labels() {
 fn query_walks_deferred_offscreen_rows() {
     let (result, trace) = dense_case(true, false);
     assert_dense_result(&result, true);
-    assert_eq!(trace, ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 1", "children 1", "adopt 2", "adopt 3", "adopt 4", "set 1 AXRows", "set 1 AXVisibleRows", "contains 2 [2, 4]", "contains 2 [2]", "contains 3 [2, 4]", "contains 4 [2, 4]", "contains 4 [2]", "retain 2", "release 2", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 3", "children 3", "release 3", "retain 4", "release 4", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 2", "children 2", "adopt 5", "timeout 5", "text 5 AXRole", "batch 5 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 5", "actions 5", "batch 5 AXPosition,AXSize", "children 5", "release 5", "timeout 4", "text 4 AXRole", "batch 4 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 4", "actions 4", "batch 4 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 4", "children 4", "release 2", "release 4", "release 1"]);
+    assert_eq!(trace, ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 1", "children 1", "adopt 2", "adopt 3", "adopt 4", "set 1 AXRows", "set 1 AXVisibleRows", "contains 2 [2, 4]", "contains 2 [2]", "contains 3 [2, 4]", "contains 4 [2, 4]", "contains 4 [2]", "retain 2", "release 2", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 3", "children 3", "release 3", "retain 4", "release 4", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 2", "children 2", "adopt 5", "timeout 5", "text 5 AXRole", "batch 5 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 5", "actions 5", "batch 5 AXPosition,AXSize", "children 5", "release 5", "timeout 4", "text 4 AXRole", "batch 4 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 4", "actions 4", "batch 4 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 4", "children 4", "release 2", "release 4", "release 1"]);
 }
 
 // Baseline 36279fdc: CFHash buckets plus CFEqual accept distinct proxies
@@ -1738,7 +1891,7 @@ fn query_walks_deferred_offscreen_rows() {
 fn dense_visibility_uses_ax_identity() {
     let (result, trace) = dense_case(false, true);
     assert_dense_result(&result, false);
-    assert_eq!(trace, ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 1", "children 1", "adopt 2", "adopt 3", "adopt 4", "set 1 AXRows", "set 1 AXVisibleRows", "contains 2 [20, 40]", "contains 2 [20]", "contains 3 [20, 40]", "contains 4 [20, 40]", "contains 4 [20]", "retain 2", "release 2", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 3", "children 3", "release 3", "retain 4", "release 4", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 2", "children 2", "adopt 5", "timeout 5", "text 5 AXRole", "batch 5 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 5", "actions 5", "batch 5 AXPosition,AXSize", "children 5", "release 5", "release 2", "release 4", "release 1"]);
+    assert_eq!(trace, ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 1", "children 1", "adopt 2", "adopt 3", "adopt 4", "set 1 AXRows", "set 1 AXVisibleRows", "contains 2 [20, 40]", "contains 2 [20]", "contains 3 [20, 40]", "contains 4 [20, 40]", "contains 4 [20]", "retain 2", "release 2", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 3", "children 3", "release 3", "retain 4", "release 4", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 2", "children 2", "adopt 5", "timeout 5", "text 5 AXRole", "batch 5 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 5", "actions 5", "batch 5 AXPosition,AXSize", "children 5", "release 5", "release 2", "release 4", "release 1"]);
 }
 fn row_fixture(nested: bool, two_texts: bool) -> (TreeWalkResult, Vec<String>) {
     let node3_role = if nested { "AXRow" } else { "AXCell" };
@@ -1877,7 +2030,7 @@ fn flat_row_and_direct_cell_keep_owned_text() {
         "AXNode { owned_row_label: Some(Some(\"Alpha\")), element_index: None, role: \"AXCell\", title: Some(\"Cell\"), value: None, description: None, identifier: None, help: None, actions: [], element_ptr: 3, depth: 2, parent_element_index: Some(0), frame: None, value_state: None, value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }",
         "AXNode { owned_row_label: None, element_index: None, role: \"AXStaticText\", title: None, value: Some(\"Alpha\"), description: None, identifier: None, help: None, actions: [], element_ptr: 4, depth: 3, parent_element_index: Some(0), frame: None, value_state: None, value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }",
     ]);
-    assert_eq!(trace, ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXPosition,AXSize", "children 1", "adopt 2", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "selected_settable 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 2", "children 2", "adopt 3", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXPosition,AXSize", "children 3", "adopt 4", "timeout 4", "text 4 AXRole", "batch 4 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 4", "actions 4", "batch 4 AXPosition,AXSize", "children 4", "release 4", "release 3", "release 2", "release 1"]);
+    assert_eq!(trace, ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXPosition,AXSize", "children 1", "adopt 2", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "selected_settable 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 2", "children 2", "adopt 3", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXPosition,AXSize", "children 3", "adopt 4", "timeout 4", "text 4 AXRole", "batch 4 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 4", "actions 4", "batch 4 AXPosition,AXSize", "children 4", "release 4", "release 3", "release 2", "release 1"]);
 }
 
 // Baseline 36279fdc: a nested outline row opens its own label path; its text
@@ -1893,7 +2046,7 @@ fn nested_outline_row_does_not_label_outer_row() {
         "AXNode { owned_row_label: Some(Some(\"Inner\")), element_index: Some(1), role: \"AXRow\", title: None, value: None, description: None, identifier: None, help: None, actions: [\"AXPress\"], element_ptr: 3, depth: 2, parent_element_index: Some(0), frame: None, value_state: None, value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }",
         "AXNode { owned_row_label: None, element_index: None, role: \"AXStaticText\", title: None, value: Some(\"Inner\"), description: None, identifier: None, help: None, actions: [], element_ptr: 4, depth: 3, parent_element_index: Some(1), frame: None, value_state: None, value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }",
     ]);
-    assert_eq!(trace, ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXPosition,AXSize", "children 1", "adopt 2", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "selected_settable 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 2", "children 2", "adopt 3", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 3", "children 3", "adopt 4", "timeout 4", "text 4 AXRole", "batch 4 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 4", "actions 4", "batch 4 AXPosition,AXSize", "children 4", "release 4", "release 3", "release 2", "release 1"]);
+    assert_eq!(trace, ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXPosition,AXSize", "children 1", "adopt 2", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "selected_settable 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 2", "children 2", "adopt 3", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 3", "children 3", "adopt 4", "timeout 4", "text 4 AXRole", "batch 4 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 4", "actions 4", "batch 4 AXPosition,AXSize", "children 4", "release 4", "release 3", "release 2", "release 1"]);
 }
 
 // Baseline 36279fdc: the folding sentinel protects the unindexed cell and
@@ -1910,7 +2063,7 @@ fn unindexed_cell_survives_owned_item_folding() {
         "AXNode { owned_row_label: None, element_index: None, role: \"AXStaticText\", title: None, value: Some(\"Alpha\"), description: None, identifier: None, help: None, actions: [], element_ptr: 4, depth: 3, parent_element_index: Some(0), frame: None, value_state: None, value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }",
         "AXNode { owned_row_label: None, element_index: None, role: \"AXStaticText\", title: None, value: Some(\"Beta\"), description: None, identifier: None, help: None, actions: [], element_ptr: 5, depth: 3, parent_element_index: Some(0), frame: None, value_state: None, value_description: None, min_value: None, max_value: None, enabled: None, selected: None, in_web_content: false }",
     ]);
-    assert_eq!(trace, ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXPosition,AXSize", "children 1", "adopt 2", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "selected_settable 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected", "snapshot 2", "children 2", "adopt 3", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXPosition,AXSize", "children 3", "adopt 4", "adopt 5", "timeout 4", "text 4 AXRole", "batch 4 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 4", "actions 4", "batch 4 AXPosition,AXSize", "children 4", "release 4", "timeout 5", "text 5 AXRole", "batch 5 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 5", "actions 5", "batch 5 AXPosition,AXSize", "children 5", "release 5", "release 3", "release 2", "release 1"]);
+    assert_eq!(trace, ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "actions 1", "batch 1 AXPosition,AXSize", "children 1", "adopt 2", "timeout 2", "text 2 AXRole", "batch 2 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 2", "actions 2", "selected_settable 2", "batch 2 AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL", "snapshot 2", "children 2", "adopt 3", "timeout 3", "text 3 AXRole", "batch 3 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 3", "actions 3", "batch 3 AXPosition,AXSize", "children 3", "adopt 4", "adopt 5", "timeout 4", "text 4 AXRole", "batch 4 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 4", "actions 4", "batch 4 AXPosition,AXSize", "children 4", "release 4", "timeout 5", "text 5 AXRole", "batch 5 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 5", "actions 5", "batch 5 AXPosition,AXSize", "children 5", "release 5", "release 3", "release 2", "release 1"]);
 }
 // Baseline 36279fdc: a large generic container without visibility lists
 // reads child frames, lazily reads its surface once, and summarizes all 50.
@@ -1921,6 +2074,11 @@ pub(super) fn large_container_fixture() -> TreeWalkResult {
     let mut script = vec![
         step("timeout 1", Reply::Unit),
         step("text 1 AXRole", Reply::Text(Read::Known("AXGroup".into()))),
+        step(
+            &format!("batch 1 {CONTENT}"),
+            Reply::Batch(Ok(content(None))),
+        ),
+        step("value 1", Reply::Value(Ok(None))),
         step("children 1", Reply::Children(Read::Known(ids.clone()))),
         step("text 1 AXTitle", Reply::Text(Read::Absent)),
         step("text 1 AXDescription", Reply::Text(Read::Absent)),
@@ -1985,8 +2143,8 @@ pub(super) fn large_container_fixture() -> TreeWalkResult {
     );
     let trace = source.trace();
     assert_eq!(
-        &trace[..4],
-        ["adopt 1", "timeout 1", "text 1 AXRole", "children 1"]
+        &trace[..6],
+        ["adopt 1", "timeout 1", "text 1 AXRole", "batch 1 AXTitle,AXPlaceholderValue,AXDescription,AXIdentifier,AXHelp,AXSubrole,AXRoleDescription", "value 1", "children 1"]
     );
     assert_eq!(
         trace
@@ -2011,7 +2169,7 @@ pub(super) fn large_container_fixture() -> TreeWalkResult {
         101
     );
     assert_eq!(
-        &trace[207..211],
+        &trace[209..213],
         [
             "timeout 2",
             "batch 2 AXPosition,AXSize",

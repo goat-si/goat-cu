@@ -76,6 +76,7 @@ fn paired(search: bool, verify: bool) -> (Value, Value, Vec<Content>, Vec<Conten
 fn view(payload: &mut Value, content: &mut [Content], args: Value) {
     let options = ViewOptions::from_args(&args).expect("view options");
     let context = ViewContext {
+        session: None,
         pid: 42,
         window_id: 99,
         key: ViewKey {

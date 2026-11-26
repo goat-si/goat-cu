@@ -68,6 +68,10 @@ impl Tool for StartRecordingTool {
                 `redact_values` lists secrets the session will type (for example a password): each occurrence in \
                 a turn's text files is replaced with `[redacted]`, and such turns are not replayed.\n\
                 \n\
+                `session.json` records `started_at_unix_ms`, the wall-clock start in Unix \
+                epoch milliseconds; `started_at_monotonic_ms` is the same value for older \
+                readers, not a monotonic clock reading.\n\
+                \n\
                 Video is off by default. `record_video:true` also records the main display to \
                 `<output_dir>/recording.mp4` (H.264, 30 fps, no audio) until the client disconnects: on macOS \
                 15+ with ScreenCaptureKit under the daemon's Screen Recording grant (macOS 26 may ask once for \
@@ -128,12 +132,7 @@ impl Tool for StartRecordingTool {
                             The values are held in memory only, never written, and cleared \
                             when recording stops. Screenshots and video are not altered."
                     },
-                    "session": {
-                        "type": "string",
-                        "description": "For multi-call work, prefer a short public session label \
-                            and repeat it on every call that accepts it. Omit it to use the \
-                            authenticated transport's implicit lifecycle session."
-                    }
+                    "session": crate::tool_schema::session_schema()
                 },
                 "additionalProperties": false
             }),

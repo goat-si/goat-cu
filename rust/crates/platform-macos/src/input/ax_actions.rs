@@ -444,6 +444,10 @@ pub struct SelectionReadback {
 }
 
 impl SelectionReadback {
+    pub(crate) fn target_ptr(&self) -> usize {
+        self.target as usize
+    }
+
     pub fn role(&self) -> &str {
         &self.role
     }
@@ -783,7 +787,21 @@ fn display_action_name(action: &str) -> String {
 }
 
 pub fn background_action_may_front(action: &str) -> bool {
-    action_key(action) == "raise"
+    let name = custom_action_display_name(action).unwrap_or(action);
+    let key: String = action_key(name)
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
+    [
+        "raise",
+        "activate",
+        "front",
+        "focuswindow",
+        "focusapp",
+        "switchwindow",
+    ]
+    .iter()
+    .any(|part| key.contains(part))
 }
 
 #[derive(Debug)]
@@ -828,7 +846,15 @@ pub fn resolve_element_action<'a>(
         ));
     }
     match match_advertised_action(requested, advertised) {
-        AdvertisedActionMatch::Matched(action) => return Ok(action),
+        AdvertisedActionMatch::Matched(action) => {
+            if !foreground && background_action_may_front(action) {
+                return Err(element_action_refusal(
+                    "background_unavailable",
+                    format!("refusing {requested}: the advertised action fronts the target window. Retry with delivery_mode:\"foreground\" only if the user allows it"),
+                ));
+            }
+            return Ok(action);
+        }
         AdvertisedActionMatch::Ambiguous => {
             return Err(element_action_refusal(
                 "ambiguous",
@@ -1071,6 +1097,35 @@ pub fn click_element_center_for_focus(
     )
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("the addressed element did not acquire keyboard focus; no key was dispatched")]
+pub struct KeyFocusUnconfirmed;
+
+/// Focus `target` and confirm it holds keyboard focus before `dispatch` runs.
+/// A target whose focus is not confirmed within 200ms fails with
+/// [`KeyFocusUnconfirmed`] and nothing is dispatched; `None` dispatches as is.
+pub fn with_confirmed_key_focus<T>(
+    target: Option<usize>,
+    mut focus: impl FnMut(usize) -> anyhow::Result<()>,
+    mut is_focused: impl FnMut(usize) -> bool,
+    dispatch: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    if let Some(target) = target {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        loop {
+            focus(target)?;
+            if is_focused(target) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(KeyFocusUnconfirmed.into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    dispatch()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1151,6 +1206,22 @@ mod tests {
             element_action_refusal_code(&focus),
             Some("invalid_arguments")
         );
+    }
+
+    #[test]
+    fn background_custom_window_activation_is_refused() {
+        for raw in [
+            "AXActivate",
+            "Name:Raise Window\nTarget:0x0\nSelector:(null)",
+            "Name:Activate App\nTarget:0x0\nSelector:(null)",
+        ] {
+            let advertised = vec![raw.to_owned()];
+            let result = resolve_element_action(raw, &advertised, false);
+            assert!(
+                result.is_err(),
+                "background action must not activate: {raw}"
+            );
+        }
     }
 
     #[test]

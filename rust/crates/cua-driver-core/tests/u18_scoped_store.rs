@@ -84,7 +84,10 @@ fn scoped_snapshot_does_not_replace_full_and_is_retired_with_parent() {
     store.set_zoom(42, Some("owner"), zoom).unwrap();
     let capture = root(&store, &token_for(parent, 1));
     let scoped = commit(&store, capture, Payload(vec![77])).unwrap();
-    assert_eq!(store.with_latest(42, 7, |id, _| id), Some(parent));
+    assert_eq!(
+        store.with_latest(42, 7, Some("owner"), |id, _| id),
+        Some(parent)
+    );
     assert_eq!(store.zoom(42, Some(7), Some("owner")).unwrap(), zoom);
     assert_eq!(
         store
@@ -95,7 +98,10 @@ fn scoped_snapshot_does_not_replace_full_and_is_retired_with_parent() {
     );
     let args = json!({"element_token":token_for(scoped, 0), "_session_id":"owner"});
     assert_eq!(store.pid_for_token(&args), Some(42));
-    assert_eq!(store.window_for_snapshot(42, scoped), Some(7));
+    assert_eq!(
+        store.window_for_snapshot(42, scoped, Some("owner")),
+        Some(7)
+    );
     assert!(store.resolve(42, &args).is_err());
     let foreign = json!({"element_token":token_for(scoped, 0), "_session_id":"other"});
     assert_eq!(store.pid_for_token(&foreign), None);
@@ -214,7 +220,7 @@ fn rooted_capture_requires_snapshot_ownership_and_live_process() {
 fn scoped_commit_and_cancellation_do_not_supersede_full_capture_ticket() {
     let store = SnapshotStore::new();
     let parent = full(&store);
-    let ticket = store.begin_capture(42, 7);
+    let ticket = store.begin_capture_for_session(42, 7, Some("owner"));
     drop(root(&store, &token_for(parent, 0)));
     let scope = root(&store, &token_for(parent, 1));
     commit(&store, scope, Payload(vec![2])).unwrap();
@@ -254,7 +260,10 @@ fn scoped_capacity_evicts_oldest_without_affecting_full_or_other_scopes() {
     assert!(!resolve(scopes[0]));
     assert!(resolve(scopes[1]));
     assert!(resolve(parent));
-    assert_eq!(store.with_latest(42, 7, |id, _| id), Some(parent));
+    assert_eq!(
+        store.with_latest(42, 7, Some("owner"), |id, _| id),
+        Some(parent)
+    );
 }
 
 #[test]
@@ -276,7 +285,10 @@ fn root_revalidation_is_outside_store_lock_and_preserves_nested_prefix() {
                 (*element, path, window, process.start_time),
                 (11, &[1][..], 7, Some(1))
             );
-            assert_eq!(store.with_latest(42, 7, |id, _| id), Some(parent));
+            assert_eq!(
+                store.with_latest(42, 7, Some("owner"), |id, _| id),
+                Some(parent)
+            );
             Ok(*element)
         })
         .unwrap();
@@ -299,7 +311,10 @@ fn root_revalidation_is_outside_store_lock_and_preserves_nested_prefix() {
     assert_eq!(nested.parent_snapshot_id(), parent);
     let nested_id = commit(&store, nested, Payload(vec![78])).unwrap();
     assert_ne!(nested_id, scope);
-    assert_eq!(store.with_latest(42, 7, |id, _| id), Some(parent));
+    assert_eq!(
+        store.with_latest(42, 7, Some("owner"), |id, _| id),
+        Some(parent)
+    );
 }
 
 #[test]
@@ -328,7 +343,10 @@ fn a_root_that_moved_vanished_or_changed_window_is_not_published() {
         let data = error.structured_content.unwrap();
         assert_eq!(data["refusal"]["code"], "stale_element_token");
         assert_eq!(data["refusal"]["message"], reason);
-        assert_eq!(store.with_latest(42, 7, |id, _| id), Some(parent));
+        assert_eq!(
+            store.with_latest(42, 7, Some("owner"), |id, _| id),
+            Some(parent)
+        );
     }
 }
 
@@ -345,11 +363,11 @@ fn all_full_retirement_paths_invalidate_derived_scope() {
         .unwrap();
         match action {
             "remove" => {
-                store.remove(42, 7);
+                store.remove(42, 7, Some("owner"));
             }
             "remove_for_capture" => {
-                let ticket = store.begin_capture(42, 7);
-                store.remove_for_capture(42, 7, &ticket);
+                let ticket = store.begin_capture_for_session(42, 7, Some("owner"));
+                store.remove_for_capture(42, 7, Some("owner"), &ticket);
             }
             "clear" => {
                 store.clear();
@@ -359,7 +377,9 @@ fn all_full_retirement_paths_invalidate_derived_scope() {
             }
             "lru" => {
                 for window in 100..108 {
-                    store.publish(42, window, Payload(vec![1]));
+                    store
+                        .publish_for_session(42, window, Payload(vec![1]), Some("owner"), None)
+                        .unwrap();
                 }
             }
             _ => unreachable!(),
@@ -397,7 +417,10 @@ fn incomplete_walk_is_diagnostics_only_and_never_publishes() {
     assert_eq!(data["observation_complete"], false);
     assert_eq!(data["drilldown_diagnostics"][0]["detail"], "node_budget");
     assert!(data.get("snapshot_id").is_none());
-    assert_eq!(store.with_latest(42, 7, |id, _| id), Some(parent));
+    assert_eq!(
+        store.with_latest(42, 7, Some("owner"), |id, _| id),
+        Some(parent)
+    );
 }
 
 #[test]
@@ -411,7 +434,7 @@ fn parent_retirement_during_the_walk_rejects_publication() {
                 store.retire_session_screenshots("owner");
             }
             "remove" => {
-                store.remove(42, 7);
+                store.remove(42, 7, Some("owner"));
             }
             "clear" => {
                 store.clear();
@@ -452,13 +475,21 @@ fn retired_session_cannot_publish_a_capture_after_same_name_is_reused() {
         Payload(vec![9]),
     )
     .unwrap();
-    // The full snapshot remains because a different session owns its frame.
-    store
+    // Another session owns its own snapshot and cannot refresh the owner's.
+    assert!(store
         .refresh_screenshot_for_session(42, 7, Some("other"), 1.0, None)
-        .unwrap();
+        .is_none());
+    let other = store
+        .publish_for_session(42, 7, Payload(vec![8]), Some("other"), Some(1.0))
+        .unwrap()
+        .0;
     let old = root(&store, &token_for(parent, 0));
     store.retire_session_screenshots("owner");
-    assert_eq!(store.with_latest(42, 7, |id, _| id), Some(parent));
+    assert_eq!(store.with_latest(42, 7, Some("owner"), |id, _| id), None);
+    assert_eq!(
+        store.with_latest(42, 7, Some("other"), |id, _| id),
+        Some(other)
+    );
     let args = json!({"element_token":token_for(old_scope, 0), "_session_id":"owner"});
     let error = store
         .resolve_for_instance(42, &args, InstanceEvidence::Live(fingerprint(1)))

@@ -238,7 +238,7 @@ pub fn session_disconnected() -> bool {
         let mut buffer = PWSTR::null();
         let mut bytes = 0u32;
         if WTSQuerySessionInformationW(
-            WTS_CURRENT_SERVER_HANDLE,
+            Some(WTS_CURRENT_SERVER_HANDLE),
             WTS_CURRENT_SESSION,
             WTSConnectState,
             &mut buffer,
@@ -375,6 +375,54 @@ pub fn is_non_interactive_error(err: &str) -> bool {
         || lower.contains("regdb_e_classnotreg")
         || lower.contains("class not registered")
         || lower.contains("not been initialized")
+}
+
+#[cfg(test)]
+mod stall_security_tests {
+    /// Source guard for the Windows-only key-stall diagnostic: neither UIA
+    /// password controls nor ES_PASSWORD edits may be read for field text.
+    /// This does not replace a Windows desktop test with real password fields.
+    #[test]
+    fn key_stall_diagnostic_does_not_read_focused_field_contents() {
+        let source = include_str!("input/keyboard.rs");
+        let section = |start: &str, end: &str| {
+            source
+                .split_once(start)
+                .unwrap()
+                .1
+                .split_once(end)
+                .unwrap()
+                .0
+        };
+        let stall = section("fn stall_detail(", "/// Block until the foreground thread");
+        let focus = section(
+            "fn gui_thread_active_and_focus(",
+            "/// Whether `foreground`",
+        );
+        let branch = section("Some(attachment) => {", "TypingTurn::Undrained");
+        let window = section("fn window_process_label(", "fn foreign_foreground_error(");
+        for body in [stall, focus, branch, window] {
+            for forbidden in [
+                "WM_GETTEXT",
+                "GetWindowText",
+                "CurrentValue",
+                "ValuePattern",
+                "IsPassword",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "stall diagnostic must not read field contents through {forbidden}"
+                );
+            }
+        }
+        assert!(branch.contains("GetForegroundWindow()"));
+        assert!(
+            !branch.contains("window_label("),
+            "the stall diagnostic must not include a window title that may contain field contents"
+        );
+        assert!(branch.contains("window_process_label(actual)"));
+        assert!(stall.contains("gui_thread_active_and_focus(target)"));
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]

@@ -26,7 +26,9 @@ mod visual;
 mod vocabulary;
 mod windows;
 pub use vocabulary::{Role, State};
+pub mod witness;
 pub use windows::*;
+pub use witness::*;
 
 pub(crate) fn schema_settings() -> SchemaSettings {
     SchemaSettings::draft2020_12()
@@ -55,12 +57,12 @@ pub use cursor::{
 pub use inputs::{
     ActionTarget, CaptureScope, ClickButton, ClickInput, ClickPosition, ClipboardReadInput,
     ClipboardWriteInput, CursorMotionSelection, DesktopScope, DragInput, EndSessionInput,
-    EscalateSessionInput, EscalationReason, GetAgentCursorStateInput, GetCursorPositionInput,
-    GetDesktopStateInput, GetScreenSizeInput, GetSessionInput, GetSessionStateInput, HotkeyInput,
-    InputDeliveryMode, InvokeMenuInput, LegacyClickInput, ListSessionsInput, MoveCursorInput,
-    PressKeyInput, ScrollBy, ScrollDirection, ScrollInput, SetAgentCursorEnabledInput,
-    SetAgentCursorMotionInput, SetAgentCursorThemeInput, SetWindowFrameInput, StartSessionInput,
-    ToolInput, TypeTextInput, MULTI_CALL_SESSION_DESCRIPTION,
+    GetAgentCursorStateInput, GetCursorPositionInput, GetDesktopStateInput, GetScreenSizeInput,
+    GetSessionInput, HotkeyInput, InputDeliveryMode, InvokeMenuInput, LegacyClickInput,
+    ListSessionsInput, MoveCursorInput, PressKeyInput, ScrollBy, ScrollDirection, ScrollInput,
+    SetAgentCursorEnabledInput, SetAgentCursorMotionInput, SetAgentCursorThemeInput,
+    SetWindowFrameInput, StartSessionInput, ToolInput, TypeTextInput,
+    MULTI_CALL_SESSION_DESCRIPTION,
 };
 pub use outputs::{
     advertised_output_schema, conforming_error_envelope, derive_error_disposition,
@@ -98,7 +100,7 @@ pub const TOOLS_LIST_SCHEMA_VERSION: &str = "1";
 pub const CAPABILITY_VERSION: &str = "1";
 
 /// Shape version for the checked-in generated client contract.
-pub const CONTRACT_VERSION: &str = "0.8.0";
+pub const CONTRACT_VERSION: &str = "0.9.0";
 
 /// Legacy version negotiated by `initialize.params.protocolVersion` and served
 /// by the loopback HTTP compatibility endpoint. Modern stdio discovery and
@@ -476,7 +478,7 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort_unstable();
         assert_eq!(names, sorted);
-        assert_eq!(manifest.contract_version, "0.8.0");
+        assert_eq!(manifest.contract_version, "0.9.0");
         assert!(manifest.experimental);
     }
 
@@ -592,7 +594,6 @@ mod tests {
 
         assert!(MULTI_CALL_SESSION_DESCRIPTION.contains("prefer a short public session label"));
         assert!(MULTI_CALL_SESSION_DESCRIPTION.contains("repeat it on every call that accepts it"));
-        assert!(MULTI_CALL_SESSION_DESCRIPTION.contains("implicit lifecycle session"));
     }
 
     #[test]
@@ -674,6 +675,25 @@ mod tests {
             contract.cursor_semantics.expect("cursor semantics").action,
             CursorAction::App
         );
+    }
+
+    #[test]
+    fn invoke_menu_discloses_background_save_automation_consent() {
+        let description = tool_contract("invoke_menu")
+            .expect("invoke_menu contract")
+            .description;
+        for phrase in [
+            "On macOS, a disabled Save (⌘S) in a background document window",
+            "known document path",
+            "scripting interface using Apple Events",
+            "without activating the app",
+            "per-app Automation consent",
+            "may show macOS’s first-use consent prompt",
+            "denied permission refuses the save",
+            "never falls back to pixels",
+        ] {
+            assert!(description.contains(phrase), "missing disclosure: {phrase}");
+        }
     }
 
     #[test]
@@ -811,8 +831,6 @@ mod tests {
                 "effective_scope",
                 "desktop_capture_authorized",
                 "desktop_unlocked",
-                "escalation_reason",
-                "escalation_detail",
                 "active",
                 "revived",
             ]

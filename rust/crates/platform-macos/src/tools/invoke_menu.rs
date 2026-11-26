@@ -18,9 +18,10 @@ use serde_json::Value;
 use std::time::Duration;
 
 use crate::ax::bindings::{
-    ax_get_window_id, copy_action_names, copy_ax_windows, copy_bool_attr, copy_children,
-    copy_element_attr, copy_string_attr, kAXErrorSuccess, perform_action, set_bool_attr_true,
-    AXError, AXUIElementCreateApplication, AXUIElementRef, AXUIElementSetMessagingTimeout,
+    ax_get_window_id, copy_action_names, copy_ax_windows, copy_ax_windows_including,
+    copy_bool_attr, copy_children, copy_element_attr, copy_string_attr, kAXErrorSuccess,
+    perform_action, set_bool_attr_true, AXError, AXUIElementCreateApplication, AXUIElementRef,
+    AXUIElementSetMessagingTimeout,
 };
 
 pub struct InvokeMenuTool;
@@ -470,6 +471,26 @@ fn focus_exact_window(pid: i32, window_id: u32) -> Result<(), String> {
     }
 }
 
+/// How `invoke_menu` reaches the menu of its target window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuRoute {
+    /// Make the window key, raise it, and open each menu level.
+    Foreground,
+    /// Resolve the path without opening a menu or raising the window.
+    Background,
+}
+
+/// The foreground route raises the target window, which for a window on
+/// another Space switches the user's Space (issue #4635). That window takes
+/// the background route even when its app is frontmost.
+fn menu_route(app_in_front: bool, window_on_current_space: Option<bool>) -> MenuRoute {
+    if app_in_front && window_on_current_space != Some(false) {
+        MenuRoute::Foreground
+    } else {
+        MenuRoute::Background
+    }
+}
+
 fn exact_window_is_ready(
     frontmost_pid: Option<i32>,
     target_pid: i32,
@@ -477,6 +498,21 @@ fn exact_window_is_ready(
     target_window_id: u32,
 ) -> bool {
     frontmost_pid == Some(target_pid) && focused_window_id == Some(target_window_id)
+}
+
+/// Whether invoke_menu puts the previously key window back after the call.
+/// Another application's window always comes back. Within the target app the
+/// requested window stays key once the command was dispatched: AppKit runs
+/// some menu actions after the press returns, against the key window then
+/// (TextEdit's File > Save), so re-keying a sibling would retarget them.
+fn restores_prior_window(
+    prior_pid: i32,
+    prior_window_id: Option<u32>,
+    target_pid: i32,
+    target_window_id: u32,
+    dispatched: bool,
+) -> bool {
+    prior_pid != target_pid || (!dispatched && prior_window_id != Some(target_window_id))
 }
 
 /// The item could not be invoked with its app in the background. Activating
@@ -808,24 +844,35 @@ fn held_window_enablement_error(
     }
 }
 
+/// `off_space`: WindowServer places the requested window on another Space.
+/// Foreground delivery takes the same route for that window (see
+/// [`menu_route`]), so the refusal names the Space and `bring_to_front`
+/// instead of advising `foreground`.
 fn unbound_menu_window(
     pid: i32,
     requested: u32,
     focused: Option<u32>,
     main: Option<u32>,
+    off_space: bool,
 ) -> ToolResult {
-    let focused = focused.map_or_else(|| "unknown".to_owned(), |id| id.to_string());
-    let main = main.map_or_else(|| "unknown".to_owned(), |id| id.to_string());
+    let mut reason = format!(
+        "invoke_menu: requested window {requested} is not the confirmed document menu context \
+         (focused={focused:?}, main={main:?}); no menu action was dispatched"
+    );
+    if off_space {
+        reason.push_str(&format!(
+            ". Window {requested} is on another Space, and making it the menu context would \
+             switch the user's Space. If the user allows it, call bring_to_front for this \
+             window first, then invoke_menu"
+        ));
+    }
     let mut result = super::background_refusal_result(
         pid,
         requested,
         &cua_driver_core::background_input::BackgroundRefusal {
             code: super::WINDOW_NOT_KEY,
-            reason: format!(
-                "invoke_menu: requested window {requested} is not the confirmed document menu context \
-                 (focused={focused}, main={main}); no menu action was dispatched"
-            ),
-            advice: Some("foreground"),
+            reason,
+            advice: (!off_space).then_some("foreground"),
         },
     );
     if let Some(structured) = result.structured_content.as_mut() {
@@ -1042,7 +1089,8 @@ fn document_path_of_window(pid: i32, window_id: u32) -> Option<std::path::PathBu
         }
         set_messaging_timeout(app);
         let mut url = None;
-        for window in copy_ax_windows(app) {
+        // `AXWindows` omits a window on another Space; the probe recovers it.
+        for window in copy_ax_windows_including(app, pid, window_id) {
             if url.is_none() && ax_get_window_id(window) == Some(window_id) {
                 url = copy_string_attr(window, "AXDocument");
             }
@@ -1262,7 +1310,14 @@ pub(super) async fn run_in_background_with_lease(
             requested,
             focused,
             main,
-        })) => unbound_menu_window(pid, requested, focused, main),
+        })) => {
+            let off_space = latency::spawn_action_blocking(move || {
+                crate::windows::window_on_current_space_by_id(requested) == Some(false)
+            })
+            .await
+            .unwrap_or(false);
+            unbound_menu_window(pid, requested, focused, main, off_space)
+        }
         Ok(Err(BackgroundPressError::Other(error))) => refusal(error),
         Ok(Err(BackgroundPressError::SentWithError(error))) => uncertain_dispatch(
             &preface,
@@ -1333,12 +1388,22 @@ pub(super) async fn run_in_background_with_lease(
 
 /// The refusal for a dispatch gate that failed: nothing was dispatched.
 fn gate_refusal(pid: i32, _window_id: u32, error: BackgroundPressError) -> ToolResult {
+    gate_refusal_with(pid, error, |requested| {
+        crate::windows::window_on_current_space_by_id(requested) == Some(false)
+    })
+}
+
+fn gate_refusal_with(
+    pid: i32,
+    error: BackgroundPressError,
+    off_space: impl FnOnce(u32) -> bool,
+) -> ToolResult {
     match error {
         BackgroundPressError::UnboundWindow {
             requested,
             focused,
             main,
-        } => unbound_menu_window(pid, requested, focused, main),
+        } => unbound_menu_window(pid, requested, focused, main, off_space(requested)),
         BackgroundPressError::Other(message) => refusal(message),
         _ => refusal("invoke_menu: the dispatch check refused; no menu action was sent".to_owned()),
     }
@@ -1652,21 +1717,23 @@ impl Tool for InvokeMenuTool {
         // A background target: invoke the item without activating the app or
         // raising its window. When macOS keeps the item unavailable to a
         // background app, refuse and say so instead of activating it.
-        let target_in_front = latency::spawn_action_blocking(move || {
-            live_frontmost_app().or_else(crate::apps::frontmost_pid) == Some(pid)
+        let route = latency::spawn_action_blocking(move || {
+            menu_route(
+                live_frontmost_app().or_else(crate::apps::frontmost_pid) == Some(pid),
+                crate::windows::window_on_current_space_by_id(window_id),
+            )
         })
         .await
-        .unwrap_or(false);
-        if !target_in_front {
+        .unwrap_or(MenuRoute::Background);
+        if route == MenuRoute::Background {
             return run_in_background(pid, window_id, path, MenuRequest::Path, KeyOwner::Direct)
                 .await;
         }
 
         let outcome = latency::spawn_action_blocking(move || {
             let prior_frontmost = live_frontmost_app().or_else(crate::apps::frontmost_pid);
-            let prior_frontmost_window = prior_frontmost.and_then(|prior| {
-                crate::ax::bindings::focused_window_id_of_pid(prior)
-            });
+            let prior_frontmost_window =
+                prior_frontmost.and_then(crate::ax::bindings::focused_window_id_of_pid);
             let needs_activation = prior_frontmost != Some(pid);
 
             let result = focus_exact_window(pid, window_id)
@@ -1676,9 +1743,13 @@ impl Tool for InvokeMenuTool {
             // including across applications. Falling back to app activation
             // preserves the previous behavior for apps without an AX window.
             if let Some(prior_pid) = prior_frontmost {
-                let already_restored =
-                    prior_pid == pid && prior_frontmost_window == Some(window_id);
-                if !already_restored {
+                if restores_prior_window(
+                    prior_pid,
+                    prior_frontmost_window,
+                    pid,
+                    window_id,
+                    result.is_ok(),
+                ) {
                     let restored_exact = prior_frontmost_window.is_some_and(|prior_window_id| {
                         focus_exact_window(prior_pid, prior_window_id).is_ok()
                     });
@@ -1879,14 +1950,14 @@ mod tests {
 
     #[test]
     fn a_caller_validation_is_reported_on_a_later_refusal() {
-        let mut refused = unbound_menu_window(1, 7, Some(8), Some(8));
+        let mut refused = unbound_menu_window(1, 7, Some(8), Some(8), false);
         annotate_route(&mut refused, Some(RouteValidation::Legacy(true)), "", None);
         let structured = refused.structured_content.clone().expect("structured");
         assert_eq!(structured["keys_sent"], true);
         assert_eq!(structured["dispatch"], "validation_posted");
         assert!(text_of(&refused).contains("Cmd+F20"));
 
-        let mut uncertain = unbound_menu_window(1, 7, Some(8), Some(8));
+        let mut uncertain = unbound_menu_window(1, 7, Some(8), Some(8), false);
         annotate_route(
             &mut uncertain,
             Some(RouteValidation::Legacy(false)),
@@ -1900,13 +1971,16 @@ mod tests {
 
     #[test]
     fn a_failed_scripted_save_gate_is_a_refusal_naming_why() {
-        let unbound = gate_refusal(
+        let unbound = gate_refusal_with(
             1,
-            7,
             BackgroundPressError::UnboundWindow {
                 requested: 7,
                 focused: Some(8),
                 main: Some(8),
+            },
+            |requested| {
+                assert_eq!(requested, 7);
+                false
             },
         );
         assert_eq!(
@@ -1988,7 +2062,7 @@ mod tests {
             "{text}"
         );
 
-        let mut refused = unbound_menu_window(1, 7, Some(8), Some(8));
+        let mut refused = unbound_menu_window(1, 7, Some(8), Some(8), false);
         annotate_route(
             &mut refused,
             Some(RouteValidation::Guarded(sent)),
@@ -2157,6 +2231,20 @@ mod tests {
         assert!(!preface.contains("no keys were sent"));
     }
 
+    /// Issue #4635: a frontmost app's window on another Space must not be
+    /// raised (that switches the user's Space), so its menu goes through the
+    /// background route. Only a window known to be on another Space is
+    /// diverted; an unreadable Space view keeps the app-in-front route.
+    #[test]
+    fn a_window_on_another_space_takes_the_background_route() {
+        assert_eq!(menu_route(true, Some(false)), MenuRoute::Background);
+        assert_eq!(menu_route(true, Some(true)), MenuRoute::Foreground);
+        assert_eq!(menu_route(true, None), MenuRoute::Foreground);
+        for space in [Some(true), Some(false), None] {
+            assert_eq!(menu_route(false, space), MenuRoute::Background);
+        }
+    }
+
     #[test]
     fn background_menu_requires_both_exact_document_contexts() {
         assert!(require_menu_window(7, Some(7), Some(7)).is_ok());
@@ -2178,13 +2266,14 @@ mod tests {
 
     #[test]
     fn unbound_menu_refuses_before_dispatch_with_the_exact_target() {
-        let result = unbound_menu_window(42, 7, Some(8), None);
+        let result = unbound_menu_window(42, 7, Some(8), None, false);
         assert_eq!(result.is_error, Some(true));
         let data = result.structured_content.unwrap();
         assert_eq!(data["code"], "window_not_key");
         assert_eq!(data["effect"], "refused");
         assert_eq!(data["pid"], 42);
         assert_eq!(data["window_id"], 7);
+        assert_eq!(data["escalation"]["recommended"], "foreground");
         assert!(data["reason"]
             .as_str()
             .unwrap()
@@ -2197,6 +2286,23 @@ mod tests {
         );
         assert!(hint.contains("element_token"), "{hint}");
         assert!(hint.contains("bring_to_front"), "{hint}");
+    }
+
+    /// Issue #4635: an off-Space window whose sibling holds the menu context
+    /// is refused with the Space named. Foreground takes the same route for
+    /// that window, so the refusal must not recommend it.
+    #[test]
+    fn an_unbound_off_space_window_is_refused_with_the_space_named() {
+        let result = unbound_menu_window(42, 7, Some(8), Some(8), true);
+        assert_eq!(result.is_error, Some(true));
+        let data = result.structured_content.unwrap();
+        assert_eq!(data["code"], "window_not_key");
+        assert_eq!(data["window_id"], 7);
+        assert!(data.get("escalation").is_none());
+        let reason = data["reason"].as_str().unwrap();
+        assert!(reason.contains("no menu action was dispatched"));
+        assert!(reason.contains("on another Space"));
+        assert!(reason.contains("bring_to_front"));
     }
 
     #[test]
@@ -2474,6 +2580,19 @@ mod tests {
         assert!(!exact_window_is_ready(Some(8), 7, Some(42), 42));
         assert!(!exact_window_is_ready(Some(7), 7, Some(41), 42));
         assert!(!exact_window_is_ready(Some(7), 7, None, 42));
+    }
+
+    #[test]
+    fn a_dispatched_command_keeps_its_window_key_within_the_app() {
+        // Another app was in front: it comes back, dispatched or not.
+        assert!(restores_prior_window(8, Some(5), 7, 42, true));
+        assert!(restores_prior_window(8, None, 7, 42, false));
+        // A sibling window of the target app was key: it stays behind once
+        // the command was dispatched, and comes back after a refusal.
+        assert!(!restores_prior_window(7, Some(41), 7, 42, true));
+        assert!(restores_prior_window(7, Some(41), 7, 42, false));
+        // The requested window was already key: nothing to put back.
+        assert!(!restores_prior_window(7, Some(42), 7, 42, false));
     }
 
     fn workspace_frontmost_must_not_be_read() -> Option<i32> {

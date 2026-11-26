@@ -124,7 +124,7 @@ fn def() -> &'static ToolDef {
             "type": "object",
             "required": [],
             "properties": {
-                "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session." },
+                "session": cua_driver_core::tool_schema::session_schema(),
                 "action": { "type": "string", "enum": ["open", "close"], "description": "open right-clicks; close AXCancels only this tool's opener-owned menu." },
                 "opener_id": { "type": "integer", "minimum": 1, "description": "Numeric owner id returned in right_click open text; required for close." },
                 "pid": { "type": "integer", "description": "Target process ID. Optional with element_token (the token carries the pid)." },
@@ -561,6 +561,13 @@ impl RightClickTool {
         } else {
             None
         };
+        if let Some(wid) = window_id.filter(|_| !delivery_mode.is_foreground()) {
+            if let Err(refusal) =
+                super::refuse_point_under_own_popup(pid, wid, screen_x, screen_y).await
+            {
+                return refusal;
+            }
+        }
 
         // Pin overlay above the target window before animating.
         if let Some(wid) = window_id {
@@ -591,7 +598,14 @@ impl RightClickTool {
         {
             return refusal;
         }
-        let route = match super::pixel_route::resolve(pid, fg, window_id, "mouse_right_click").await
+        let route = match super::pixel_route::resolve(
+            pid,
+            fg,
+            window_id,
+            "mouse_right_click",
+            super::pixel_route::PointerGesture::Other,
+        )
+        .await
         {
             Ok(route) => route,
             Err(refusal) => return refusal,

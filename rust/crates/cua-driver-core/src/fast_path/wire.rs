@@ -8,6 +8,7 @@
 use super::classify::TargetClass;
 use super::pixel::GrayImage;
 use super::reason::{Reason, Verdict};
+use super::store::GuardStore;
 use super::{mode, set_mode, FastPathMode};
 use crate::protocol::ToolResult;
 use serde_json::{json, Value};
@@ -164,7 +165,13 @@ pub fn gray_from_captured(img: &crate::image_utils::CapturedImage) -> Option<Gra
 /// ask for a screenshot is tree-only, unless the window's tree is sparse
 /// (under 10 elements or mostly 1-pt frames), where the picture is the
 /// only reliable state.
-pub fn skip_reread_screenshot(args: &Value, pid: i32, window_id: u64) -> bool {
+pub fn skip_reread_screenshot(
+    store: &GuardStore,
+    args: &Value,
+    session: Option<&str>,
+    pid: i32,
+    window_id: u64,
+) -> bool {
     if !mode().deltas()
         || args.get("include_screenshot").is_some()
         || args.get("screenshot_out_file").is_some()
@@ -172,7 +179,7 @@ pub fn skip_reread_screenshot(args: &Value, pid: i32, window_id: u64) -> bool {
     {
         return false;
     }
-    match super::store::global().latest_stats(pid, window_id, session_of(args)) {
+    match store.latest_stats(session, pid, window_id) {
         Some((elements, thin)) => elements >= 10 && thin * 2 <= elements,
         None => false,
     }
@@ -203,19 +210,17 @@ pub fn returns_delta(tool: &str) -> bool {
 
 /// The window a direct action's delta is read from, when the mode is `on`.
 /// From `pid`/`window_id`, or from the snapshot an `element_token` names.
-/// `session` is the runtime session the caller's reads run as (the caller
-/// derives it, since these arguments are read before dispatch names it): a
-/// token only maps to a window this session read (#288 review).
-pub fn delta_target(args: &Value, session: Option<&str>) -> Option<(i32, u64)> {
+/// `session` is the trusted runtime read session, derived before dispatch.
+pub fn delta_target(args: &Value, store: &GuardStore, session: Option<&str>) -> Option<(i32, u64)> {
     if !mode().deltas() {
         return None;
     }
-    delta_window(args, session)
+    delta_window(args, store, session)
 }
 
 /// [`delta_target`] without the mode check: the window these arguments
 /// name for `session`.
-fn delta_window(args: &Value, session: Option<&str>) -> Option<(i32, u64)> {
+fn delta_window(args: &Value, store: &GuardStore, session: Option<&str>) -> Option<(i32, u64)> {
     let pid = args.get("pid").and_then(Value::as_i64).map(|p| p as i32);
     let window = args.get("window_id").and_then(Value::as_u64);
     if let (Some(pid), Some(window)) = (pid, window) {
@@ -225,7 +230,7 @@ fn delta_window(args: &Value, session: Option<&str>) -> Option<(i32, u64)> {
         .get("element_token")
         .and_then(Value::as_str)
         .and_then(crate::element_token::parse_token)?;
-    super::store::global()
+    store
         .element(snapshot, index, session)
         .map(|(pid, window, _)| (pid, window))
 }
@@ -336,7 +341,8 @@ mod tests {
     fn an_element_token_delta_maps_only_its_sessions_snapshot() {
         let _guard = crate::fast_path::tests_lock();
         let snapshot = 3_900_000_123;
-        super::super::store::global().put_snapshot(
+        let store = GuardStore::new();
+        store.put_snapshot(
             snapshot,
             super::super::store::SnapshotFingerprints {
                 pid: 77,
@@ -349,15 +355,17 @@ mod tests {
         );
         let args = json!({ "element_token": crate::element_token::token_for(snapshot, 0) });
         let session = Some("__cua_runtime_x:implicit-direct");
-        let own = delta_window(&args, session);
-        let foreign = delta_window(&args, Some("__cua_runtime_x:other"));
-        let unnamed = delta_window(&args, None);
+        let own = delta_window(&args, &store, session);
+        let foreign = delta_window(&args, &store, Some("__cua_runtime_x:other"));
+        let unnamed = delta_window(&args, &store, None);
         let past_the_list = delta_window(
             &json!({ "element_token": crate::element_token::token_for(snapshot, 1) }),
+            &store,
             session,
         );
         let absent = delta_window(
             &json!({ "element_token": crate::element_token::token_for(snapshot + 1, 0) }),
+            &store,
             session,
         );
         assert_eq!(own, Some((77, 9)));

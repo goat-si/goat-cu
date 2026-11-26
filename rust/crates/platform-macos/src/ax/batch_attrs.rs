@@ -7,6 +7,20 @@ use core_foundation::{
     string::CFString,
 };
 
+/// Decode only CFURL slots; malformed values must not become URLs.
+pub(crate) unsafe fn url_from_cf(value: CFTypeRef) -> Option<String> {
+    use core_foundation::url::CFURL;
+    if value.is_null() || CFGetTypeID(value) != CFURL::type_id() {
+        return None;
+    }
+    Some(
+        CFURL::wrap_under_get_rule(value as _)
+            .absolute()
+            .get_string()
+            .to_string(),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BatchFailure {
     WholeCall(AXError),
@@ -57,6 +71,7 @@ pub(crate) enum BatchRead {
 enum Slot {
     Value(CFTypeRef),
     Absent,
+    Missing,
 }
 
 pub(crate) struct BatchSlots {
@@ -66,11 +81,14 @@ pub(crate) struct BatchSlots {
 }
 
 impl BatchSlots {
+    pub(crate) fn answered(&self, index: usize) -> bool {
+        !matches!(self.slots[index], Slot::Missing)
+    }
     #[cfg(test)]
     pub(crate) fn string(&self, index: usize) -> Option<String> {
         match self.slots[index] {
             Slot::Value(value) => unsafe { string_from_cf(value) },
-            Slot::Absent => None,
+            Slot::Absent | Slot::Missing => None,
         }
     }
 
@@ -78,7 +96,7 @@ impl BatchSlots {
     pub(crate) fn stringish(&self, index: usize) -> Option<StringishAttrValue> {
         match self.slots[index] {
             Slot::Value(value) => unsafe { stringish_from_cf(value) },
-            Slot::Absent => None,
+            Slot::Absent | Slot::Missing => None,
         }
     }
 
@@ -86,7 +104,7 @@ impl BatchSlots {
     pub(crate) fn raw(&self, index: usize) -> Option<CFTypeRef> {
         match self.slots[index] {
             Slot::Value(value) => Some(value),
-            Slot::Absent => None,
+            Slot::Absent | Slot::Missing => None,
         }
     }
 }
@@ -128,7 +146,7 @@ unsafe fn decode_slots_with(
                 return None;
             }
             if CFGetTypeID(value) == CFNullGetTypeID() {
-                return Some(Slot::Absent);
+                return Some(Slot::Missing);
             }
             if CFGetTypeID(value) == AXValueGetTypeID()
                 && AXValueGetType(value as AXValueRef) == kAXValueAXErrorType
@@ -177,6 +195,34 @@ pub(crate) unsafe fn copy_attrs_batch(element: AXUIElementRef, names: &[&str]) -
     finish_batch(error, values as CFTypeRef, names.len())
 }
 
+/// Identity and scope reads require an answered, well-typed slot for every
+/// requested attribute. An explicit absent attribute is distinct from a failed
+/// or malformed read, which must never compare equal to an earlier identity.
+pub(crate) unsafe fn copy_string_attrs<const N: usize>(
+    element: AXUIElementRef,
+    names: [&str; N],
+) -> Option<[Option<String>; N]> {
+    let BatchRead::Slots(slots) = copy_attrs_batch(element, &names) else {
+        return None;
+    };
+    strings_from_slots(&slots)
+}
+
+fn strings_from_slots<const N: usize>(slots: &BatchSlots) -> Option<[Option<String>; N]> {
+    if slots.slots.len() != N {
+        return None;
+    }
+    let mut values = Vec::with_capacity(N);
+    for index in 0..N {
+        match slots.slots[index] {
+            Slot::Absent => values.push(None),
+            Slot::Missing => return None,
+            Slot::Value(value) => values.push(Some(unsafe { string_from_cf(value) }?)),
+        }
+    }
+    values.try_into().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +243,23 @@ mod tests {
                 kAXValueAXErrorType,
                 &error as *const _ as *const _,
             ) as CFTypeRef)
+        }
+    }
+
+    #[test]
+    fn only_an_unanswered_attribute_is_a_failed_read() {
+        assert_eq!(error_slot(Some(kAXErrorNoValue)), Some(Slot::Absent));
+        assert_eq!(
+            error_slot(Some(kAXErrorAttributeUnsupported)),
+            Some(Slot::Absent)
+        );
+        for error in [
+            kAXErrorFailure,
+            kAXErrorCannotComplete,
+            kAXErrorInvalidUIElement,
+            kAXErrorIllegalArgument,
+        ] {
+            assert_eq!(error_slot(Some(error)), None, "{error}");
         }
     }
 
@@ -227,6 +290,19 @@ mod tests {
     }
 
     #[test]
+    fn url_decoder_rejects_non_url_values() {
+        use core_foundation::url::CFURL;
+        let url = CFURL::from_path("/docs/", true).unwrap();
+        let text = CFString::new("https://example.com/");
+        assert_eq!(
+            unsafe { url_from_cf(url.as_CFTypeRef()) }.as_deref(),
+            Some("file:///docs/")
+        );
+        assert_eq!(unsafe { url_from_cf(text.as_CFTypeRef()) }, None);
+        assert_eq!(unsafe { url_from_cf(std::ptr::null()) }, None);
+    }
+
+    #[test]
     fn only_null_no_value_and_unsupported_slots_are_absent() {
         let null = unsafe { CFType::wrap_under_get_rule(kCFNull) };
         let BatchRead::Slots(slots) = finish(&[
@@ -236,7 +312,47 @@ mod tests {
         ]) else {
             panic!("absence allowlist must decode");
         };
-        assert_eq!(slots.slots, vec![Slot::Absent, Slot::Absent, Slot::Absent]);
+        assert_eq!(slots.slots, vec![Slot::Missing, Slot::Absent, Slot::Absent]);
+        assert!((0..3).all(|index| slots.raw(index).is_none()));
+    }
+
+    #[test]
+    fn no_value_and_unsupported_are_answered_but_null_is_missing() {
+        let null = unsafe { CFType::wrap_under_get_rule(kCFNull) };
+        let BatchRead::Slots(slots) = finish(&[
+            null,
+            ax_error(kAXErrorNoValue),
+            ax_error(kAXErrorAttributeUnsupported),
+        ]) else {
+            panic!("valid absent slots must decode");
+        };
+        assert!(!slots.answered(0));
+        assert!(slots.answered(1));
+        assert!(slots.answered(2));
+    }
+
+    #[test]
+    fn identity_batch_rejects_missing_and_malformed_slots() {
+        let null = unsafe { CFType::wrap_under_get_rule(kCFNull) };
+        let BatchRead::Slots(missing) = finish(&[null]) else {
+            panic!("missing slot decodes")
+        };
+        assert_eq!(strings_from_slots::<1>(&missing), None);
+        let BatchRead::Slots(wrong) = finish(&[CFNumber::from(8).as_CFType()]) else {
+            panic!("number decodes")
+        };
+        assert_eq!(strings_from_slots::<1>(&wrong), None);
+        let BatchRead::Slots(valid) = finish(&[
+            CFString::new("AXButton").as_CFType(),
+            ax_error(kAXErrorNoValue),
+        ]) else {
+            panic!("strings decode")
+        };
+        assert_eq!(
+            strings_from_slots::<2>(&valid),
+            Some([Some("AXButton".into()), None])
+        );
+        assert_eq!(strings_from_slots::<1>(&valid), None);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use cua_driver_contract::{CaptureScope, GetSessionStateInput, StartSessionInput};
+use cua_driver_contract::{CaptureScope, GetDesktopStateInput, GetSessionInput, StartSessionInput};
 use cua_driver_sdk::{
     CuaDriver, DriverError, EmbeddedCuaDriverHost, EmbeddedDriverHostOptions,
     EmbeddedDriverHostState, EmbeddedEnvironmentVariable,
@@ -250,22 +250,36 @@ async fn embedded_host_serves_sdk_and_mcp_with_one_contract() {
         "desktop"
     );
 
+    let refused = sdk
+        .get_desktop_state(GetDesktopStateInput {
+            session: Some("embedded-sdk-window".into()),
+            screenshot_out_file: None,
+            max_image_dimension: None,
+        })
+        .await
+        .expect("SDK call completed");
+    assert!(refused.is_error, "desktop scope must be refused");
+    assert_eq!(
+        refused.error_code.as_deref(),
+        Some("desktop_scope_disabled")
+    );
+
     // Session policy belongs to the session and ordinary lifecycle inspection
     // is transport-scoped: the SDK and MCP connections can each inspect their
     // own session without enumerating the other's label.
     let sdk_state = sdk
-        .get_session_state(GetSessionStateInput {
+        .get_session(GetSessionInput {
             session: Some("embedded-sdk-window".into()),
         })
         .await
         .expect("read SDK session");
     let foreign = sdk
-        .get_session_state(GetSessionStateInput {
+        .get_session(GetSessionInput {
             session: Some("embedded-mcp-desktop".into()),
         })
         .await
         .expect_err("SDK transport must not inspect an MCP-created session");
-    assert_eq!(sdk_state.capture_scope, CaptureScope::Window);
+    assert_eq!(sdk_state.session.as_deref(), Some("embedded-sdk-window"));
     assert!(matches!(
         foreign,
         DriverError::Tool { error_code, .. } if error_code == "session_not_started"

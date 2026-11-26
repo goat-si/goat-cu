@@ -13,6 +13,7 @@
 //! compositor-attested surfaces and return a typed identity error otherwise.
 
 mod compositor_peer;
+mod cua_compositor_capture;
 mod dynamic_library;
 pub mod ext_screencopy;
 pub mod ext_toplevel;
@@ -25,7 +26,7 @@ pub mod kwin_capture;
 pub mod kwin_helper;
 #[cfg(feature = "portal-input")]
 mod kwin_keystate;
-pub(crate) mod kwin_layout;
+pub(crate) mod logical_layout;
 pub mod mutter_display;
 pub mod niri;
 pub use niri::keyboard::call_budget as niri_keyboard_budget;
@@ -55,6 +56,7 @@ pub(crate) mod portal_screencast;
 /// Whether the GNOME/KDE RemoteDesktop + libei input backend is compiled in.
 pub const PORTAL_INPUT_ENABLED: bool = cfg!(feature = "portal-input");
 
+use cua_driver_core::action_record::ActionTransport;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
@@ -1229,22 +1231,6 @@ fn wayland_window_crop(xid: u64) -> anyhow::Result<WaylandWindowCrop> {
             window.visible,
         );
     }
-    // GNOME helpers before API 9 have no per-window capture, so the stage is
-    // cropped to the window's frame. GetRects proves geometry, not occlusion:
-    // a covering window shows in the crop. API 9+ helpers never reach this
-    // (see `screenshot_dispatch_for_pid`).
-    if let Some(window) = shell_helper::list_windows(None)
-        .and_then(|windows| windows.into_iter().find(|window| window.xid == xid))
-    {
-        return attested_wayland_crop(
-            xid,
-            window.x,
-            window.y,
-            window.width,
-            window.height,
-            window.is_on_screen,
-        );
-    }
     Err(surface_identity_unproven(
         xid,
         "no compositor-attested window geometry is available",
@@ -1304,21 +1290,13 @@ fn screenshot_dispatch_for_pid(xid: u64, pid: Option<u32>) -> anyhow::Result<Vec
     if niri::is_session() {
         return niri_window_capture(xid, pid);
     }
+    if is_wayland() && is_inject_mode() {
+        return cua_compositor_capture::capture(xid, pid)
+            .map_err(|error| surface_identity_unproven(xid, format!("cua-compositor: {error:#}")));
+    }
     if is_wayland() {
-        // A GNOME helper with API 9+ snapshots the window's own actor, so a
-        // covering window never shows. It is then the only GNOME route: a
-        // refused capture (minimized window, locked screen) must not fall
-        // back to a stage crop that could show another app.
-        match shell_helper::screenshot_window(xid, pid) {
-            shell_helper::WindowCapture::Png(png) => return Ok(png),
-            shell_helper::WindowCapture::Unavailable => {
-                return Err(surface_identity_unproven(
-                    xid,
-                    "the GNOME helper could not capture this window (minimized, closed, \
-                     or the screen is locked)",
-                ))
-            }
-            shell_helper::WindowCapture::Unsupported => {}
+        if let Some(result) = gnome_window_capture(xid, shell_helper::screenshot_window(xid, pid)) {
+            return result;
         }
     }
     screenshot_window_bytes_with_dispatch(
@@ -1327,6 +1305,42 @@ fn screenshot_dispatch_for_pid(xid: u64, pid: Option<u32>) -> anyhow::Result<Vec
         wayland_window_crop,
         screenshot_display_dispatch,
         crate::capture::screenshot_window_bytes,
+    )
+}
+
+/// A verified GNOME helper is the only GNOME window route: its `CaptureWindow`
+/// (API 9) snapshots the window's own actor, so a covering window never shows.
+/// An older helper and a refused capture both refuse; a stage crop would show
+/// whatever covers the window. `None` means no verified helper, so the caller
+/// takes another route.
+fn gnome_window_capture(
+    xid: u64,
+    capture: shell_helper::WindowCapture,
+) -> Option<anyhow::Result<Vec<u8>>> {
+    match capture {
+        shell_helper::WindowCapture::Png(png) => Some(Ok(png)),
+        shell_helper::WindowCapture::Unavailable => Some(Err(surface_identity_unproven(
+            xid,
+            "the GNOME helper could not capture this window (minimized, closed, \
+             or the screen is locked)",
+        ))),
+        shell_helper::WindowCapture::HelperTooOld { api } => Some(Err(surface_identity_unproven(
+            xid,
+            gnome_helper_too_old_reason(api),
+        ))),
+        shell_helper::WindowCapture::NoHelper => None,
+    }
+}
+
+fn gnome_helper_too_old_reason(api: Option<u32>) -> String {
+    let loaded = match api {
+        Some(api) => format!("the loaded GNOME helper is API {api}"),
+        None => "the loaded GNOME helper did not report its API version".to_owned(),
+    };
+    format!(
+        "{loaded}; window capture needs API {} or newer. Re-run the Cua Driver \
+         installer, then log out and back in so GNOME Shell loads the new helper",
+        shell_helper::WINDOW_CAPTURE_API_VERSION
     )
 }
 
@@ -1780,7 +1794,7 @@ fn pointer_reaches(origin_x: i32, origin_y: i32, w: u32, h: u32, x: i32, y: i32)
 #[derive(Clone, Debug, Default)]
 pub struct DesktopInputSpace {
     snapshot: Option<hyprland::DesktopSnapshot>,
-    kwin_distorted: Option<kwin_layout::DistortedCapture>,
+    kwin_distorted: Option<logical_layout::DistortedCapture>,
 }
 
 impl DesktopInputSpace {
@@ -1797,9 +1811,9 @@ impl DesktopInputSpace {
                 kwin_distorted: None,
             });
         }
-        // KWin input goes through libei, which takes layout coordinates, so it
-        // has no virtual-pointer layout to qualify.
-        let Some(layout) = kwin_desktop_layout()? else {
+        // KWin and Mutter input goes through libei, which takes layout
+        // coordinates, so it has no virtual-pointer layout to qualify.
+        let Some(layout) = logical_desktop_layout()? else {
             return Ok(Self::default());
         };
         Ok(Self {
@@ -1900,21 +1914,21 @@ pub(crate) fn compositor_logical_frame() -> Option<anyhow::Result<(u32, u32)>> {
     if hyprland::is_session() {
         return Some(hyprland::screen_size().map(|(width, height, _scale)| (width, height)));
     }
-    kwin_desktop_layout()
+    logical_desktop_layout()
         .transpose()
         .map(|layout| layout.map(|layout| (layout.frame.width, layout.frame.height)))
 }
 
-/// KWin's desktop layout: its pointer input is logical while its screenshots
-/// are physical, so a screenshot pixel and a pointer coordinate only agree in
-/// this frame. `None` on any other compositor; a KWin that cannot report a
-/// usable layout is an error rather than a silent return to the mismatched
-/// physical frame.
-pub(crate) fn kwin_desktop_layout() -> anyhow::Result<Option<kwin_layout::DesktopLayout>> {
+/// The KWin or GNOME Mutter desktop layout: their pointer input is logical
+/// while their screenshots can be physical, so a screenshot pixel and a
+/// pointer coordinate only agree in this frame. `None` on any other
+/// compositor; one that cannot report a usable layout is an error rather than
+/// a silent return to the mismatched physical frame.
+pub(crate) fn logical_desktop_layout() -> anyhow::Result<Option<logical_layout::DesktopLayout>> {
     if !is_wayland() || hyprland::is_session() || niri::is_session() {
         return Ok(None);
     }
-    kwin_layout::desktop_layout()
+    logical_layout::desktop_layout()
 }
 
 /// Pointer space for `zwlr_virtual_pointer_v1::motion_absolute`, as
@@ -2734,12 +2748,20 @@ pub fn move_cursor_absolute(window_id: Option<u64>, x: i32, y: i32) -> anyhow::R
     )
 }
 
-/// Warp the cursor to a desktop-frame point (the `get_desktop_state` frame).
-pub fn move_cursor_desktop(space: &DesktopInputSpace, x: i32, y: i32) -> anyhow::Result<()> {
+/// Warp the cursor to a desktop-frame point (the `get_desktop_state` frame),
+/// returning the transport that moved it.
+pub fn move_cursor_desktop(
+    space: &DesktopInputSpace,
+    x: i32,
+    y: i32,
+) -> anyhow::Result<ActionTransport> {
     let (x, y) = space.input_layout(x, y)?;
     with_libei_fallback(
-        || move_cursor_absolute_vptr(None, x, y, Some(space)),
-        || libei_move_absolute(x, y),
+        || {
+            move_cursor_absolute_vptr(None, x, y, Some(space))
+                .map(|()| ActionTransport::LinuxWaylandVirtualPointer)
+        },
+        || libei_move_absolute(x, y).map(|()| ActionTransport::LinuxLibei),
     )
 }
 
@@ -3723,40 +3745,35 @@ fn inject_focused_target() -> anyhow::Result<(u32, u64)> {
         })
 }
 
+fn inject_scroll_axis(direction: &str) -> anyhow::Result<(u32, f64)> {
+    match direction.to_ascii_lowercase().as_str() {
+        "up" => Ok((0, -15.0)),
+        "down" | "page" => Ok((0, 15.0)),
+        "left" => Ok((1, -15.0)),
+        "right" => Ok((1, 15.0)),
+        _ => anyhow::bail!("unsupported cua-compositor scroll direction {direction:?}"),
+    }
+}
+
+/// Desktop wheel lines for the nested compositor. The compositor hit-tests
+/// the point against its scene, the same as a desktop click; AT-SPI has no
+/// stacking order for this compositor, so the driver must not pick a window.
+fn inject_scroll_desktop_lines(
+    x: i32,
+    y: i32,
+    direction: &str,
+    amount: u32,
+) -> anyhow::Result<Vec<String>> {
+    let (axis, value) = inject_scroll_axis(direction)?;
+    Ok(vec![
+        format!("e {x} {y} {axis} {value:.1}");
+        amount.max(1) as usize
+    ])
+}
+
 fn inject_scroll_desktop(x: i32, y: i32, direction: &str, amount: u32) -> anyhow::Result<()> {
-    let windows = crate::atspi::list_windows(None);
-    let target = windows
-        .iter()
-        .filter(|window| {
-            window.is_on_screen
-                && x >= window.x
-                && y >= window.y
-                && x < window.x.saturating_add(window.width as i32)
-                && y < window.y.saturating_add(window.height as i32)
-        })
-        .max_by_key(|window| window.z_index.unwrap_or_default())
-        .or_else(|| {
-            let (pid, _) = inject_focused_target().ok()?;
-            windows.iter().find(|window| window.pid == Some(pid))
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "foreground_unavailable: no cua-compositor window contains desktop point ({x},{y})"
-            )
-        })?;
-    let pid = target.pid.ok_or_else(|| {
-        anyhow::anyhow!(
-            "foreground_unavailable: desktop point ({x},{y}) resolved to a window without a pid"
-        )
-    })?;
-    inject_scroll(
-        pid,
-        target.xid,
-        f64::from(x.saturating_sub(target.x)),
-        f64::from(y.saturating_sub(target.y)),
-        direction,
-        amount,
-    )
+    inject_exchange_with_ack(&inject_scroll_desktop_lines(x, y, direction, amount)?, true)?;
+    Ok(())
 }
 
 /// Reject any character the nested compositor cannot type before it reaches the
@@ -3873,6 +3890,7 @@ fn read_inject_line(reader: &mut impl std::io::BufRead) -> anyhow::Result<String
     if n == 0 {
         anyhow::bail!("cua-compositor closed the connection before responding");
     }
+    crate::inject_sequence::require_complete_line(&line)?;
     Ok(line)
 }
 
@@ -3881,6 +3899,10 @@ fn read_inject_line(reader: &mut impl std::io::BufRead) -> anyhow::Result<String
 /// acknowledgement per command. Fails on protocol mismatch, timeout, EOF, or a
 /// compositor error line — the earlier fire-and-forget path hid all of these.
 fn inject_exchange(lines: &[String]) -> anyhow::Result<Vec<String>> {
+    inject_exchange_with_ack(lines, false)
+}
+
+fn inject_exchange_with_ack(lines: &[String], require_ack: bool) -> anyhow::Result<Vec<String>> {
     use std::io::{BufReader, Write};
     use std::os::unix::net::UnixStream;
     let path = inject_socket_path().ok_or_else(|| anyhow::anyhow!("CUA_INJECT_SOCKET not set"))?;
@@ -3913,6 +3935,26 @@ fn inject_exchange(lines: &[String]) -> anyhow::Result<Vec<String>> {
     writer.flush()?;
     parse_inject_hello(&read_line(&mut reader)?)?;
 
+    if require_ack {
+        let action = crate::input::action::current();
+        if let Some(action) = &action {
+            action.fence(&writer)?;
+        }
+        crate::inject_sequence::send_all(lines, |line| {
+            let mut send = || -> anyhow::Result<()> {
+                writeln!(writer, "{line}")?;
+                writer.flush()?;
+                Ok(())
+            };
+            if let Some(action) = &action {
+                action.admit(send)??;
+            } else {
+                send()?;
+            }
+            parse_inject_reply(&read_line(&mut reader)?)
+        })?;
+        return Ok(Vec::new());
+    }
     let mut replies = Vec::with_capacity(lines.len());
     // One command per line; block on its response before the next.
     for l in lines {
@@ -3930,13 +3972,38 @@ fn inject_send(lines: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_inject_geometry(line: &str) -> anyhow::Result<((i32, i32), (i32, i32))> {
+/// One `g <pid>` reply from the nested compositor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InjectGeometry {
+    /// Rebases AT-SPI `Window` coordinates into output coordinates.
+    accessibility_offset: (i32, i32),
+    /// Top-left of the window's root surface in the output.
+    origin: (i32, i32),
+    /// The xdg window geometry size. GTK's AT-SPI frame also counts its
+    /// client-side shadow, so only this size matches the captured window.
+    /// Compositor builds that predate it omit it.
+    size: Option<(u32, u32)>,
+}
+
+fn parse_inject_geometry(line: &str) -> anyhow::Result<InjectGeometry> {
     let fields = line.split_whitespace().collect::<Vec<_>>();
-    if fields.len() == 5 && fields[0] == "geometry" {
-        return Ok((
-            (fields[1].parse()?, fields[2].parse()?),
-            (fields[3].parse()?, fields[4].parse()?),
-        ));
+    if fields.first() == Some(&"geometry") && matches!(fields.len(), 5 | 7) {
+        let size = match fields.get(5..7) {
+            Some([width, height]) => {
+                let size: (u32, u32) = (width.parse()?, height.parse()?);
+                anyhow::ensure!(
+                    size.0 > 0 && size.1 > 0,
+                    "cua-compositor reported an empty window geometry"
+                );
+                Some(size)
+            }
+            _ => None,
+        };
+        return Ok(InjectGeometry {
+            accessibility_offset: (fields[1].parse()?, fields[2].parse()?),
+            origin: (fields[3].parse()?, fields[4].parse()?),
+            size,
+        });
     }
     if let Some(reason) = line.trim().strip_prefix("err") {
         anyhow::bail!("cua-compositor geometry query failed: {}", reason.trim());
@@ -3947,28 +4014,30 @@ fn parse_inject_geometry(line: &str) -> anyhow::Result<((i32, i32), (i32, i32))>
     )
 }
 
+fn inject_geometry(pid: u32) -> Option<InjectGeometry> {
+    if !is_inject_mode() || pid == 0 {
+        return None;
+    }
+    let replies = inject_exchange(&[format!("g {pid}")]).ok()?;
+    replies
+        .first()
+        .and_then(|line| parse_inject_geometry(line).ok())
+}
+
 /// Return the offset that rebases native Wayland accessibility coordinates into
 /// the nested compositor's root-surface/output coordinate space.
 pub fn inject_accessibility_offset(pid: u32) -> Option<(i32, i32)> {
-    if !is_inject_mode() || pid == 0 {
-        return None;
-    }
-    let replies = inject_exchange(&[format!("g {pid}")]).ok()?;
-    replies
-        .first()
-        .and_then(|line| parse_inject_geometry(line).ok())
-        .map(|geometry| geometry.0)
+    inject_geometry(pid).map(|geometry| geometry.accessibility_offset)
 }
 
-fn inject_window_origin(pid: u32) -> Option<(i32, i32)> {
-    if !is_inject_mode() || pid == 0 {
-        return None;
+/// Replace an AT-SPI window rectangle with the one the nested compositor
+/// places and captures.
+fn apply_inject_geometry(window: &mut WindowInfo, geometry: InjectGeometry) {
+    (window.x, window.y) = geometry.origin;
+    if let Some((width, height)) = geometry.size {
+        window.width = width;
+        window.height = height;
     }
-    let replies = inject_exchange(&[format!("g {pid}")]).ok()?;
-    replies
-        .first()
-        .and_then(|line| parse_inject_geometry(line).ok())
-        .map(|geometry| geometry.1)
 }
 
 /// Resolve a window_id to its xdg app_id via the stable identity registry that
@@ -4103,13 +4172,7 @@ pub fn inject_scroll(
     amount: u32,
 ) -> anyhow::Result<()> {
     let app = inject_target_for_window_with_pid(window_id, Some(target_pid))?;
-    let (axis, value) = match direction.to_ascii_lowercase().as_str() {
-        "up" => (0, -15.0),
-        "down" | "page" => (0, 15.0),
-        "left" => (1, -15.0),
-        "right" => (1, 15.0),
-        _ => anyhow::bail!("unsupported cua-compositor scroll direction {direction:?}"),
-    };
+    let (axis, value) = inject_scroll_axis(direction)?;
     let mut lines = vec![format!("m {app} 0 {x:.1} {y:.1}")];
     lines.extend((0..amount.max(1)).map(|_| format!("a {app} 0 {axis} {value:.1}")));
     inject_send(&lines)
@@ -4272,9 +4335,8 @@ fn wayland_atspi_windows(filter_pid: Option<u32>) -> Vec<WindowInfo> {
     if is_inject_mode() {
         for window in &mut windows {
             if let Some(pid) = window.pid {
-                if let Some((window_x, window_y)) = inject_window_origin(pid) {
-                    window.x = window_x;
-                    window.y = window_y;
+                if let Some(geometry) = inject_geometry(pid) {
+                    apply_inject_geometry(window, geometry);
                 }
             }
         }
@@ -4526,9 +4588,8 @@ fn enrich_native_windows(
         }
         if adopt_atspi_ids {
             if let Some(pid) = candidate.pid {
-                if let Some((window_x, window_y)) = inject_window_origin(pid) {
-                    window.x = window_x;
-                    window.y = window_y;
+                if let Some(geometry) = inject_geometry(pid) {
+                    apply_inject_geometry(window, geometry);
                 }
             }
         }
@@ -5447,6 +5508,40 @@ mod tests {
     }
 
     #[test]
+    fn gnome_window_capture_refuses_helpers_below_api_9() {
+        for (api, loaded) in [
+            (Some(8), "the loaded GNOME helper is API 8;"),
+            (
+                None,
+                "the loaded GNOME helper did not report its API version;",
+            ),
+        ] {
+            let error =
+                gnome_window_capture(0x2962, shell_helper::WindowCapture::HelperTooOld { api })
+                    .expect("an older helper must not fall through to another route")
+                    .expect_err("an older helper has no per-window capture");
+            assert!(is_surface_identity_unproven(&error));
+            let message = error.to_string();
+            assert!(message.contains(loaded), "{message}");
+            assert!(message.contains("needs API 9 or newer"), "{message}");
+            assert!(
+                message.contains("Re-run the Cua Driver installer, then log out and back in"),
+                "{message}"
+            );
+        }
+        let refused = gnome_window_capture(0x2962, shell_helper::WindowCapture::Unavailable)
+            .expect("a refused capture must not fall through to another route")
+            .expect_err("a refused capture has no image");
+        assert!(is_surface_identity_unproven(&refused));
+        assert_eq!(
+            gnome_window_capture(0x2962, shell_helper::WindowCapture::Png(vec![1]))
+                .map(Result::unwrap),
+            Some(vec![1])
+        );
+        assert!(gnome_window_capture(0x2962, shell_helper::WindowCapture::NoHelper).is_none());
+    }
+
+    #[test]
     fn x11_window_capture_keeps_the_existing_per_window_path() {
         let captured_xid = std::cell::Cell::new(None);
         let bytes = screenshot_window_bytes_with_dispatch(
@@ -5715,6 +5810,59 @@ mod tests {
     }
 
     #[test]
+    fn compositor_geometry_replaces_the_shadowed_accessibility_frame() {
+        // GTK3's accessible frame on cua-compositor counts its 26x23 px
+        // client-side shadow; the compositor places and captures 560x757.
+        let mut window = WindowInfo {
+            xid: 1,
+            pid: Some(7),
+            app_name: "main.py".into(),
+            title: "CuaTestHarness GTK3".into(),
+            is_on_screen: true,
+            z_index: None,
+            x: 0,
+            y: 0,
+            width: 612,
+            height: 809,
+        };
+        let reply = parse_inject_geometry("geometry -26 -23 0 0 560 757").unwrap();
+        apply_inject_geometry(&mut window, reply);
+        assert_eq!(
+            (window.x, window.y, window.width, window.height),
+            (0, 0, 560, 757)
+        );
+
+        let older = parse_inject_geometry("geometry -26 -23 40 50").unwrap();
+        apply_inject_geometry(&mut window, older);
+        assert_eq!(
+            (window.x, window.y, window.width, window.height),
+            (40, 50, 560, 757)
+        );
+    }
+
+    #[test]
+    fn desktop_scroll_sends_one_compositor_hit_tested_wheel_line_per_tick() {
+        assert_eq!(
+            inject_scroll_desktop_lines(118, 740, "down", 3).unwrap(),
+            vec!["e 118 740 0 15.0"; 3]
+        );
+        assert_eq!(
+            inject_scroll_desktop_lines(5, 6, "LEFT", 0).unwrap(),
+            vec!["e 5 6 1 -15.0"]
+        );
+        assert_eq!(
+            inject_scroll_desktop_lines(5, 6, "up", 1).unwrap(),
+            vec!["e 5 6 0 -15.0"]
+        );
+        assert_eq!(
+            inject_scroll_desktop_lines(5, 6, "diagonal", 1)
+                .unwrap_err()
+                .to_string(),
+            "unsupported cua-compositor scroll direction \"diagonal\""
+        );
+    }
+
+    #[test]
     fn hello_reply_parses_exact_banner_and_rejects_mismatch() {
         parse_inject_hello("cua-inject v1\n").expect("verbatim banner is accepted");
         parse_inject_hello("  cua-inject v1  ").expect("surrounding whitespace is tolerated");
@@ -5737,9 +5885,24 @@ mod tests {
     fn geometry_reply_is_strict_and_signed() {
         assert_eq!(
             parse_inject_geometry("geometry -4 23 10 20\n").unwrap(),
-            ((-4, 23), (10, 20))
+            InjectGeometry {
+                accessibility_offset: (-4, 23),
+                origin: (10, 20),
+                size: None,
+            }
+        );
+        assert_eq!(
+            parse_inject_geometry("geometry -26 -23 0 0 560 757").unwrap(),
+            InjectGeometry {
+                accessibility_offset: (-26, -23),
+                origin: (0, 0),
+                size: Some((560, 757)),
+            }
         );
         assert!(parse_inject_geometry("geometry 1").is_err());
+        assert!(parse_inject_geometry("geometry -26 -23 0 0 560").is_err());
+        assert!(parse_inject_geometry("geometry -26 -23 0 0 0 757").is_err());
+        assert!(parse_inject_geometry("geometry -26 -23 0 0 -560 757").is_err());
         assert!(parse_inject_geometry("err target-not-found").is_err());
         assert!(parse_inject_geometry("ok").is_err());
     }

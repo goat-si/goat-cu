@@ -177,6 +177,7 @@ impl WalkElementBorrow<super::walker_seam_tests::Fake> for ScenarioWalk<'_> {
 }
 
 impl WalkOrchestration<super::walker_seam_tests::Fake> for ScenarioWalk<'_> {
+    fn flush_web_window(&self, _pid: i32, _element: Self::Element) {}
     fn release_application(&self, application: usize) {
         assert_eq!(application, 1);
         self.environment
@@ -230,7 +231,7 @@ pub(super) fn run_scenario_with_limits(
             step(&format!("actions {id}"), Reply::Actions(Read::Known(if query.is_some() { vec!["AXPress".into()] } else { vec![] }))),
         ]);
         if query.is_some() {
-            steps.push(step(&format!("batch {id} AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected"), Reply::Batch(Ok(control_batch()))));
+            steps.push(step(&format!("batch {id} AXEnabled,AXPosition,AXSize,AXValueDescription,AXMinValue,AXMaxValue,AXSelected,AXURL"), Reply::Batch(Ok(control_batch()))));
             steps.push(step(&format!("snapshot {id}"), Reply::Unit));
         } else {
             steps.push(step(
@@ -297,9 +298,9 @@ fn production_root_creation_failure_follows_legacy_return() {
     assert_eq!(
         result.window_scope,
         Some(WindowScope::AxUnresolved {
-                ax_window_count: 0,
-                ax_windows_error: None,
-            })
+            ax_window_count: 0,
+            ax_windows_error: None,
+        })
     );
     assert!(result.nodes_skipped);
     assert!(!result.truncated);
@@ -373,9 +374,9 @@ fn production_unresolved_scope_follows_legacy_return() {
     assert_eq!(
         observed.legacy.window_scope,
         Some(WindowScope::AxUnresolved {
-                ax_window_count: 0,
-                ax_windows_error: None,
-            })
+            ax_window_count: 0,
+            ax_windows_error: None,
+        })
     );
     assert!(observed.legacy.nodes.is_empty());
     assert_eq!(observed.legacy.tree_markdown, "");

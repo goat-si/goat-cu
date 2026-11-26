@@ -57,10 +57,13 @@ fn def() -> &'static ToolDef {
                 ctrl/control, fn) first, then one non-modifier key from the `press_key` vocabulary. It does not \
                 raise the window.\n\
                 • `background` (default): posts the combo to the target pid as trusted input (Chromium/Electron \
-                accept it); with an AX target, that element is focused first. When the combo is a menu item's \
+                may drop it; use foreground for future actions when needed); with an AX target, that element \
+                is focused first. When the combo is a menu item's \
                 key equivalent (cmd+s, cmd+w, ...) in a native app, a window-only request uses the same \
                 menu chord route as press_key, including frontmost apps. Disabled Save uses the scripting \
-                route for a document window. Another disabled item can fall back to keys after validation; \
+                route for a document window using Apple Events and per-app Automation consent; macOS may show \
+                its first-use consent prompt, and denied permission refuses the save. With --no-automation-prompts, \
+                missing consent refuses with `automation_consent_required`. Another disabled item can fall back to keys after validation; \
                 an element-targeted menu request can instead be refused.\n\
                 • `foreground`: briefly fronts the window so native menu key equivalents dispatch, then restores \
                 the prior frontmost app; with an AX target or x,y the focused field receives the chord (native \
@@ -74,7 +77,7 @@ fn def() -> &'static ToolDef {
             "type": "object",
             "required": ["keys"],
             "properties": {
-                "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session." },
+                "session": cua_driver_core::tool_schema::session_schema(),
                 "pid": { "type": "integer", "description": "Target process ID. Required with x, y; optional with element_token (the token carries the pid)." },
                 "duration_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "description": "Key-down hold in milliseconds; omitted uses the configured key gap." },
                 "keys": {
@@ -208,6 +211,45 @@ fn focus_with_retry(
     }
 }
 
+/// The screenshot-pixel centre of a snapshot element in web content, so the
+/// pixel focus click can move the page's focus to it. `None` for an element
+/// outside a web area.
+async fn web_ax_focus_point(
+    pid: i32,
+    window_id: u32,
+    element: Option<crate::ax::snapshot::RetainedElement>,
+    element_index: Option<usize>,
+) -> Option<(f64, f64)> {
+    let (Some(element), Some(index)) = (element, element_index) else {
+        return None;
+    };
+    let web_element = element.clone();
+    let is_web = latency::spawn_action_blocking(move || {
+        super::type_text::target_in_web_area(
+            pid,
+            Some((web_element.as_ptr(), Some(index))),
+            Some(window_id),
+        )
+    })
+    .await
+    .unwrap_or(true);
+    if !is_web {
+        return None;
+    }
+    latency::spawn_action_blocking(move || unsafe {
+        let (screen_x, screen_y) = crate::ax::bindings::element_screen_center(
+            element.as_ptr() as crate::ax::bindings::AXUIElementRef
+        )?;
+        let frame = super::px_frame::resolve_window_px_frame(window_id).ok()?;
+        Some((
+            (screen_x - frame.bounds.x) * frame.scale,
+            (screen_y - frame.bounds.y) * frame.scale,
+        ))
+    })
+    .await
+    .unwrap_or(None)
+}
+
 fn screen_sharing_modifier_delivery_error(
     is_screen_sharing: bool,
     has_modifiers: bool,
@@ -284,6 +326,14 @@ pub(super) fn requested_hotkey(
     Ok((raw_keys, key, modifiers))
 }
 
+pub(crate) async fn browser_refusal_after_cursor<T>(
+    position: impl std::future::Future<Output = ()>,
+    check: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    position.await;
+    check()
+}
+
 #[async_trait]
 impl Tool for HotkeyTool {
     fn def(&self) -> &ToolDef {
@@ -325,6 +375,31 @@ impl Tool for HotkeyTool {
                 );
             };
             let display = raw_keys.join("+");
+            let mut checked_pid = None;
+            let mut checked_start = None;
+            if let Some(refusal) = browser_refusal_after_cursor(
+                super::cursor_tools::position_desktop_keyboard_cursor(&self.state, &args),
+                || {
+                    checked_pid = crate::apps::frontmost_pid();
+                    checked_start = checked_pid.and_then(|pid| {
+                        crate::process_identity::process_fingerprint(i64::from(pid))
+                            .and_then(|f| f.start_time)
+                    });
+                    cua_driver_core::browser::protection::frontmost_app_refusal(
+                        "hotkey",
+                        checked_pid.map(i64::from),
+                    )
+                },
+            )
+            .await
+            {
+                return refusal;
+            }
+            let (Some(checked_pid), Some(checked_start)) = (checked_pid, checked_start) else {
+                return ToolResult::error(
+                    "the frontmost process instance could not be proven; no keys were sent",
+                );
+            };
             let prompt = PromptInput::from_args(&args);
             let control = Arc::new(crate::input::key_hold::HoldControl::default());
             #[cfg(test)]
@@ -333,6 +408,7 @@ impl Tool for HotkeyTool {
                 if control.is_cancelled() {
                     anyhow::bail!("key delivery cancelled");
                 }
+                super::not_editable::desktop_dispatch_guard(checked_pid, false)?;
                 let modifier_refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
                 #[cfg(test)]
                 if let Some(delivery) = test_delivery {
@@ -340,7 +416,7 @@ impl Tool for HotkeyTool {
                 }
                 crate::security_prompt::refuse_frontmost_keys(prompt)?;
                 crate::input::key_hold::deliver(
-                    crate::input::key_hold::KeyRoute::Global(None),
+                    crate::input::key_hold::KeyRoute::GuardedGlobal(checked_pid, checked_start),
                     &key,
                     &modifier_refs,
                     duration,
@@ -426,7 +502,7 @@ impl Tool for HotkeyTool {
         // whether or not the app is frontmost. That route checks the held
         // target window and returns its own result without posting the chord.
         let mut key_scope: Option<crate::input::skylight::WindowKeyScope> = None;
-        if !fg && px.is_none() {
+        if !fg {
             if let (Some(wid), Some(combo)) = (
                 window_id,
                 super::menu_equivalent::Combo::parse(&modifiers, &key),
@@ -459,39 +535,58 @@ impl Tool for HotkeyTool {
                     let shared_display = key_display.clone();
                     let shared_key = key.clone();
                     let shared_modifiers = modifiers.clone();
-                    if let Some(route) = window_menu_route(element_ptr, || async move {
-                        let lease = super::acquire_background_mutation(pid).await;
-                        if let Err(refusal) = lease
-                            .gate_again(
+                    if let Some(route) = window_menu_route(
+                        element_ptr.is_none() && px.is_none() && py.is_none(),
+                        || async move {
+                            let lease = super::acquire_background_mutation(pid).await;
+                            if let Err(refusal) = lease
+                                .gate_again(
+                                    wid,
+                                    None,
+                                    cua_driver_core::background_input::BackgroundAction::AxSemantic,
+                                )
+                                .await
+                            {
+                                return refusal;
+                            }
+                            let result = super::press_key::native_menu_chord(
+                                lease,
                                 wid,
-                                None,
-                                cua_driver_core::background_input::BackgroundAction::AxSemantic,
+                                shared_combo,
+                                shared_display,
+                                (shared_key, shared_modifiers),
+                                duration,
                             )
-                            .await
-                        {
-                            return refusal;
-                        }
-                        let result = super::press_key::native_menu_chord(
-                            lease,
-                            wid,
-                            shared_combo,
-                            shared_display,
-                            (shared_key, shared_modifiers),
-                            duration,
-                        )
-                        .await;
-                        let physical = result
-                            .structured_content
-                            .as_ref()
-                            .is_some_and(|value| value["path"] == "keys_under_scope");
-                        if physical {
-                            result
-                        } else {
-                            super::key_delivery_guard::semantic_duration(result, duration)
-                        }
-                    }) {
+                            .await;
+                            let physical = result
+                                .structured_content
+                                .as_ref()
+                                .is_some_and(|value| value["path"] == "keys_under_scope");
+                            if physical {
+                                result
+                            } else {
+                                super::key_delivery_guard::semantic_duration(result, duration)
+                            }
+                        },
+                    ) {
                         return route.await;
                     }
+                    let Some(target_stamp) = crate::ax::enablement::process_start_stamp(pid) else {
+                        return super::pre_dispatch_refusal("process_instance_unverified", "The target process instance could not be verified; no menu action was sent.");
+                    };
+                    let lease = match super::gate_background_window_action(
+                        pid,
+                        wid,
+                        element_ptr,
+                        super::window_keyboard_action(
+                            cua_driver_core::background_input::BackgroundAction::GenericKey,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(lease) => lease,
+                        Err(refusal) => return refusal,
+                    };
                     // The menu command acts on the app's key window. Make the
                     // addressed window key first, confirmed, or refuse: never
                     // act on another window (CUA-1767).
@@ -501,8 +596,44 @@ impl Tool for HotkeyTool {
                             Ok(scope) => scope,
                             Err(refusal) => return refusal,
                         };
-                    if let Some(ptr) = element_ptr {
-                        // The menu command acts on the focused element.
+                    // The menu command acts on the focused element. A pixel
+                    // target, or an element in web content (where AXFocused
+                    // can be acknowledged without moving the page's focus),
+                    // is focused with the pixel focus click (#5355).
+                    let focus_xy = match (px, py) {
+                        (Some(x), Some(y)) => Some((x, y)),
+                        (None, None) => {
+                            web_ax_focus_point(pid, wid, element_guard.clone(), element_index).await
+                        }
+                        _ => None,
+                    };
+                    if let Some((x, y)) = focus_xy {
+                        let focus = match super::focus_by_pixel(
+                            &self.state,
+                            pid,
+                            Some(wid),
+                            x,
+                            y,
+                            false,
+                            args.opt_str("session"),
+                            args.opt_str("_session_id"),
+                            args.get("from_zoom")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            Some(&lease),
+                            super::prior_from_key_scope(_menu_key_scope.as_ref()),
+                            false,
+                        )
+                        .await
+                        {
+                            Ok(focus) => focus,
+                            Err(error) => return error,
+                        };
+                        if !menu_can_follow_focus(focus) {
+                            return ToolResult::text("The focus action may have run; the menu shortcut was not sent. Read fresh state before trying again.")
+                                .with_structured(serde_json::json!({"effect":"unverifiable", "code":"focus_delivery_unverified"}));
+                        }
+                    } else if let Some(ptr) = element_ptr {
                         let focused =
                             latency::spawn_action_blocking(move || focus_hotkey_element(pid, ptr))
                                 .await;
@@ -513,8 +644,30 @@ impl Tool for HotkeyTool {
                             );
                         }
                     }
-                    let menu_result = super::invoke_menu::run_in_background(
-                        pid,
+                    if crate::ax::enablement::process_start_stamp(pid) != Some(target_stamp) {
+                        return super::click::project_hit_focus_refusal(
+                            super::pre_dispatch_refusal(
+                                "process_instance_mismatch",
+                                "The target process changed before the menu action.",
+                            ),
+                            cua_driver_core::mutation::PriorInput::MayHaveDelivered,
+                        );
+                    }
+                    if let Err(refusal) = lease
+                        .gate_again(
+                            wid,
+                            element_ptr,
+                            cua_driver_core::background_input::BackgroundAction::AxSemantic,
+                        )
+                        .await
+                    {
+                        return super::click::project_hit_focus_refusal(
+                            refusal,
+                            cua_driver_core::mutation::PriorInput::MayHaveDelivered,
+                        );
+                    }
+                    let menu_result = super::invoke_menu::run_in_background_with_lease(
+                        &lease,
                         wid,
                         item.path,
                         super::invoke_menu::MenuRequest::KeyEquivalent(key_display.clone()),
@@ -815,12 +968,24 @@ impl Tool for HotkeyTool {
                 } else {
                     ""
                 };
+                let chromium_embedder = !fg
+                    && tokio::task::spawn_blocking(move || {
+                        super::type_text::is_chromium_embedder(pid)
+                    })
+                    .await
+                    .unwrap_or(false);
+                let structured = delivered_structured(fg, chromium_embedder);
+                let note = if chromium_embedder {
+                    format!(" {}", super::CHROMIUM_BACKGROUND_KEY_NOTE)
+                } else {
+                    String::new()
+                };
                 ToolResult::text(format!(
                     "Pressed {key_display} on pid {pid}{label}. Read the window before \
-                     sending it again.{}",
+                     sending it again.{note}{}",
                     changes.result_suffix()
                 ))
-                .with_structured(delivered_structured(fg))
+                .with_structured(structured)
             }
             Ok(Err(e)) if e.is::<super::press_key::WindowFocusConflictError>() => {
                 super::press_key::delivery_failed(e)
@@ -832,8 +997,15 @@ impl Tool for HotkeyTool {
     }
 }
 
-fn window_menu_route<T>(element: Option<usize>, route: impl FnOnce() -> T) -> Option<T> {
-    element.is_none().then(route)
+fn menu_can_follow_focus(focus: super::not_editable::FocusDispatch) -> bool {
+    matches!(
+        focus,
+        super::not_editable::FocusDispatch::None | super::not_editable::FocusDispatch::SentAx
+    )
+}
+
+fn window_menu_route<T>(window_only: bool, route: impl FnOnce() -> T) -> Option<T> {
+    window_only.then(route)
 }
 
 /// Only native applications use this menu lookup.
@@ -878,7 +1050,7 @@ pub(super) fn menu_refusal_without_keys(mut result: ToolResult) -> ToolResult {
     result
 }
 
-fn delivered_structured(foreground: bool) -> Value {
+fn delivered_structured(foreground: bool, _chromium_embedder: bool) -> Value {
     serde_json::json!({
         "path": if foreground { "key_events_fg" } else { "key_events" },
         "verified": false,
@@ -888,6 +1060,15 @@ fn delivered_structured(foreground: bool) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn browser_protection_is_checked_after_cursor_positioning() {
+        let frontmost = std::cell::Cell::new(false);
+        let refusal = super::browser_refusal_after_cursor(async { frontmost.set(true) }, || {
+            frontmost.get().then_some("protected")
+        })
+        .await;
+        assert_eq!(refusal, Some("protected"));
+    }
     /// #279.1: an AXFocused write the app could not finish (busy, a transient
     /// failure) is retried until the deadline like a write that did not
     /// stick; the hotkey still goes only after the focus read confirms it.
@@ -968,9 +1149,32 @@ mod tests {
     }
 
     #[test]
+    fn hotkey_discloses_background_save_automation_consent() {
+        let description = &def().description;
+        for phrase in [
+            "Apple Events",
+            "per-app Automation consent",
+            "first-use consent prompt",
+            "denied permission refuses the save",
+            "automation_consent_required",
+        ] {
+            assert!(description.contains(phrase), "missing disclosure: {phrase}");
+        }
+    }
+
+    #[test]
+    fn uncertain_pixel_focus_never_falls_through_to_a_menu_command() {
+        use super::super::not_editable::FocusDispatch;
+        assert!(super::menu_can_follow_focus(FocusDispatch::None));
+        assert!(!super::menu_can_follow_focus(FocusDispatch::Indeterminate));
+        assert!(super::menu_can_follow_focus(FocusDispatch::SentAx));
+        assert!(!super::menu_can_follow_focus(FocusDispatch::SentClick));
+    }
+
+    #[test]
     fn window_hotkey_reaches_frontmost_disabled_chord_decision() {
         let result = super::lookup_native_menu(true, || Some(())).and_then(|()| {
-            super::window_menu_route(None, || {
+            super::window_menu_route(true, || {
                 super::super::press_key::tests::frontmost_disabled_result()
             })
         });
@@ -982,7 +1186,7 @@ mod tests {
             fields["warning"],
             "menu item read disabled before the press; effect unverified"
         );
-        assert!(super::window_menu_route::<()>(Some(1), || panic!(
+        assert!(super::window_menu_route::<()>(false, || panic!(
             "element route must stay separate"
         ))
         .is_none());
@@ -1149,12 +1353,36 @@ mod tests {
 
     #[test]
     fn a_delivered_combo_suggests_no_resend() {
-        for foreground in [false, true] {
-            let structured = delivered_structured(foreground);
-            assert!(structured.get("escalation").is_none());
-            assert_eq!(structured["effect"], "unverifiable");
-            assert_eq!(structured["verified"], false);
+        for (foreground, path) in [(false, "key_events"), (true, "key_events_fg")] {
+            assert_eq!(
+                delivered_structured(foreground, false),
+                serde_json::json!({
+                    "path": path,
+                    "verified": false,
+                    "effect": "unverifiable",
+                })
+            );
         }
+    }
+
+    #[test]
+    fn a_background_combo_to_a_chromium_app_never_recommends_resending() {
+        let structured = delivered_structured(false, true);
+        assert_eq!(structured["effect"], "unverifiable");
+        assert!(structured.get("escalation").is_none());
+        assert!(!super::super::CHROMIUM_BACKGROUND_KEY_NOTE.contains("retry"));
+    }
+
+    #[test]
+    fn a_foreground_combo_to_a_chromium_app_suggests_no_resend() {
+        assert_eq!(
+            delivered_structured(true, true),
+            serde_json::json!({
+                "path": "key_events_fg",
+                "verified": false,
+                "effect": "unverifiable",
+            })
+        );
     }
 
     #[tokio::test]

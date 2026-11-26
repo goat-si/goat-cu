@@ -179,7 +179,7 @@ fn window_owner(hwnd: u64) -> Result<u32, String> {
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
     unsafe {
         let window = HWND(hwnd as usize as *mut _);
-        if !IsWindow(window).as_bool() {
+        if !IsWindow(Some(window)).as_bool() {
             return Err("the window no longer exists".into());
         }
         let mut pid = 0;
@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn ticketed_publications_carry_their_capture() {
         let store = SnapshotStore::new();
-        let ticket = store.begin_capture(42, 7);
+        let ticket = store.begin_capture_for_session(42, 7, Some("owner"));
         let id = publish_window_snapshot_with_basis(
             &store,
             42,
@@ -608,7 +608,7 @@ mod tests {
         assert_eq!(code, "process_instance_mismatch");
 
         // A screenshot refresh of that snapshot keeps its original instance.
-        let refresh = store.begin_capture(42, 7);
+        let refresh = store.begin_capture_for_session(42, 7, Some("owner"));
         assert!(store
             .refresh_basis_for_session(42, 7, Some("owner"), 2.0, None, None, &refresh)
             .is_some());
@@ -625,7 +625,7 @@ mod tests {
         assert_eq!(code, "process_instance_mismatch");
 
         let other = SnapshotStore::new();
-        let ticket = other.begin_capture(42, 7);
+        let ticket = other.begin_capture_for_session(42, 7, Some("owner"));
         let published = publish_capture_snapshot_with_basis(
             &other,
             42,

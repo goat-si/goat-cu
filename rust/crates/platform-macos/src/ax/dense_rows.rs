@@ -257,6 +257,7 @@ pub(crate) struct DeferredRow<H = RetainedElement> {
     pub collection: usize,
     pub element: H,
     pub depth: usize,
+    pub walk_depth: usize,
     pub parent_index: Option<usize>,
     pub parent_role: String,
     pub label_path: LabelPath,
@@ -457,6 +458,7 @@ mod tests {
             identifier: None,
             help: None,
             actions: vec![],
+            custom_actions: vec![],
             element_ptr: 0,
             depth,
             parent_element_index: parent,
@@ -467,6 +469,7 @@ mod tests {
             max_value: None,
             enabled: None,
             selected: None,
+            url: None,
             in_web_content: false,
         }
     }
@@ -496,6 +499,7 @@ mod tests {
             collection: 1,
             element: unsafe { RetainedElement::retain(0) },
             depth: 2,
+            walk_depth: 2,
             parent_index: Some(1),
             parent_role: "AXTable".into(),
             label_path: LabelPath::Inactive,
@@ -558,6 +562,7 @@ mod tests {
                     collection: collection_of(position),
                     element: unsafe { RetainedElement::retain(0) },
                     depth: 2,
+                    walk_depth: 2,
                     parent_index: parent,
                     parent_role: "AXTable".into(),
                     label_path: LabelPath::Inactive,
@@ -918,6 +923,7 @@ mod tests {
             markdown(&lines)
         };
         let ctx = ViewContext {
+            session: None,
             pid: 260026,
             window_id: 260026,
             key: ViewKey {

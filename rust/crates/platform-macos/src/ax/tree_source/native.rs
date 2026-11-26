@@ -136,6 +136,9 @@ impl AxTreeSource for NativeSource {
     fn text(&self, element: &NativeElement, name: &str) -> Read<String> {
         unsafe { scalar(element.raw(), name, string_from_cf) }
     }
+    fn url(&self, element: &NativeElement) -> Read<String> {
+        unsafe { scalar(element.raw(), "AXURL", crate::ax::batch_attrs::url_from_cf) }
+    }
     fn text_status(&self, element: &NativeElement, name: &str) -> AttrStatus {
         unsafe { read_string_status(element.raw(), name) }
     }

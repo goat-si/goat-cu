@@ -2,10 +2,9 @@ use super::*;
 use std::sync::{mpsc, Arc, Barrier};
 use std::time::{Duration, Instant};
 use windows::core::w;
-use windows::Win32::Foundation::HINSTANCE;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, HMENU, WINDOW_EX_STYLE, WINDOW_STYLE,
+    CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
 };
 
 struct Com;
@@ -44,9 +43,9 @@ impl BlockedWindow {
                 0,
                 100,
                 100,
-                HWND::default(),
-                HMENU::default(),
-                HINSTANCE::default(),
+                None,
+                None,
+                None,
                 None,
             )
             .expect("create hidden window");

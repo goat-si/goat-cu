@@ -125,7 +125,7 @@ async fn a_step_refused_for_background_delivery_says_how_or_falls_back() {
     let refused = "Background pixel click is not available for pid 2261: its libreoffice-vcl toolkit ignores background (PID-routed) mouse events. Retry this action with delivery_mode:\"foreground\"; Cua Driver will activate the window.";
     let result = harness
         .run(json!({"pid": 2261, "window_id": 181, "steps": [
-            {"tool": "click", "args": {"x": 217, "y": 779, "fail_message": refused}}
+            {"tool": "click", "args": {"x": 217, "y": 779, "fail_message": refused, "fail_not_delivered": true}}
         ]}))
         .await;
     assert_eq!(result.is_error, Some(true));
@@ -142,12 +142,110 @@ async fn a_step_refused_for_background_delivery_says_how_or_falls_back() {
     let _ = harness
         .run(
             json!({"pid": 2261, "window_id": 181, "foreground_fallback": true, "steps": [
-                {"tool": "click", "args": {"x": 217, "y": 779, "fail_message": refused}}
+                {"tool": "click", "args": {"x": 217, "y": 779, "fail_message": refused, "fail_not_delivered": true}}
             ]}),
         )
         .await;
     assert_eq!(harness.hits("click"), before + 2);
     assert_eq!(harness.last("click")["delivery_mode"], "foreground");
+}
+
+#[tokio::test]
+async fn an_explicit_background_step_is_never_sent_in_the_foreground() {
+    let harness = Harness::new();
+    let refused = "Background pixel click is not available for pid 2261. Retry this action with delivery_mode:\"foreground\".";
+    // The step's own mode, and run_steps' default, both opt out of the
+    // fallback: explicit "background" is strict.
+    for batch in [
+        json!({"pid": 2261, "window_id": 181, "foreground_fallback": true, "steps": [
+            {"tool": "click", "args": {"x": 1, "y": 2, "delivery_mode": "background", "fail_message": refused, "fail_not_delivered": true}}
+        ]}),
+        json!({"pid": 2261, "window_id": 181, "foreground_fallback": true, "delivery_mode": "background", "steps": [
+            {"tool": "click", "args": {"x": 1, "y": 2, "fail_message": refused, "fail_not_delivered": true}}
+        ]}),
+    ] {
+        let before = harness.hits("click");
+        let result = harness.run(batch).await;
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(harness.hits("click"), before + 1, "{}", text(&result));
+        assert_eq!(harness.last("click")["delivery_mode"], "background");
+        assert!(
+            !text(&result).contains("foreground_fallback"),
+            "{}",
+            text(&result)
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_step_whose_input_may_have_landed_is_never_replayed() {
+    let harness = Harness::new();
+    let hint = "Retry this action with delivery_mode:\"foreground\".";
+    let escalation = json!({"recommended": "foreground", "reason": "background route failed"});
+    // Each failure follows dispatch: the click may have landed, so sending it
+    // again in the foreground could click twice, whatever the hint says.
+    for structured in [
+        // An untyped legacy response does not prove delivery or non-delivery.
+        json!({"code": "background_unavailable", "suggestion": hint, "escalation": escalation}),
+        json!({"code": "background_unavailable", "effect": "no_drop", "escalation": escalation}),
+        json!({"code": "background_unavailable", "effect": "unverifiable",
+               "suggestion": hint, "escalation": escalation}),
+        json!({"code": "ax_timeout", "effect": "unknown", "escalation": escalation}),
+        json!({"code": "background_unavailable", "effect": "partial",
+               "delivery": {"mode": "background", "delivered_count": 2},
+               "escalation": escalation}),
+        json!({"effect": "unverifiable", "route": "accessibility",
+               "delivery": {"mode": "unknown"}}),
+        // Not a refusal either: a suspected no-op was still sent, and an
+        // effect this rule does not know cannot show that nothing was.
+        json!({"code": "background_unavailable", "effect": "suspected_noop",
+               "escalation": escalation}),
+        json!({"code": "background_unavailable", "effect": "not_yet_defined",
+               "suggestion": hint, "escalation": escalation}),
+        json!({"code": "background_unavailable", "effect": "refused",
+               "delivery": {"mode": "background", "delivered_count": 1},
+               "escalation": escalation}),
+    ] {
+        let before = harness.hits("click");
+        let result = harness
+            .run(
+                json!({"pid": 1, "window_id": 2, "foreground_fallback": true, "steps": [
+                    {"tool": "click", "args": {"x": 3, "y": 4, "fail_message": hint,
+                                               "fail_structured": structured}}
+                ]}),
+            )
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(harness.hits("click"), before + 1, "replayed: {structured}");
+        assert!(
+            !text(&result).contains("foreground_fallback"),
+            "{}",
+            text(&result)
+        );
+    }
+
+    // A refusal raised before any input was sent, or one that proves nothing
+    // landed (a macOS drag-and-drop that released without a drop), is still
+    // replayed once.
+    for structured in
+        [json!({"code": "background_unavailable", "effect": "refused", "escalation": escalation})]
+    {
+        let before = harness.hits("click");
+        let _ = harness
+            .run(
+                json!({"pid": 1, "window_id": 2, "foreground_fallback": true, "steps": [
+                    {"tool": "click", "args": {"x": 3, "y": 4, "fail_message": hint,
+                                               "fail_structured": structured, "fail_not_delivered": true}}
+                ]}),
+            )
+            .await;
+        assert_eq!(
+            harness.hits("click"),
+            before + 2,
+            "not replayed: {structured}"
+        );
+        assert_eq!(harness.last("click")["delivery_mode"], "foreground");
+    }
 }
 
 #[test]
@@ -383,7 +481,7 @@ async fn a_menu_bar_item_token_runs_as_invoke_menu() {
     );
     let refused = "Background input refused (element_outside_target_window): the addressed element could not be proven to belong to window 90";
     let result = harness
-        .run(json!({"steps": [{"tool": "click", "args": {"pid": 80, "window_id": 90, "element_token": "s0000a0e1:771", "fail_message": refused}}]}))
+        .run(json!({"steps": [{"tool": "click", "args": {"pid": 80, "window_id": 90, "element_token": "s0000a0e1:771", "fail_message": refused, "fail_not_delivered": true}}]}))
         .await;
     // The probe invoke_menu carries no action record, so only the routing
     // is checked here; the real tool reports its own outcome.
@@ -419,14 +517,34 @@ struct RerenderState {
     incomplete: bool,
     refusal: Option<&'static str>,
     click_calls: usize,
+    menu_calls: usize,
     plain_stale: bool,
+    ambiguous_stale: bool,
     read_refusal: Option<&'static str>,
+    /// Every click's arguments, in order.
+    sent: Vec<Value>,
+    /// Refuse a live token's click unless it asks for the foreground, as a
+    /// toolkit that ignores background input does.
+    refuse_background: bool,
+    /// Fail a live token's foreground click too.
+    foreground_fails: bool,
 }
 
 #[async_trait]
 impl Tool for Rerender {
     fn def(&self) -> &ToolDef {
         &self.def
+    }
+
+    async fn protected_resource_scope(
+        &self,
+        _: &str,
+        _: &Value,
+    ) -> Result<Option<Value>, crate::tool::ProtectedResourceScopeError> {
+        let pid = self.state.lock().unwrap().pid;
+        Ok(Some(
+            json!({"fingerprint":{"pid":pid,"start_time":7,"executable":null}}),
+        ))
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
@@ -469,6 +587,11 @@ impl Tool for Rerender {
             }
             "click" => {
                 state.click_calls += 1;
+                if state.ambiguous_stale {
+                    return ToolResult::error("element_token is stale after a possible action")
+                        .with_structured(json!({"refusal":{"code":"stale_element_token"},"effect":"unverifiable"}))
+                        .with_disposition(cua_driver_contract::ErrorDisposition::UNCERTAIN);
+                }
                 if let Some(code) = state.refusal {
                     return ToolResult::error(
                         "element_token is stale; Retry with delivery_mode:\"foreground\"",
@@ -482,11 +605,15 @@ impl Tool for Rerender {
                     .as_str()
                     .unwrap_or_default()
                     .to_owned();
+                state.sent.push(args.clone());
                 let current = format!("s{:08x}:", state.snapshot);
                 if !token.starts_with(&current) {
                     if state.plain_stale {
                         return ToolResult::error("element_token is stale")
-                            .with_structured(json!({"refusal":{"code":"stale_element_token"}}));
+                            .with_structured(json!({"refusal":{"code":"stale_element_token"}}))
+                            .with_disposition(
+                                cua_driver_contract::ErrorDisposition::NOT_DELIVERED,
+                            );
                     }
                     return ToolResult::error(
                         "Background input refused (element_outside_target_window): the addressed \
@@ -494,10 +621,28 @@ impl Tool for Rerender {
                          get_window_state snapshot and re-address it",
                     );
                 }
+                let foreground = args["delivery_mode"] == "foreground";
+                if state.refuse_background && !foreground {
+                    return crate::delivery::background_unavailable_result(
+                        "Background click is not available: this toolkit ignores background \
+                         mouse events.",
+                        "background_unavailable",
+                        "the toolkit ignores background mouse events",
+                        json!({}),
+                    )
+                    .with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED);
+                }
+                if state.foreground_fails && foreground {
+                    return ToolResult::error("foreground click did not reach the element");
+                }
                 let row: usize = token[current.len()..].parse().unwrap();
                 let label = state.rows[row - 1].1.to_owned();
                 state.clicked.push(label.clone());
                 ToolResult::text(format!("clicked {label}"))
+            }
+            "invoke_menu" => {
+                state.menu_calls += 1;
+                ToolResult::text("menu")
             }
             "list_windows" => ToolResult::text("windows").with_structured(json!({"windows": [{
                 "pid": state.pid, "window_id": 7, "app_name": "Daymark", "title": "Daymark",
@@ -620,14 +765,21 @@ fn rerender_registry(
         ..Default::default()
     }));
     let mut registry = ToolRegistry::new();
-    for name in ["click", "get_window_state", "list_windows", "list_apps"] {
+    for name in [
+        "click",
+        "get_window_state",
+        "list_windows",
+        "list_apps",
+        "kill_app",
+        "invoke_menu",
+    ] {
         registry.register(Box::new(Rerender {
             def: ToolDef {
                 name: name.into(),
                 description: "fake".into(),
                 input_schema: json!({"type": "object", "properties": {
                     "pid": {"type": "integer"}, "window_id": {"type": "integer"},
-                    "element_token": {"type": "string"}
+                    "element_token": {"type": "string"}, "delivery_mode": {"type": "string"}
                 }}),
                 read_only: name != "click",
                 destructive: false,
@@ -641,6 +793,25 @@ fn rerender_registry(
     let registry = Arc::new(registry);
     registry.init_self_weak();
     (registry, state)
+}
+
+#[tokio::test]
+async fn stale_error_after_possible_delivery_never_refinds_or_acts_again() {
+    let (registry, state) = rerender_registry(425109, vec![("AXButton", "Save")]);
+    state.lock().unwrap().ambiguous_stale = true;
+    crate::window_state_view::remember_for_test(
+        "s0000fa14",
+        425109,
+        7,
+        "- [14] AXButton \"Save\"\n",
+    );
+    let result = registry.invoke(super::super::RUN_STEPS_TOOL, json!({
+        "steps":[{"tool":"click","args":{"pid":425109,"window_id":7,"element_token":"s0000fa14:14"}}]
+    })).await;
+    assert_eq!(result.is_error, Some(true));
+    let state = state.lock().unwrap();
+    assert_eq!(state.snapshot, 40, "no stale refind read");
+    assert_eq!(state.click_calls, 1, "no second click");
 }
 
 #[tokio::test]
@@ -677,6 +848,45 @@ async fn a_stale_element_token_is_found_again_by_its_role_and_label() {
 }
 
 #[tokio::test]
+async fn an_unproven_stale_refusal_never_refinds_or_falls_back() {
+    let rows = vec![
+        ("AXButton", "Update event"),
+        ("AXButton", "Aster kickoff"),
+        ("AXButton", "Cinder decision LHP-CINDER"),
+    ];
+    for foreground_fails in [false, true] {
+        let (registry, state) = rerender_registry(42, rows.clone());
+        {
+            let mut state = state.lock().unwrap();
+            state.refuse_background = true;
+            state.foreground_fails = foreground_fails;
+        }
+        crate::window_state_view::remember_for_test(
+            "s0000002e",
+            42,
+            7,
+            "- [0] AXWindow \"Daymark\"\n  - [14] AXButton \"Cinder decision LHP-CINDER\" [actions=[press]]\n",
+        );
+        let result = registry
+            .invoke(
+                super::super::RUN_STEPS_TOOL,
+                json!({"foreground_fallback": true, "steps": [{"tool": "click", "args": {
+                    "pid": 42, "window_id": 7, "element_token": "s0000002e:14"
+                }}]}),
+            )
+            .await;
+        let state = state.lock().unwrap();
+        // The stale-looking refusal carries no proof that input was not sent.
+        // Neither a refind nor a foreground replay is safe in this case.
+        assert_eq!(state.sent.len(), 1, "{:?}", state.sent);
+        assert_eq!(state.sent[0]["element_token"], "s0000002e:14");
+        assert!(state.clicked.is_empty());
+        assert_eq!(result.is_error, Some(true), "{}", text(&result));
+        assert!(!text(&result).contains("ran in the foreground"));
+    }
+}
+
+#[tokio::test]
 async fn a_stale_token_is_not_retried_when_its_label_is_ambiguous_or_unknown() {
     let (registry, state) = rerender_registry(425105, vec![("AXButton", "OK"), ("AXButton", "OK")]);
     crate::window_state_view::remember_for_test(
@@ -700,4 +910,113 @@ async fn a_stale_token_is_not_retried_when_its_label_is_ambiguous_or_unknown() {
         );
     }
     assert!(state.lock().unwrap().clicked.is_empty());
+}
+
+#[tokio::test]
+async fn no_delivery_evidence_never_replays_a_foreground_hint() {
+    let harness = Harness::new();
+    let hint = "Retry this action with delivery_mode:\"foreground\"";
+    let result = harness
+        .run(
+            json!({"pid":1,"window_id":2,"foreground_fallback":true,"steps":[
+                {"tool":"click","args":{"x":3,"y":4,"fail_message":hint}}
+            ]}),
+        )
+        .await;
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(
+        harness.hits("click"),
+        1,
+        "an unclassified send must not be replayed"
+    );
+}
+
+#[tokio::test]
+async fn f4a_refind_must_not_foreground_replay_original_token() {
+    let (registry, state) = rerender_registry(425199, vec![("AXButton", "Save")]);
+    {
+        let mut s = state.lock().unwrap();
+        s.plain_stale = true;
+        s.refuse_background = true;
+    }
+    crate::window_state_view::remember_for_test(
+        "s0000fa99",
+        425199,
+        7,
+        "- [14] AXButton \"Save\"\n",
+    );
+    let result = registry.invoke(super::super::RUN_STEPS_TOOL, json!({"foreground_fallback":true,"steps":[{"tool":"click","args":{"pid":425199,"window_id":7,"element_token":"s0000fa99:14"}}]})).await;
+    let s = state.lock().unwrap();
+    assert_eq!(s.click_calls, 2, "no third dispatch: {}", text(&result));
+    assert_eq!(result.is_error, Some(true));
+}
+
+#[tokio::test]
+async fn f4a_revision_role_lookup_is_refused_before_reads() {
+    let (registry, state) = rerender_registry(425198, vec![("AXButton", "Save")]);
+    let result = registry.invoke(super::super::RUN_STEPS_TOOL, json!({"steps":[{"tool":"click","args":{"pid":425198,"window_id":7,"role":"AXButton","name":"Save","ui_tree_revision":1}}]})).await;
+    assert_eq!(result.is_error, Some(true), "{}", text(&result));
+    let s = state.lock().unwrap();
+    assert_eq!(s.snapshot, 40);
+    assert_eq!(s.click_calls, 0);
+}
+
+#[tokio::test]
+async fn f4a_revision_stale_never_refinds_or_routes_menu() {
+    for menu in [true, false] {
+        let pid = if menu { 425196 } else { 425195 };
+        let (registry, state) = rerender_registry(pid, vec![("AXButton", "Save")]);
+        state.lock().unwrap().plain_stale = true;
+        let snapshot = if menu { "s0000fa98" } else { "s0000fa97" };
+        let token = format!("{snapshot}:14");
+        let tree = if menu {
+            "- [27] AXMenuBar\n  - [700] AXMenuBarItem \"Sheet\"\n    - [701] AXMenu\n      - [14] AXMenuItem \"Save\"\n"
+        } else {
+            "- [14] AXButton \"Save\"\n"
+        };
+        crate::window_state_view::remember_for_test(snapshot, pid, 7, tree);
+        let auth = super::context(None);
+        let owner = auth.runtime_session_key("f4a-revision");
+        let revision = crate::ui_tree_revision::record_scoped(
+            Some(&owner),
+            "7",
+            pid,
+            7,
+            &crate::window_state_view::ViewKey {
+                query: None,
+                max_elements: 250,
+                max_depth: None,
+            },
+            Some(snapshot),
+            tree,
+        );
+        let result = registry.invoke_with_context(super::super::RUN_STEPS_TOOL, json!({"session":"f4a-revision","steps":[{"tool":"click","args":{"pid":pid,"window_id":7,"element_token":token,"ui_tree_revision":revision}}]}), auth).await;
+        let s = state.lock().unwrap();
+        assert_eq!(s.click_calls, 1, "{}", text(&result));
+        assert_eq!(s.snapshot, 40, "{}", text(&result));
+        assert_eq!(s.menu_calls, 0, "{}", text(&result));
+        assert_eq!(result.is_error, Some(true));
+    }
+}
+
+#[tokio::test]
+async fn f4a_cross_session_observation_refuses_registry_action() {
+    let pid = 425194;
+    let (registry, state) = rerender_registry(pid, vec![("AXButton", "Save")]);
+    let auth = super::context(None);
+    let a = auth.runtime_session_key("f4a-a");
+    let b = auth.runtime_session_key("f4a-b");
+    let view = crate::window_state_view::ViewKey {
+        query: None,
+        max_elements: 250,
+        max_depth: None,
+    };
+    let rev = crate::ui_tree_revision::record_scoped(Some(&a), "7", pid, 7, &view, None, "old");
+    crate::ui_tree_revision::record_scoped(Some(&b), "7", pid, 7, &view, None, "new");
+    let result = registry.invoke_with_context("click", json!({"session":"f4a-a","pid":pid,"window_id":7,"element_token":"s00000028:1","ui_tree_revision":rev}), auth).await;
+    assert_eq!(
+        result.structured_content.unwrap()["refusal"]["code"],
+        "stale_revision"
+    );
+    assert_eq!(state.lock().unwrap().click_calls, 0);
 }

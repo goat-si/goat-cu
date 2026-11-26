@@ -18,7 +18,7 @@ use crate::ax::bindings::{
     kAXErrorInvalidUIElement, AXUIElementCopyAttributeValue, AXUIElementCopyElementAtPosition,
     AXUIElementCreateApplication, AXUIElementRef, AXUIElementSetMessagingTimeout,
 };
-use crate::ax::tree::AXNode;
+use crate::ax::tree::{copy_title_element_text, title_or_title_element, AXNode};
 use core_foundation::base::{CFEqual, CFRelease, CFTypeRef, TCFType};
 use core_foundation::string::CFString;
 use cua_driver_core::fast_path::{
@@ -28,12 +28,13 @@ use cua_driver_core::fast_path::{
     pixel::GrayImage,
     pixel_guard::{self, CropSource, PixelGuardConfig},
     reason::{Reason, Verdict},
-    store::{global, ReadImage, SnapshotFingerprints},
+    store::{GuardStore, ReadImage, SnapshotFingerprints},
     window::{verify_window, PointerDelivery, WindowFingerprint, WindowObservation},
     wire, Rect,
 };
 use cua_driver_core::protocol::ToolResult;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Per-element AX messaging timeout for the act-time hit-test, so a hung
@@ -52,11 +53,12 @@ fn label_of(title: Option<&str>, description: Option<&str>) -> Option<String> {
 /// Fingerprints for the actionable rows of a published snapshot, in token
 /// index order (the same filter `AxSnapshot::from_nodes` uses).
 pub fn record_snapshot(
+    store: &GuardStore,
+    session: Option<&str>,
     pid: i32,
     window_id: u64,
     snapshot_id: u32,
     nodes: &[AXNode],
-    session: Option<&str>,
 ) {
     if !fp::mode().checks() {
         return;
@@ -85,12 +87,12 @@ pub fn record_snapshot(
         .iter()
         .filter(|n| n.frame.is_some_and(|f| f[3] <= 1.0))
         .count();
-    global().put_snapshot(
+    store.put_snapshot(
         snapshot_id,
         SnapshotFingerprints {
+            session: session.map(str::to_owned),
             pid,
             window_id,
-            session: session.map(str::to_owned),
             elements,
             element_count: nodes.len(),
             thin_frames: thin,
@@ -98,54 +100,49 @@ pub fn record_snapshot(
     );
 }
 
-/// Keep the read-time window image (greyscale, in memory) and the window
-/// fingerprint for the pixel and window guards.
-pub fn record_read_image(
+/// The read-time window image (greyscale, in memory) and the window
+/// fingerprint for the pixel and window guards, for the caller to put in its
+/// guard store.
+pub fn read_image(
     pid: i32,
     window_id: u32,
     raw: &cua_driver_core::image_utils::CapturedImage,
     bounds: &crate::windows::WindowBounds,
-    session: Option<&str>,
-) {
+) -> Option<ReadImage> {
     if !fp::mode().checks() {
-        return;
+        return None;
     }
-    let Some(image) = wire::gray_from_captured(raw) else {
-        return;
-    };
+    let image = wire::gray_from_captured(raw)?;
     let scale = if bounds.width > 0.0 {
         image.width as f64 / bounds.width
     } else {
         1.0
     };
-    global().put_image(
-        pid,
-        ReadImage {
-            snapshot_id: 0,
-            image,
-            window: WindowFingerprint {
-                window_id: u64::from(window_id),
-                pid,
-                frame: Rect::new(bounds.x, bounds.y, bounds.width, bounds.height),
-                scale,
-            },
+    Some(ReadImage {
+        snapshot_id: 0,
+        image,
+        window: WindowFingerprint {
+            window_id: u64::from(window_id),
+            pid,
+            frame: Rect::new(bounds.x, bounds.y, bounds.width, bounds.height),
+            scale,
         },
-        session,
-    );
+    })
 }
 
 /// Record only the window fingerprint (tree-only reads).
-pub fn record_window(pid: i32, window_id: u32, session: Option<&str>) {
+pub fn record_window(store: &GuardStore, session: Option<&str>, pid: i32, window_id: u32) {
     if !fp::mode().checks() {
         return;
     }
     if let Some(info) = crate::windows::window_info_by_id(window_id) {
-        let scale = global()
-            .window(pid, u64::from(window_id), session)
+        let scale = store
+            .window(session, pid, u64::from(window_id))
             .map(|w| w.scale)
             .unwrap_or(0.0);
         let b = info.bounds;
-        global().put_window(
+        store.put_window(
+            session,
             pid,
             WindowFingerprint {
                 window_id: u64::from(window_id),
@@ -153,7 +150,6 @@ pub fn record_window(pid: i32, window_id: u32, session: Option<&str>) {
                 frame: Rect::new(b.x, b.y, b.width, b.height),
                 scale,
             },
-            session,
         );
     }
 }
@@ -175,8 +171,23 @@ unsafe fn observe(element: AXUIElementRef) -> ElementObservation {
         CFRelease(value);
     }
     let role = copy_string_attr(element, "AXRole");
-    let title = copy_string_attr(element, "AXTitle");
     let description = copy_string_attr(element, "AXDescription");
+    let failed = std::cell::Cell::new(false);
+    let title = title_or_title_element(
+        copy_string_attr(element, "AXTitle").as_deref(),
+        description.as_deref(),
+        || match copy_title_element_text(element, CHECK_TIMEOUT_S) {
+            crate::ax::tree::Read::Known(value) => Some(value),
+            crate::ax::tree::Read::Absent => None,
+            crate::ax::tree::Read::Unknown(_) => {
+                failed.set(true);
+                None
+            }
+        },
+    );
+    if failed.get() {
+        return ElementObservation::default();
+    }
     ElementObservation {
         valid: true,
         role,
@@ -202,7 +213,7 @@ unsafe fn hit_test(pid: i32, x: f64, y: f64) -> Option<AXUIElementRef> {
 }
 
 /// Whether `hit` is `target` or a descendant within a few ancestors.
-unsafe fn is_self_or_ancestor(hit: AXUIElementRef, target: AXUIElementRef) -> bool {
+pub(crate) unsafe fn is_self_or_ancestor(hit: AXUIElementRef, target: AXUIElementRef) -> bool {
     let mut current = hit;
     let mut owned: Vec<AXUIElementRef> = Vec::new();
     let mut found = false;
@@ -275,7 +286,8 @@ fn window_observation(
     screen: (f64, f64),
     want: &WindowFingerprint,
 ) -> WindowObservation {
-    let windows = crate::windows::all_windows();
+    let enumeration = crate::windows::all_windows_with_space_snapshot();
+    let windows = enumeration.windows;
     let Some(info) = windows.iter().find(|w| w.window_id == window_id) else {
         return WindowObservation {
             exists: false,
@@ -290,24 +302,37 @@ fn window_observation(
     let b = &info.bounds;
     // `z_index` grows toward the front (the frontmost window has the highest
     // value), so the window at the point is the one with the largest z_index.
-    let front = windows
+    let front = enumeration
+        .complete
+        .then(|| front_window_at_point(&windows, screen))
+        .flatten();
+    WindowObservation {
+        exists: true,
+        pid: info.pid,
+        frame: Rect::new(b.x, b.y, b.width, b.height),
+        scale: want.scale,
+        visible: info.is_on_screen && info.on_current_space != Some(false),
+        pid_at_point: front.map(|w| w.pid),
+        covered_at_point: Some(front.is_none_or(|w| w.window_id != window_id)),
+    }
+}
+
+fn front_window_at_point(
+    windows: &[crate::windows::WindowInfo],
+    screen: (f64, f64),
+) -> Option<&crate::windows::WindowInfo> {
+    let candidates: Vec<_> = windows
         .iter()
         .filter(|w| w.layer == 0 && w.is_on_screen)
         .filter(|w| {
             Rect::new(w.bounds.x, w.bounds.y, w.bounds.width, w.bounds.height)
                 .contains(screen.0, screen.1)
         })
-        .max_by_key(|w| w.z_index);
-    WindowObservation {
-        exists: true,
-        pid: info.pid,
-        frame: Rect::new(b.x, b.y, b.width, b.height),
-        // A scale change shows as a size change in pixels; points are enough.
-        scale: want.scale,
-        visible: info.is_on_screen && info.on_current_space != Some(false),
-        pid_at_point: front.map(|w| w.pid),
-        covered_at_point: front.map(|w| w.window_id != window_id),
+        .collect();
+    if candidates.iter().any(|window| window.z_index.is_none()) {
+        return None;
     }
+    candidates.into_iter().max_by_key(|w| w.z_index)
 }
 
 /// Act-time crops from the window itself (never the screen).
@@ -383,6 +408,7 @@ fn finish(
 /// `pixel` is true when the action is delivered as a pointer event at the
 /// element's centre (button=middle) rather than an AX action.
 pub async fn guard_element(
+    store: &GuardStore,
     tool: &str,
     pid: i32,
     window_id: u32,
@@ -407,7 +433,7 @@ pub async fn guard_element(
             relocate: None,
         };
     };
-    let Some((_, _, want)) = global().element(snapshot_id, index, wire::session_of(args)) else {
+    let Some((_, _, want)) = store.element(snapshot_id, index, wire::session_of(args)) else {
         // Read before the flag was on: nothing to compare.
         return Outcome::Proceed {
             summary: Some(wire::check_summary(&Verdict::Ok, None, "none", 0.0)),
@@ -474,14 +500,16 @@ pub async fn guard_element(
 /// The pixel path: window guards for every click, then the AX check where
 /// the tree saw an element at the point, or the pixel check where it did
 /// not (sparse, no tree, remote surfaces).
+#[allow(clippy::too_many_arguments)]
 pub async fn guard_pixel(
+    store: Arc<GuardStore>,
+    session: Option<String>,
     tool: &str,
     pid: i32,
     window_id: u32,
     local: (f64, f64),
     screen: (f64, f64),
     foreground: bool,
-    session: Option<&str>,
 ) -> Outcome {
     if !fp::mode().checks() {
         return Outcome::Proceed {
@@ -492,15 +520,13 @@ pub async fn guard_pixel(
     let started = Instant::now();
     let wid = u64::from(window_id);
     let tool_name = tool.to_owned();
-    let session = session.map(str::to_owned);
     let (verdict, class, verified, scale) = tokio::task::spawn_blocking(move || unsafe {
-        let store = global();
         let session = session.as_deref();
-        let image = store.image(pid, wid, session);
+        let image = store.image(session, pid, wid);
         let window_fp = image
             .as_ref()
             .map(|i| i.window)
-            .or_else(|| store.window(pid, wid, session));
+            .or_else(|| store.window(session, pid, wid));
         let delivery = if foreground {
             PointerDelivery::Screen
         } else {
@@ -519,13 +545,13 @@ pub async fn guard_pixel(
             .map(|w| w.frame)
             .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
         let stats = store
-            .latest_stats(pid, wid, session)
+            .latest_stats(session, pid, wid)
             .map(|(elements, thin_frames)| TreeStats {
                 elements,
                 thin_frames,
             });
         let class = classify(info.as_ref(), stats.as_ref(), window_rect);
-        let seen = store.element_at(pid, wid, screen.0, screen.1, session);
+        let seen = store.element_at(session, pid, wid, screen.0, screen.1);
 
         // Rich target the agent saw in the tree: the element there now must
         // be the one it saw (or contain the hit).
@@ -589,6 +615,30 @@ pub fn annotate(result: &mut ToolResult, summary: Option<Value>) {
 #[cfg(test)]
 mod tests {
     use super::label_of;
+
+    #[test]
+    fn unknown_stacking_does_not_prove_the_target_is_uncovered() {
+        let window = |id, z_index| crate::windows::WindowInfo {
+            window_id: id,
+            pid: id as i32,
+            app_name: String::new(),
+            title: String::new(),
+            bounds: crate::windows::WindowBounds {
+                x: 0.,
+                y: 0.,
+                width: 100.,
+                height: 100.,
+            },
+            layer: 0,
+            z_index,
+            is_on_screen: true,
+            current_space_id: None,
+            on_current_space: Some(true),
+            space_ids: None,
+        };
+        let windows = [window(1, Some(1)), window(2, None)];
+        assert!(super::front_window_at_point(&windows, (10., 10.)).is_none());
+    }
 
     #[test]
     fn label_prefers_title_then_description() {

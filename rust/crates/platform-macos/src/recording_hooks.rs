@@ -9,12 +9,17 @@ use serde_json::Value;
 
 pub(crate) fn install() {
     cua_driver_core::recording::set_screenshot_fn(|window_id, pid| {
-        if let Some(window_id) = window_id {
-            crate::capture::screenshot_window_bytes(window_id as u32).ok()
-        } else if let Some(pid) = pid {
+        let main_window_bytes = |pid: i64| {
             crate::windows::resolve_main_window_id(pid as i32)
                 .ok()
                 .and_then(|window_id| crate::capture::screenshot_window_bytes(window_id).ok())
+        };
+        if let Some(window_id) = window_id {
+            // A capture failure does not prove the target closed or that a
+            // different window is in scope; never substitute another window.
+            crate::capture::screenshot_window_bytes(window_id as u32).ok()
+        } else if let Some(pid) = pid {
+            main_window_bytes(pid)
         } else {
             crate::capture::screenshot_display_bytes().ok()
         }

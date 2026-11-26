@@ -16,8 +16,7 @@ use std::sync::Arc;
 
 use crate::apps;
 use crate::ax::bindings::{
-    copy_children, copy_element_attr, copy_string_attr, element_screen_center, perform_action,
-    AXError, AXUIElementRef,
+    copy_children, copy_element_attr, copy_string_attr, perform_action, AXError, AXUIElementRef,
 };
 use crate::focus_guard;
 use crate::window_change_detector::WindowChangeDetector;
@@ -59,6 +58,16 @@ static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 const AMOUNT_MIN: u64 = 1;
 const AMOUNT_MAX: u64 = 50;
 
+/// Wheel point for an element: the center of its part inside the window, or
+/// the center of the whole element when the window is unknown or they do not
+/// overlap (the background guard then refuses it as outside the window).
+fn element_wheel_point(rect: [f64; 4], window: Option<[f64; 4]>) -> (f64, f64) {
+    let [x, y, w, h] = window
+        .and_then(|window| crate::ax::reveal_scroll::intersect(rect, window))
+        .unwrap_or(rect);
+    (x + w / 2.0, y + h / 2.0)
+}
+
 fn clamp_amount(requested: u64) -> usize {
     requested.clamp(AMOUNT_MIN, AMOUNT_MAX) as usize
 }
@@ -80,9 +89,15 @@ fn window_scroll_amount(args: &Value) -> Result<usize, ToolResult> {
 const ELECTRON_BACKGROUND_SCROLL_UNAVAILABLE: &str = "Background scroll is unavailable for \
      this Electron/Chromium window on macOS: it drops background wheel events and keystrokes, \
      and background scroll movement could not be established through accessibility. \
-     Retry with delivery_mode:\"foreground\" (and the same window_id, element_token \
-     or x,y); the driver briefly fronts that window, scrolls, and restores the prior frontmost \
-     app.";
+     Without fronting the window: find the item with a get_window_state query and act on it by \
+     element_token, or make the window taller with set_window_frame. If the user allows the \
+     window to come forward, retry with delivery_mode:\"foreground\" (same window_id, \
+     element_token or x,y); the driver briefly fronts it, scrolls, and restores the prior \
+     frontmost app.";
+
+const ELECTRON_BACKGROUND_SCROLL_SUGGESTION: &str = "Act on the item by element_token (find it \
+     with a get_window_state query) instead of scrolling, or retry with \
+     delivery_mode:\"foreground\" only if the user allows the window to come forward.";
 
 fn def() -> &'static ToolDef {
     DEF.get_or_init(|| ToolDef {
@@ -99,7 +114,7 @@ fn def() -> &'static ToolDef {
             // schema — keeps the contract consistent across platforms.
             "required": ["direction"],
             "properties": {
-                "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it." },
+                "session": cua_driver_core::tool_schema::session_schema(),
                 "pid": { "type": "integer", "description": "Target process ID. Required unless scope is \"desktop\" or element_token is supplied." },
                 "direction": {
                     "type": "string",
@@ -449,9 +464,9 @@ impl ScrollTool {
             } else {
                 Ok(())
             };
-            // Element path: wheel at the element's screen-space center. Both AX
-            // coordinates and window bounds are logical top-left points, so no
-            // Retina scaling is needed here.
+            // Element path: wheel at the center of the element's part inside the
+            // window. Both AX coordinates and window bounds are logical top-left
+            // points, so no Retina scaling is needed here.
             let wid = window_id;
             let target_guard = pre_focus_guard.clone();
             let target_task = latency::spawn_action_blocking(move || {
@@ -469,20 +484,20 @@ impl ScrollTool {
                     );
                 }
                 std::thread::sleep(std::time::Duration::from_millis(40));
-                let center = unsafe { element_screen_center(element_ptr as AXUIElementRef) };
                 let rect = unsafe {
                     crate::ax::bindings::element_screen_rect(element_ptr as AXUIElementRef)
                 };
-                Ok(center.map(|(cx, cy)| {
-                    let win_local = wid
-                        .and_then(crate::windows::window_bounds_by_id)
-                        .map(|b| (cx - b.x, cy - b.y));
+                let bounds = wid.and_then(crate::windows::window_bounds_by_id);
+                let window = bounds.as_ref().map(|b| [b.x, b.y, b.width, b.height]);
+                Ok(rect.map(|rect| {
+                    let (cx, cy) = element_wheel_point(rect, window);
+                    let win_local = bounds.as_ref().map(|b| (cx - b.x, cy - b.y));
                     WheelTarget {
                         screen_x: cx,
                         screen_y: cy,
                         win_local,
                         wid,
-                        rect,
+                        rect: Some(rect),
                     }
                 }))
             });
@@ -980,11 +995,12 @@ async fn electron_reveal_scroll(
     lease: &mut Option<super::BackgroundMutationLease>,
 ) -> ToolResult {
     let unavailable = || {
-        cua_driver_core::delivery::background_unavailable_result(
+        cua_driver_core::delivery::background_unavailable_result_with_suggestion(
             ELECTRON_BACKGROUND_SCROLL_UNAVAILABLE,
             "background_unavailable",
             "Electron/Chromium windows drop background wheel events and keystrokes on macOS",
             serde_json::json!({ "effect": "refused" }),
+            ELECTRON_BACKGROUND_SCROLL_SUGGESTION,
         )
     };
     let window = window_id.and_then(crate::windows::window_bounds_by_id);
@@ -2419,6 +2435,53 @@ mod wp3c_review_tests {
         assert_eq!(
             run(&[ok, kAXErrorActionUnsupported], 3),
             (NativeScroll::Pressed, 2)
+        );
+    }
+}
+
+#[cfg(test)]
+mod upstream_wheel_point_tests {
+    use super::*;
+    #[test]
+    fn element_wheel_point_is_the_center_of_an_element_inside_the_window() {
+        assert_eq!(
+            element_wheel_point([100.0, 100.0, 200.0, 100.0], Some([0.0, 0.0, 800.0, 600.0])),
+            (200.0, 150.0)
+        );
+    }
+
+    #[test]
+    fn element_wheel_point_stays_inside_a_window_shorter_than_the_element() {
+        assert_eq!(
+            element_wheel_point([0.0, 50.0, 800.0, 3000.0], Some([0.0, 0.0, 800.0, 600.0])),
+            (400.0, 325.0)
+        );
+    }
+
+    #[test]
+    fn element_wheel_point_uses_the_visible_part_of_an_element_above_the_window() {
+        assert_eq!(
+            element_wheel_point(
+                [100.0, -400.0, 200.0, 600.0],
+                Some([0.0, 100.0, 800.0, 600.0])
+            ),
+            (200.0, 150.0)
+        );
+    }
+
+    #[test]
+    fn element_wheel_point_falls_back_to_the_element_center_outside_the_window() {
+        assert_eq!(
+            element_wheel_point([0.0, 900.0, 200.0, 100.0], Some([0.0, 0.0, 800.0, 600.0])),
+            (100.0, 950.0)
+        );
+    }
+
+    #[test]
+    fn element_wheel_point_is_the_element_center_without_window_bounds() {
+        assert_eq!(
+            element_wheel_point([0.0, 50.0, 800.0, 3000.0], None),
+            (400.0, 1550.0)
         );
     }
 }

@@ -26,10 +26,14 @@
 
 use cua_driver_core::tool::ToolRegistry;
 
+#[cfg(any(target_os = "windows", test))]
+mod desktop_target;
+
 pub mod diagnostics;
+#[cfg(target_os = "windows")]
+pub mod dpi;
 pub mod health_report;
 pub mod overlay;
-pub mod pip;
 pub mod recording_hooks;
 pub mod terminal;
 pub mod tools;
@@ -111,6 +115,9 @@ mod value_append;
 #[cfg(any(target_os = "windows", test))]
 mod secure_field;
 
+#[cfg(any(target_os = "windows", test))]
+mod combo_privacy;
+
 // Pure restore rule for foreground input turns; runs its table test on any host.
 #[cfg(any(target_os = "windows", test))]
 mod typing_turn;
@@ -127,6 +134,12 @@ pub mod browser_platform;
 // tests run on any host.
 #[cfg(any(target_os = "windows", test))]
 mod browser_isolated_selection;
+
+// Machine policy that forces extensions on an isolated browser; the key
+// choice and policy assembly are cfg-independent so their unit tests run on
+// any host.
+#[cfg(any(target_os = "windows", test))]
+mod browser_managed_policy;
 
 // Pure path normalization and reparse-point resolution for the isolated
 // browser installation check; cfg-independent so its unit tests run on any
@@ -198,3 +211,6 @@ pub fn register_tools_with_cursor_and_provider(
     }
     tools::build_registry_with_provider(compat, provider)
 }
+
+#[cfg(any(target_os = "windows", test))]
+mod window_geometry;

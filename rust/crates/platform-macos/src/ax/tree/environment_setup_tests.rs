@@ -179,6 +179,7 @@ impl super::WalkElementBorrow<super::walker_seam_tests::Fake> for SingleRoot<'_>
     }
 }
 impl super::WalkOrchestration<super::walker_seam_tests::Fake> for SingleRoot<'_> {
+    fn flush_web_window(&self, _pid: i32, _element: Self::Element) {}
     fn release_application(&self, application: usize) {
         assert_eq!(application, 1);
         self.trace.borrow_mut().push("release-app");
@@ -709,9 +710,9 @@ fn shared_entry_preserves_application_creation_failure() {
     assert_eq!(
         observed.legacy.window_scope,
         Some(WindowScope::AxUnresolved {
-                ax_window_count: 0,
-                ax_windows_error: None,
-            })
+            ax_window_count: 0,
+            ax_windows_error: None,
+        })
     );
     assert_eq!(*environment.trace.borrow(), ["create"]);
     assert_eq!(
@@ -908,7 +909,7 @@ fn root_resolution_retries_from_observations_without_extra_retain() {
 
     let environment = Environment::new(Scenario::Launching);
     let scope = crate::ax::evidence::EvidenceScope::start();
-    let (roots, walk, window_scope) = super::resolve_top_level_with(
+    let (roots, walk, window_scope, _) = super::resolve_top_level_with(
         &environment,
         1,
         42,
@@ -961,7 +962,7 @@ fn sheet_scope_is_derived_from_observations_and_credits_transfer() {
 
     let environment = Environment::new(Scenario::Sheet);
     let scope = crate::ax::evidence::EvidenceScope::start();
-    let (roots, walk, window_scope) = super::resolve_top_level_with(
+    let (roots, walk, window_scope, _) = super::resolve_top_level_with(
         &environment,
         1,
         42,

@@ -16,7 +16,7 @@ use super::impl_::{
     input_error_result, non_ax_escalation, position_named_session_keyboard_cursor,
     prove_token_element, refuse_if_disabled, resolve_cursor_key, resolve_element_local_coords,
     spawn_text_write_bounded, stale_observed_element, text_write_stop_result, values_agree,
-    window_local_to_screen, x11_pixel_click_no_focus_steal, ToolState,
+    window_local_to_screen, with_cleanup_warning, x11_pixel_click_no_focus_steal, ToolState,
 };
 
 // ── set_value ─────────────────────────────────────────────────────────────────
@@ -283,7 +283,7 @@ impl Tool for SetValueTool {
             foreground_budget(value.len()),
             &[key_dispatch],
             value.len(),
-            move || -> anyhow::Result<Option<crate::input::FocusGuardReport>> {
+            move || -> anyhow::Result<(Option<crate::input::FocusGuardReport>, Option<String>)> {
                 let (win, lx, ly) = resolve_element_local_coords(pid, &target, xid_opt)?;
                 if is_combo {
                     return pick_from_popup(
@@ -325,7 +325,7 @@ impl Tool for SetValueTool {
                             )
                         },
                     )?;
-                    return Ok(None);
+                    return Ok((None, None));
                 }
                 let (_, guard) = crate::input::focus_guard::guarded(Some(pid), || {
                     gated_steps(
@@ -358,12 +358,12 @@ impl Tool for SetValueTool {
                         ],
                     )
                 })?;
-                Ok(guard)
+                Ok((guard, None))
             },
         )
         .await;
         match typed {
-            Ok(Ok(guard)) => {
+            Ok(Ok((guard, warning))) => {
                 // Let the toolkit commit on focus-out before reading back.
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                 let readback =
@@ -371,7 +371,7 @@ impl Tool for SetValueTool {
                         .await
                         .ok()
                         .flatten();
-                set_value_result(
+                let result = set_value_result(
                     idx,
                     &value,
                     match (is_combo, foreground_route) {
@@ -383,7 +383,8 @@ impl Tool for SetValueTool {
                     readback,
                     guard.as_ref(),
                     secret,
-                )
+                );
+                with_cleanup_warning(result, warning)
             }
             Ok(Err(error)) if crate::atspi::native::is_no_such_option(&error) => {
                 no_such_option_result(idx, &error, secret)
@@ -433,7 +434,8 @@ const POPUP_OPTIONS_WAIT: std::time::Duration = std::time::Duration::from_millis
 /// the foreground, the session's MPX pointer in the background), activate
 /// the option `value` names from the popup, and press Escape if the popup
 /// is still open afterwards (an unknown option, or a toolkit that keeps it
-/// open), so no popup is left behind.
+/// open), so no popup is left behind. Returns the focus guard report and a
+/// warning when the popup could not be closed after the pick.
 fn pick_from_popup(
     cursor_id: &str,
     pid: u32,
@@ -442,7 +444,7 @@ fn pick_from_popup(
     value: &str,
     foreground: bool,
     gate: &crate::atspi::native::TextWriteDispatch,
-) -> anyhow::Result<Option<crate::input::FocusGuardReport>> {
+) -> anyhow::Result<(Option<crate::input::FocusGuardReport>, Option<String>)> {
     use crate::atspi::native::gated_route;
     // Reads (popup state, coordinates) stay outside the gate; every write
     // (open click, option activation, Escape) checks it, so a timeout stops
@@ -467,23 +469,12 @@ fn pick_from_popup(
             crate::atspi::activate_option_token_gated(token, value, gate)
         })
     };
-    let open_and_pick = || -> anyhow::Result<()> {
-        // A pick that may have changed the control ends here: no Escape
-        // follows it.
-        crate::token_action_policy::pick_then_close(
-            pick,
-            // Let the toolkit close the popup on activation before checking.
-            || std::thread::sleep(std::time::Duration::from_millis(150)),
-            close_popup,
-            crate::atspi::native::text_write_stop,
-        )
-        .map(|_| ())
-    };
+    let open_and_pick = || pick_then_close(pick, close_popup);
     if foreground {
         // Open, pick and close in one transaction, so the restore runs once
         // the popup is gone instead of closing it before the pick.
         let (sx, sy) = window_local_to_screen(win, lx, ly)?;
-        crate::interaction::with_x11_foreground(
+        let (warning, _report) = crate::interaction::with_x11_foreground(
             win,
             crate::input::ForegroundOptions::pointer(),
             crate::interaction::session_policy().menu,
@@ -499,15 +490,58 @@ fn pick_from_popup(
                 open_and_pick()
             },
         )?;
-        return Ok(None);
+        return Ok((None, warning));
     }
-    let (_, guard) = crate::input::focus_guard::guarded(Some(pid), || {
+    let (warning, guard) = crate::input::focus_guard::guarded(Some(pid), || {
         gated_route(gate, || {
             x11_pixel_click_no_focus_steal(cursor_id, win, lx as i32, ly as i32, 1, 1)
         })?;
         open_and_pick()
     })?;
-    Ok(guard)
+    Ok((guard, warning))
+}
+
+/// Pick the option, then close the popup if it is still open. The pick's
+/// error wins. A close that fails after a successful pick is a warning, not
+/// an error: the option was set, and an error would invite picking again.
+fn pick_then_close(
+    pick: impl FnOnce() -> anyhow::Result<String>,
+    close: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<Option<String>> {
+    let mut warning = None;
+    crate::token_action_policy::pick_then_close(
+        pick,
+        || std::thread::sleep(std::time::Duration::from_millis(150)),
+        || {
+            warning = close().err().map(|error| {
+                format!("closing the combo box popup after the pick failed ({error:#}), so it may still be open")
+            });
+            Ok(())
+        },
+        crate::atspi::native::text_write_stop,
+    )?;
+    Ok(warning)
+}
+
+#[cfg(test)]
+#[test]
+fn a_failed_popup_close_never_turns_a_pick_into_an_error() {
+    let closing_fails = || Err(anyhow::anyhow!("virtual keyboard unavailable"));
+    let warning =
+        pick_then_close(|| Ok("Medium".into()), closing_fails).expect("the option was picked");
+    assert!(
+        warning.is_some_and(|warning| warning.contains("virtual keyboard unavailable")),
+        "a failed close is reported beside the pick"
+    );
+    assert_eq!(
+        pick_then_close(|| Ok("Medium".into()), || Ok(())).unwrap(),
+        None
+    );
+    let failed = pick_then_close(
+        || Err(anyhow::anyhow!("no option named Huge")),
+        closing_fails,
+    );
+    assert_eq!(failed.unwrap_err().to_string(), "no option named Huge");
 }
 
 /// Run a sequence of writes (click, select-all, type, commit) with the gate

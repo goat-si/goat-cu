@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 
 const MAX_HEADERS: usize = 16 * 1024;
 const MAX_BODY: usize = 1024 * 1024;
@@ -418,7 +417,8 @@ fn configured_session_mode() -> anyhow::Result<cua_driver_sdk::SessionPermission
 
 pub async fn start(sdk: Arc<crate::sdk_adapter::SdkAdapter>, port: u16) -> anyhow::Result<Server> {
     let service = Service::for_sdk(sdk)?;
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+    let listener =
+        crate::mcp_http::bind_http_listener((std::net::Ipv4Addr::LOCALHOST, port).into()).await?;
     let task = tokio::spawn(async move {
         let permits = Arc::new(tokio::sync::Semaphore::new(64));
         let mut tasks = tokio::task::JoinSet::new();
@@ -427,6 +427,7 @@ pub async fn start(sdk: Arc<crate::sdk_adapter::SdkAdapter>, port: u16) -> anyho
             tokio::select! {
                 accepted = listener.accept() => {
                     let Ok((mut stream, _)) = accepted else { break };
+                    if !crate::mcp_http::clear_inherit_flag(&stream) { continue; }
                     let Ok(permit) = permits.clone().try_acquire_owned() else { continue };
                     let service = service.clone();
                     tasks.spawn(async move {

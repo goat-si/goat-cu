@@ -184,8 +184,8 @@ fn edit_child(combo: isize) -> Option<isize> {
     let class = wide("Edit");
     unsafe {
         FindWindowExW(
-            hwnd(combo),
-            HWND::default(),
+            Some(hwnd(combo)),
+            None,
             PCWSTR(class.as_ptr()),
             PCWSTR::null(),
         )
@@ -193,6 +193,14 @@ fn edit_child(combo: isize) -> Option<isize> {
     .ok()
     .filter(|edit| !edit.is_invalid())
     .map(|edit| edit.0 as isize)
+}
+
+/// Password-style edit children must never be read or echoed.
+pub fn has_password_edit(combo: Combo) -> bool {
+    edit_child(combo.hwnd).is_some_and(|edit| {
+        let style = unsafe { GetWindowLongW(hwnd(edit), GWL_STYLE) };
+        style == 0 || style & 0x20 != 0
+    })
 }
 
 /// Send a combo notification to the combo's parent, as the control does.
@@ -236,7 +244,7 @@ pub fn combo_for_window(raw: isize) -> Option<Combo> {
 
 /// Select `value` in the combo (or type it into an editable one) and tell
 /// the app, as described in the module docs.
-pub fn set_value(combo: Combo, value: &str) -> anyhow::Result<ComboWrite> {
+pub fn set_value(combo: Combo, value: &str, secure: bool) -> anyhow::Result<ComboWrite> {
     let text = wide(value);
     let found = send(
         combo.hwnd,
@@ -246,15 +254,23 @@ pub fn set_value(combo: Combo, value: &str) -> anyhow::Result<ComboWrite> {
     )
     .ok_or_else(|| anyhow::anyhow!("the combo box did not answer CB_FINDSTRINGEXACT"))?;
     let selected = (found != CB_ERR).then_some(found as usize);
-    let before = selected_index(combo.hwnd);
+    let before = if secure {
+        None
+    } else {
+        selected_index(combo.hwnd)
+    };
 
     if !combo.editable {
         let Some(index) = selected else {
             return Ok(ComboWrite::NoSuchOption {
-                options: options(combo.hwnd),
+                options: if secure {
+                    Vec::new()
+                } else {
+                    options(combo.hwnd)
+                },
             });
         };
-        let unchanged = before == Some(index);
+        let unchanged = !secure && before == Some(index);
         if !unchanged {
             send(combo.hwnd, CB_SETCURSEL, index, 0)
                 .ok_or_else(|| anyhow::anyhow!("the combo box did not answer CB_SETCURSEL"))?;
@@ -264,20 +280,37 @@ pub fn set_value(combo: Combo, value: &str) -> anyhow::Result<ComboWrite> {
         return Ok(ComboWrite::Applied {
             selected,
             unchanged,
-            readback_text: selected_index(combo.hwnd).and_then(|i| option_text(combo.hwnd, i)),
-            readback_index: selected_index(combo.hwnd),
+            readback_text: if secure {
+                None
+            } else {
+                selected_index(combo.hwnd).and_then(|i| option_text(combo.hwnd, i))
+            },
+            readback_index: if secure {
+                None
+            } else {
+                selected_index(combo.hwnd)
+            },
         });
     }
 
     let edit = edit_child(combo.hwnd);
-    let current = edit.or(Some(combo.hwnd)).and_then(window_text);
-    let unchanged = current.as_deref() == Some(value) && (selected.is_none() || before == selected);
+    let current = if secure {
+        None
+    } else {
+        edit.or(Some(combo.hwnd)).and_then(window_text)
+    };
+    let unchanged =
+        !secure && current.as_deref() == Some(value) && (selected.is_none() || before == selected);
     if !unchanged {
         match edit {
             // Replacing the selection is how the edit sees typing: it sends
             // EN_UPDATE / EN_CHANGE and the combo forwards them to the app.
             Some(edit) => {
-                send(edit, EM_SETSEL, 0, -1);
+                if !crate::combo_privacy::selection_acknowledged(send(edit, EM_SETSEL, 0, -1)) {
+                    anyhow::bail!(
+                        "the combo's edit field did not acknowledge selection; no replacement sent"
+                    );
+                }
                 send(edit, EM_REPLACESEL, 1, text.as_ptr() as isize)
                     .ok_or_else(|| anyhow::anyhow!("the combo's edit field did not answer"))?;
             }
@@ -297,8 +330,16 @@ pub fn set_value(combo: Combo, value: &str) -> anyhow::Result<ComboWrite> {
     Ok(ComboWrite::Applied {
         selected,
         unchanged,
-        readback_text: edit.or(Some(combo.hwnd)).and_then(window_text),
-        readback_index: selected_index(combo.hwnd),
+        readback_text: if secure {
+            None
+        } else {
+            edit.or(Some(combo.hwnd)).and_then(window_text)
+        },
+        readback_index: if secure {
+            None
+        } else {
+            selected_index(combo.hwnd)
+        },
     })
 }
 

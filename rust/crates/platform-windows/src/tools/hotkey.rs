@@ -119,6 +119,16 @@ impl Tool for HotkeyTool {
                 Ok(hwnd) => hwnd,
                 Err(error) => return ToolResult::error(error.to_string()),
             };
+            // Follow the user's foreground after the cursor wait.
+            let hwnd = match crate::desktop_target::after_cursor(
+                position_keyboard_cursor(&self.state, &args, hwnd, None),
+                crate::input::mouse::foreground_window,
+            )
+            .await
+            {
+                Ok(hwnd) => hwnd,
+                Err(error) => return ToolResult::error(error.to_string()),
+            };
             let key_display = full_keys.join("+");
             return match tokio::task::spawn_blocking(move || {
                 let modifiers: Vec<&str> = mods.iter().map(String::as_str).collect();
@@ -361,7 +371,7 @@ impl Tool for HotkeyTool {
         } else {
             EventKind::Keystroke
         };
-        if delivery == DeliveryMode::Background
+        if delivery.is_background()
             && (px_focus || crate::input::delivery::would_be_silently_dropped(hwnd, event_kind))
         {
             // macOS-aligned: a `background` hotkey never fronts. This combo would

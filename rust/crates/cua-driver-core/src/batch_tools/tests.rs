@@ -18,7 +18,8 @@ use crate::{
 };
 
 /// A stand-in platform tool that records every call it receives and fails
-/// when asked to (`{"fail": true}`).
+/// when asked to (`{"fail": true}`, or `fail_message` with optional
+/// `fail_structured` content).
 struct Probe {
     def: ToolDef,
     calls: Arc<Mutex<Vec<Value>>>,
@@ -66,7 +67,15 @@ impl Tool for Probe {
             };
         }
         if let Some(message) = args["fail_message"].as_str() {
-            return ToolResult::error(message.to_owned());
+            let mut result = ToolResult::error(message.to_owned());
+            if args["fail_not_delivered"] == true {
+                result =
+                    result.with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED);
+            }
+            return match args.get("fail_structured") {
+                Some(structured) => result.with_structured(structured.clone()),
+                None => result,
+            };
         }
         if args["refuse"] == true {
             return ToolResult::error(format!("{} refused: nothing sent", self.def.name))
@@ -74,6 +83,14 @@ impl Tool for Probe {
         }
         if args["fail"] == true {
             ToolResult::error(format!("{} refused: probe asked to fail", self.def.name))
+        } else if self.def.name == "move_cursor" {
+            // Its producers attach their own record; nothing guesses one.
+            ToolResult::text("move_cursor done").with_action_record(
+                crate::action_record::ActionExecutionRecord::cursor_move(
+                    crate::action_record::ActionTransport::AgentCursorOverlay,
+                    &args,
+                ),
+            )
         } else {
             ToolResult::text(format!("{} done", self.def.name))
         }
@@ -101,6 +118,13 @@ impl Harness {
     }
 
     fn build(isolate_desktop: bool) -> Self {
+        Self::build_with_resolver(isolate_desktop, None)
+    }
+
+    fn build_with_resolver(
+        isolate_desktop: bool,
+        resolver: Option<crate::tool::TokenWindowResolver>,
+    ) -> Self {
         let mut registry = ToolRegistry::new();
         let mut calls = std::collections::HashMap::new();
         let pacings: Arc<Mutex<Vec<(String, crate::step_pacing::StepPacing)>>> = Arc::default();
@@ -129,6 +153,8 @@ impl Harness {
                             "fail": {"type": "boolean"},
                             "fail_message": {"type": "string"},
                             "refuse": {"type": "boolean"},
+                            "fail_structured": {"type": "object"},
+                            "fail_not_delivered": {"type": "boolean"},
                             "element_token": {"type": "string"},
                             "value": {"type": "string"},
                             "key": {"type": "string"},
@@ -167,6 +193,16 @@ impl Harness {
                 events: events.clone(),
             }));
         }
+        // Snapshot 1 is live and was taken of window 9 of pid 42; any other
+        // token is stale.
+        registry.set_token_window_resolver(resolver.unwrap_or_else(|| {
+            Arc::new(|args| {
+                args["element_token"]
+                    .as_str()
+                    .filter(|token| token.starts_with("s00000001:"))
+                    .map(|_| (42, 9))
+            })
+        }));
         registry.register_session_tools();
         if isolate_desktop {
             registry.isolate_desktop();
@@ -269,6 +305,38 @@ fn empty_state() -> Value {
     state["elements"] = json!([]);
     state["tree_markdown"] = json!("");
     state
+}
+
+#[tokio::test]
+async fn check_results_do_not_echo_expected_values_on_success_or_failure() {
+    for phase in ["expect", "wait_for"] {
+        for success in [true, false] {
+            for field in ["value", "value_contains"] {
+                let harness = Harness::new();
+                let mut state = save_state();
+                state["elements"][0]["value"] = json!("sentinel-private-value");
+                state["elements"][0]["enabled"] = json!(true);
+                harness.respond("get_window_state", state);
+                let mut check =
+                    json!({"pid":42,"window_id":9,"name":"Save","enabled":success,"timeout_ms":0});
+                check[field] = json!("sentinel-private-value");
+                let mut step = json!({});
+                step[phase] = check;
+                let result = harness.run(json!({"steps":[step]})).await;
+                assert_eq!(result.is_error == Some(true), !success, "{result:?}");
+                assert!(
+                    !text(&result).contains("sentinel-private-value"),
+                    "{}",
+                    text(&result)
+                );
+                assert!(!result
+                    .structured_content
+                    .unwrap()
+                    .to_string()
+                    .contains("sentinel-private-value"));
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -1309,7 +1377,7 @@ async fn validates_every_step_before_running_any() {
             json!({"tool": "click", "args": {"session": "other"}}),
             "differs from the batch",
         ),
-        (json!({"tool": "click", "extra": 1}), "unknown field"),
+        (json!({"tool": "click", "extra": 1}), "invalid arguments"),
         (json!({"tool": "click", "args": 5}), "must be an object"),
     ];
     for (bad, expected) in cases {
@@ -1518,7 +1586,9 @@ async fn later_denied_action_refuses_before_any_step_runs() {
 }
 
 fn batch_manifest(extra: &str) -> String {
-    format!("version: 1\nmode: bounded\nexpires_after: 1h\nidle_timeout: 30m\nresources:\n  desktop:\n    applications: [42]\nallow:\n  tools: [run_steps, click]\n{extra}")
+    format!(
+        "version: 1\nmode: bounded\nexpires_after: 1h\nidle_timeout: 30m\nresources:\n  desktop:\n    applications: [42]\nallow:\n  tools: [run_steps, click]\n{extra}"
+    )
 }
 
 #[tokio::test]
@@ -2085,4 +2155,245 @@ async fn a_refused_step_after_a_sent_action_makes_the_batch_partial() {
         structured["effect"], "refused",
         "nothing was sent: {structured}"
     );
+}
+
+#[tokio::test]
+async fn a_token_only_batch_observes_the_tokens_window() {
+    let harness = Harness::new();
+    for observe in [json!({}), json!(true)] {
+        let result = harness
+            .run(json!({"steps": [
+                {"tool": "click", "args": {"element_token": "s00000001:38"}},
+                {"tool": "press_key", "args": {"key": "return"}},
+            ], "observe": observe}))
+            .await;
+        assert_ne!(result.is_error, Some(true), "{}", text(&result));
+        let read = harness.last("get_window_state");
+        assert_eq!(read["pid"], 42);
+        assert_eq!(read["window_id"], 9);
+    }
+    // The next step inherits the token's window as well.
+    assert_eq!(harness.last("press_key")["pid"], 42);
+}
+
+#[tokio::test]
+async fn run_steps_token_window_is_owned_by_the_calling_session() {
+    struct Payload;
+    impl crate::snapshot_store::SnapshotPayload for Payload {
+        type Element = ();
+        fn len(&self) -> usize {
+            1
+        }
+        fn retain(&self, index: usize) -> Option<()> {
+            (index == 0).then_some(())
+        }
+    }
+    let auth = context(None);
+    let owner = format!("__cua_runtime_{}:session-a", auth.runtime_scope_key());
+    let store = Arc::new(crate::snapshot_store::SnapshotStore::new());
+    let (id, _) = store
+        .publish_for_session(42, 9, Payload, Some(&owner), None)
+        .unwrap();
+    let token = format!("{}:0", crate::element_token::format_snapshot_id(id));
+    let harness = Harness::build_with_resolver(
+        false,
+        Some(Arc::new(move |args| store.window_for_token(args))),
+    );
+    for (session, succeeds) in [("session-a", true), ("session-b", false)] {
+        let result = harness.registry.invoke_with_context(super::RUN_STEPS_TOOL,
+            json!({"session":session, "steps":[{"tool":"click", "args":{"element_token":token}}], "observe":{}}), auth.clone()).await;
+        assert_eq!(
+            result.is_error != Some(true),
+            succeeds,
+            "session {session}: {}",
+            text(&result)
+        );
+    }
+    assert_eq!(harness.hits("click"), 1);
+}
+
+#[tokio::test]
+async fn a_stale_token_still_gives_observe_no_window() {
+    let harness = Harness::new();
+    let result = harness
+        .run(json!({"steps": [
+            {"tool": "click", "args": {"element_token": "s000000ff:3"}},
+        ], "observe": {}}))
+        .await;
+    assert_eq!(result.is_error, Some(true));
+    assert!(
+        text(&result).contains("`pid` and `window_id` are required"),
+        "{}",
+        text(&result)
+    );
+    assert_eq!(
+        harness.hits("click"),
+        0,
+        "a rejected batch executes nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_flat_step_means_the_same_as_the_nested_form() {
+    let nested = Harness::new();
+    let flat = Harness::new();
+    let nested_result = nested
+        .run(json!({"steps": [
+            {"tool": "hotkey", "args": {"pid": 42, "keys": ["cmd", "s"]}},
+            {"tool": "press_key", "args": {"pid": 42, "key": "return"}, "timeout_ms": 500},
+        ]}))
+        .await;
+    let flat_result = flat
+        .run(json!({"steps": [
+            {"tool": "hotkey", "pid": 42, "keys": ["cmd", "s"]},
+            {"tool": "press_key", "pid": 42, "key": "return", "timeout_ms": 500},
+        ]}))
+        .await;
+    assert_ne!(
+        nested_result.is_error,
+        Some(true),
+        "{}",
+        text(&nested_result)
+    );
+    assert_ne!(flat_result.is_error, Some(true), "{}", text(&flat_result));
+    let args_of = |harness: &Harness, tool: &str| {
+        let mut args = harness.last(tool);
+        let object = args.as_object_mut().unwrap();
+        object.retain(|key, _| !key.starts_with('_'));
+        args
+    };
+    assert_eq!(args_of(&flat, "hotkey"), args_of(&nested, "hotkey"));
+    assert_eq!(args_of(&flat, "press_key"), args_of(&nested, "press_key"));
+}
+
+#[tokio::test]
+async fn args_mixed_with_a_stray_field_is_still_refused() {
+    let harness = Harness::new();
+    let result = harness
+        .run(json!({"steps": [
+            {"tool": "press_key", "args": {"pid": 42}, "key": "return"},
+        ]}))
+        .await;
+    assert_eq!(result.is_error, Some(true));
+    assert!(
+        text(&result).contains("unknown field `key`"),
+        "{}",
+        text(&result)
+    );
+    assert_eq!(harness.hits("press_key"), 0);
+}
+
+#[tokio::test]
+async fn f4a_token_window_wins_over_batch_and_prior_window() {
+    for preceding in [false, true] {
+        let harness = Harness::new();
+        let mut steps = vec![];
+        if preceding {
+            steps.push(json!({"tool":"click","args":{"pid":42,"window_id":8,"x":1,"y":1}}));
+        }
+        steps.push(json!({"tool":"click","args":{"element_token":"s00000001:38"}}));
+        steps.push(json!({"tool":"press_key","args":{"key":"return"}}));
+        let result = harness
+            .run(json!({"pid":42,"window_id":8,"steps":steps,"observe":{}}))
+            .await;
+        assert_ne!(result.is_error, Some(true), "{}", text(&result));
+        assert_eq!(harness.last("click")["window_id"], 9);
+        assert_eq!(harness.last("press_key")["window_id"], 9);
+        assert_eq!(harness.last("get_window_state")["window_id"], 9);
+    }
+}
+
+#[tokio::test]
+async fn f4a_rooted_token_resolves_window_only_for_its_publisher() {
+    use crate::snapshot_store::{
+        InstanceCapture, InstanceEvidence, ScopedWalk, SnapshotPayload, SnapshotStore,
+    };
+    struct Payload;
+    impl SnapshotPayload for Payload {
+        type Element = ();
+        fn len(&self) -> usize {
+            1
+        }
+        fn retain(&self, i: usize) -> Option<()> {
+            (i == 0).then_some(())
+        }
+        fn structural_path(&self, i: usize) -> Option<Vec<usize>> {
+            (i == 0).then_some(vec![0])
+        }
+    }
+    let auth = context(None);
+    let owner = format!("__cua_runtime_{}:session-a", auth.runtime_scope_key());
+    let fp = crate::browser::types::ProcessFingerprint {
+        pid: 42,
+        start_time: Some(1),
+        executable: Some("/app".into()),
+    };
+    let store = Arc::new(SnapshotStore::new());
+    let parent = store
+        .publish_for_session_with_instance(
+            42,
+            9,
+            Payload,
+            Some(&owner),
+            None,
+            InstanceCapture::Captured(fp.clone()),
+        )
+        .unwrap()
+        .0;
+    let root = store
+        .begin_scoped_capture(
+            42,
+            9,
+            &crate::element_token::token_for(parent, 0),
+            Some(&owner),
+            InstanceEvidence::Live(fp.clone()),
+        )
+        .unwrap()
+        .validate_root(|_, _, _, _| Ok(()))
+        .unwrap();
+    let scoped = store
+        .commit_scoped_capture(root, ScopedWalk::Complete(Payload))
+        .unwrap();
+    let token = crate::element_token::token_for(scoped, 0);
+    let foreign_args = json!({"element_token":token, "_session_id":"other", "window_id":99});
+    let unknown_args =
+        json!({"element_token":"sdeadbeef:0", "_session_id":"other", "window_id":99});
+    let foreign = store.resolve(42, &foreign_args).unwrap_err();
+    let unknown = store.resolve(42, &unknown_args).unwrap_err();
+    assert_eq!(foreign.structured_content, unknown.structured_content);
+    assert_eq!(
+        format!("{:?}", foreign.content),
+        format!("{:?}", unknown.content)
+    );
+    let foreign_root = store
+        .begin_scoped_capture(
+            42,
+            99,
+            &token,
+            Some("other"),
+            InstanceEvidence::Live(fp.clone()),
+        )
+        .unwrap_err();
+    let unknown_root = store
+        .begin_scoped_capture(
+            42,
+            99,
+            "sdeadbeef:0",
+            Some("other"),
+            InstanceEvidence::Live(fp),
+        )
+        .unwrap_err();
+    assert_eq!(
+        foreign_root.structured_content,
+        unknown_root.structured_content
+    );
+    let harness = Harness::build_with_resolver(
+        false,
+        Some(Arc::new(move |args| store.window_for_token(args))),
+    );
+    for (session, succeeds) in [("session-a", true), ("session-b", false)] {
+        let result = harness.registry.invoke_with_context(super::RUN_STEPS_TOOL, json!({"session":session,"steps":[{"tool":"click","args":{"element_token":token}}],"observe":{}}), auth.clone()).await;
+        assert_eq!(result.is_error != Some(true), succeeds, "{}", text(&result));
+    }
+    assert_eq!(harness.hits("click"), 1);
 }

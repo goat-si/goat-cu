@@ -56,18 +56,64 @@ fn configured_port_from(value: Option<std::ffi::OsString>) -> anyhow::Result<Opt
     Ok(Some(port))
 }
 
+/// Create a listener whose accepted sockets inherit a non-inheritable flag.
+pub(crate) async fn bind_http_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    #[cfg(windows)]
+    {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?;
+        socket.bind(&addr.into())?;
+        socket.listen(1024)?;
+        socket.set_nonblocking(true)?;
+        TcpListener::from_std(socket.into())
+    }
+    #[cfg(not(windows))]
+    {
+        TcpListener::bind(addr).await
+    }
+}
+
+/// Reject the connection if its inherit flag cannot be cleared.
+pub(crate) fn clear_inherit_flag(stream: &TcpStream) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows::Win32::Foundation::{
+            SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
+        };
+        let handle = HANDLE(stream.as_raw_socket() as *mut std::ffi::c_void);
+        let result =
+            unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) };
+        if let Err(error) = &result {
+            warn!("could not make an accepted socket non-inheritable: {error}");
+        }
+        serve_after_inherit_clear(result.is_ok())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = stream;
+        serve_after_inherit_clear(true)
+    }
+}
+
 /// Spawn the HTTP MCP listener bound to `127.0.0.1:port` (loopback only).
 pub fn spawn(sdk: Arc<crate::sdk_adapter::SdkAdapter>, port: u16) -> anyhow::Result<()> {
     let token = Arc::<str>::from(configured_auth_token().map_err(anyhow::Error::msg)?);
     let sessions = Arc::new(Sessions::default());
     tokio::spawn(async move {
         let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-        match TcpListener::bind(addr).await {
+        match bind_http_listener(addr).await {
             Ok(listener) => {
                 info!("MCP HTTP transport listening on http://{addr}/mcp (one connection per agent → parallel)");
                 loop {
                     match listener.accept().await {
                         Ok((stream, peer)) => {
+                            if !clear_inherit_flag(&stream) {
+                                continue;
+                            }
                             let sdk = sdk.clone();
                             let token = token.clone();
                             let sessions = sessions.clone();
@@ -538,6 +584,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
+            clear_inherit_flag(&stream);
             serve_conn(
                 stream,
                 sdk,
@@ -556,11 +603,41 @@ mod tests {
         String::from_utf8(response).unwrap()
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn accepted_sockets_are_made_non_inheritable() {
+        use std::os::windows::io::AsRawSocket;
+        use windows::Win32::Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+        let inheritable = |stream: &TcpStream| {
+            let mut flags = 0u32;
+            unsafe {
+                GetHandleInformation(
+                    HANDLE(stream.as_raw_socket() as *mut std::ffi::c_void),
+                    &mut flags,
+                )
+            }
+            .unwrap();
+            flags & HANDLE_FLAG_INHERIT.0 != 0
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        assert!(
+            inheritable(&server),
+            "tokio accepted a non-inheritable socket"
+        );
+        clear_inherit_flag(&server);
+        assert!(!inheritable(&server));
+    }
+
     async fn parse_request(request: &str) -> (String, bool) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let mut client = TcpStream::connect(addr).await.unwrap();
         let (mut server, _) = listener.accept().await.unwrap();
+        clear_inherit_flag(&server);
         client.write_all(request.as_bytes()).await.unwrap();
         let req = read_http_request(&mut server, "token")
             .await
@@ -930,6 +1007,7 @@ mod tests {
         let server_sdk = sdk.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
+            clear_inherit_flag(&stream);
             serve_conn(
                 stream,
                 server_sdk,
@@ -953,5 +1031,18 @@ mod tests {
         assert!(response.contains("Authentication required"));
         server.await.unwrap();
         sdk.shutdown().await.expect("SDK shutdown");
+    }
+}
+
+fn serve_after_inherit_clear(cleared: bool) -> bool {
+    cleared
+}
+
+#[cfg(test)]
+mod inherit_decision_tests {
+    #[test]
+    fn only_serve_after_successful_clear() {
+        assert!(super::serve_after_inherit_clear(true));
+        assert!(!super::serve_after_inherit_clear(false));
     }
 }

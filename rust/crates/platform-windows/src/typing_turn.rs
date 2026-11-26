@@ -25,6 +25,32 @@ pub(crate) enum TypingTurn {
     Undrained,
     /// Another window took the foreground between text units.
     Lost,
+    /// The HWND remains foreground but no longer proves the original target.
+    BindingLost,
+}
+
+pub(crate) fn after_failed_post_focus_wait(foreign_foreground: bool) -> TypingTurn {
+    if foreign_foreground {
+        TypingTurn::Lost
+    } else {
+        TypingTurn::Undrained
+    }
+}
+
+pub(crate) fn foreign_foreground_failure(error: anyhow::Error) -> anyhow::Error {
+    ForegroundNotRestored {
+        error,
+        turn: TypingTurn::Lost,
+    }
+    .into()
+}
+
+pub(crate) fn unproven_target_foreground(same_hwnd: bool) -> TypingTurn {
+    if same_hwnd {
+        TypingTurn::BindingLost
+    } else {
+        TypingTurn::Lost
+    }
 }
 
 /// Whether to give the previous foreground back. Never while inserted input
@@ -32,7 +58,7 @@ pub(crate) enum TypingTurn {
 pub(crate) fn restores_previous(turn: TypingTurn) -> bool {
     match turn {
         TypingTurn::NotSent | TypingTurn::Drained | TypingTurn::Settled => true,
-        TypingTurn::Undrained | TypingTurn::Lost => false,
+        TypingTurn::Undrained | TypingTurn::Lost | TypingTurn::BindingLost => false,
     }
 }
 
@@ -46,7 +72,9 @@ pub(crate) struct ForegroundNotRestored {
 }
 
 fn reason(turn: TypingTurn) -> &'static str {
-    if turn == TypingTurn::Lost {
+    if turn == TypingTurn::BindingLost {
+        "the foreground HWND no longer proves the original target, so the driver does not restore over it."
+    } else if turn == TypingTurn::Lost {
         "another window took the foreground during the call, and the driver does not take \
          it back."
     } else {
@@ -75,6 +103,35 @@ mod tests {
 
     const RESTORE: bool = true;
     const LEAVE: bool = false;
+
+    #[test]
+    fn a_failed_wait_after_focus_never_restores_over_unread_or_foreign_input() {
+        for foreign in [false, true] {
+            assert!(!restores_previous(after_failed_post_focus_wait(foreign)));
+        }
+        assert_eq!(after_failed_post_focus_wait(true), Lost);
+        assert_eq!(after_failed_post_focus_wait(false), Undrained);
+    }
+
+    #[test]
+    fn foreign_foreground_failure_survives_to_the_outer_restore_owner() {
+        let error = foreign_foreground_failure(anyhow::anyhow!("foreign foreground"));
+        assert!(error.downcast_ref::<ForegroundNotRestored>().is_some());
+        let result = foreground_input_error(error);
+        assert_eq!(
+            result.structured_content.unwrap()["foreground_restored"],
+            false
+        );
+    }
+
+    #[test]
+    fn unbound_same_hwnd_is_not_reported_as_a_foreign_window() {
+        let turn = unproven_target_foreground(true);
+        assert_eq!(turn, BindingLost);
+        assert!(!restores_previous(turn));
+        assert!(!reason(turn).contains("another window"));
+        assert_eq!(unproven_target_foreground(false), Lost);
+    }
 
     /// One row per exit of `with_confirmed_foreground` once the target is
     /// confirmed in front: the turn the exit produces and the expected outcome.

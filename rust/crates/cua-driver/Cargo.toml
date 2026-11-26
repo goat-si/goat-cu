@@ -21,7 +21,6 @@ cua-driver-core = { path = "../cua-driver-core" }
 cua-driver-contract = { path = "../cua-driver-contract" }
 cua-driver-sdk = { path = "../cua-driver-sdk" }
 cursor-overlay = { path = "../cursor-overlay" }
-pip-preview = { path = "../pip-preview" }
 async-trait = "0.1"
 httparse = "1.10.1"
 base64 = { workspace = true }
@@ -66,6 +65,7 @@ platform-macos = { path = "../platform-macos" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 platform-windows = { path = "../platform-windows" }
+socket2 = "0.6"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -103,6 +103,8 @@ base64 = { workspace = true }
 # Isolated HOME / cache directories for `version_check` unit tests so they
 # never touch the developer's real `~/.cua-driver/version_check.json`.
 tempfile = "3"
+# Parses the Cordis patch `mcp-config --client deepseek-harness` prints.
+serde_yaml = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Private session and accessibility buses for the AT-SPI listener tests: the

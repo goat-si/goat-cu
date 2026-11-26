@@ -9,7 +9,7 @@ Next steps:
   2. Connect your agent:
        {{BINARY}} mcp-config --client <name>
      Names: claude, codex, cursor, hermes, antigravity, openclaw, opencode,
-     pi, prime-agent, qwen, droid, zcode. Leave out --client for a generic
+     pi, prime-agent, qwen, droid, zcode, deepseek-harness. Leave out --client for a generic
      snippet. Muse Code and GitHub Copilot CLI: see the docs link below.
 
   3. Check it works:

@@ -113,6 +113,19 @@ fn no_target_check() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn check_before_target(
+    before_target: &mut dyn FnMut() -> anyhow::Result<()>,
+    events_sent: usize,
+) -> anyhow::Result<()> {
+    before_target().map_err(|source| {
+        TargetCheckFailed {
+            events_sent,
+            source,
+        }
+        .into()
+    })
+}
+
 /// Move the hardware cursor to `point`.
 fn warp_cursor(point: CGPoint) -> Result<(), core_graphics::base::CGError> {
     #[cfg(test)]
@@ -188,7 +201,16 @@ pub fn click_at_xy_desktop(
     count: usize,
     button: &str,
 ) -> anyhow::Result<()> {
-    click_at_xy_desktop_inner(prompt, x, y, count, button, &[], false)
+    click_at_xy_desktop_inner(
+        prompt,
+        x,
+        y,
+        count,
+        button,
+        &[],
+        false,
+        &mut no_target_check,
+    )
 }
 
 /// Global HID click with physical modifier transitions. The caller must guard
@@ -201,7 +223,16 @@ pub fn click_at_xy_desktop_with_modifiers(
     button: &str,
     modifiers: &[&str],
 ) -> anyhow::Result<()> {
-    click_at_xy_desktop_inner(prompt, x, y, count, button, modifiers, false)
+    click_at_xy_desktop_inner(
+        prompt,
+        x,
+        y,
+        count,
+        button,
+        modifiers,
+        false,
+        &mut no_target_check,
+    )
 }
 
 /// Global HID modifier click that restores the user's hardware cursor after
@@ -214,9 +245,32 @@ pub fn click_at_xy_desktop_with_modifiers_preserving_cursor(
     button: &str,
     modifiers: &[&str],
 ) -> anyhow::Result<()> {
-    click_at_xy_desktop_inner(prompt, x, y, count, button, modifiers, true)
+    click_at_xy_desktop_inner(
+        prompt,
+        x,
+        y,
+        count,
+        button,
+        modifiers,
+        true,
+        &mut no_target_check,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn click_at_xy_desktop_with_modifiers_preserving_cursor_checked(
+    prompt: PromptInput,
+    x: f64,
+    y: f64,
+    count: usize,
+    button: &str,
+    modifiers: &[&str],
+    before_target: &mut dyn FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    click_at_xy_desktop_inner(prompt, x, y, count, button, modifiers, true, before_target)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn click_at_xy_desktop_inner(
     prompt: PromptInput,
     x: f64,
@@ -225,6 +279,7 @@ fn click_at_xy_desktop_inner(
     button: &str,
     modifiers: &[&str],
     preserve_cursor: bool,
+    before_target: &mut dyn FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     crate::security_prompt::refuse_point(prompt, x, y)?;
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
@@ -299,6 +354,9 @@ fn click_at_xy_desktop_inner(
         let pairs = (1..=count.max(1))
             .map(|state| Ok((event(down_ty, state)?, event(up_ty, state)?)))
             .collect::<anyhow::Result<Vec<_>>>()?;
+        // Cursor warp and modifier preparation may already have affected the
+        // desktop even when no mouse-down has been posted.
+        check_before_target(before_target, 1)?;
         for (down, up) in pairs {
             dispatch_mouse_event(PostRoute::Hid, 0, &down);
             std::thread::sleep(cua_driver_core::input_pacing::click_gap());
@@ -408,7 +466,7 @@ pub fn click_at_xy_desktop_preserving_cursor(
     x: f64,
     y: f64,
 ) -> anyhow::Result<()> {
-    click_at_xy_desktop_inner(prompt, x, y, 1, "left", &[], true)
+    click_at_xy_desktop_inner(prompt, x, y, 1, "left", &[], true, &mut no_target_check)
 }
 
 extern "C" {
@@ -707,6 +765,16 @@ fn window_location_is_window_local() -> bool {
     })
 }
 
+/// Settle after the route's stamped `mouseMoved`, so the target updates its
+/// cursor state before the primer (Swift `MouseInput.swift`, v0.1: "one
+/// frame+ after mouseMoved"). Not bisected.
+const CHROMIUM_MOVE_SETTLE_MS: u64 = 15;
+/// Gap between the off-screen primer and the target pair, so Chromium sees
+/// two gestures rather than one run-on (Swift `MouseInput.swift`, v0.1:
+/// "≥1 frame"). The bound is one frame; this keeps Swift's margin, since it
+/// was never bisected on Chrome, Electron and GPUI.
+const CHROMIUM_PRIMER_GAP_MS: u64 = 100;
+
 fn chromium_click_route_plan(
     screen_x: f64,
     screen_y: f64,
@@ -732,7 +800,7 @@ fn chromium_click_route_plan(
             phase: 2,
             button_number: 0,
             subtype: 3,
-            delay_after_ms: 15,
+            delay_after_ms: CHROMIUM_MOVE_SETTLE_MS,
         },
         ChromiumClickRouteStep {
             kind: ChromiumClickEventKind::Down,
@@ -754,7 +822,7 @@ fn chromium_click_route_plan(
             phase: 2,
             button_number: 0,
             subtype: 3,
-            delay_after_ms: 100,
+            delay_after_ms: CHROMIUM_PRIMER_GAP_MS,
         },
     ];
 
@@ -1141,12 +1209,26 @@ fn refuse_drag_points(
 /// How a background drag gesture ended.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BackgroundDragOutcome {
-    /// Every planned event was posted and the release landed on the drop point.
+    /// No drag-and-drop session showed; every planned event was posted and
+    /// the release landed on the drop point.
     Completed,
-    /// The caller's `keep_going` check failed during the path; the release
-    /// was posted at once at this screen point instead of the drop point.
+    /// A drag-and-drop session started during the path. The gesture went
+    /// straight to the drop point and held it there; `ended` says whether the
+    /// session closed (and so dropped there) before the hold ran out.
+    DragSession { ended: bool },
+    /// A GOAT guard stopped the gesture before reaching its target.
     StoppedEarly { at: (f64, f64) },
 }
+
+/// How long a background drag holds the drop point waiting for a
+/// drag-and-drop session to end, and how often it repeats the drag there.
+/// AppKit ends a session started by window-routed events on its own within a
+/// few hundred milliseconds, dropping at the last dragged point.
+const DRAG_SESSION_HOLD: std::time::Duration = std::time::Duration::from_millis(1500);
+const DRAG_SESSION_TICK_MS: u64 = 16;
+/// How often a background drag looks for a drag-and-drop session while it
+/// waits between path steps.
+const DRAG_SESSION_POLL: std::time::Duration = std::time::Duration::from_millis(4);
 
 /// Event kinds in the background drag plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1219,8 +1301,7 @@ fn background_drag_plan(
     plan
 }
 
-impl BackgroundDragStep {
-}
+impl BackgroundDragStep {}
 
 /// Background press-drag-release addressed to one window of `pid`.
 ///
@@ -1236,10 +1317,8 @@ impl BackgroundDragStep {
 /// window AppKit-key without raising it first
 /// ([`prepare_background_pixel_click`]).
 ///
-/// `keep_going` runs after each drag step; when it returns false the rest of
-/// the path is skipped and the release is posted at once where the gesture
-/// stands. The drag tool uses it to cut short a gesture that started a system
-/// drag-and-drop session, which macOS tracks with the hardware pointer.
+/// `keep_going` runs after each drag step; returning false stops the gesture
+/// and releases the button at its current position.
 #[allow(clippy::too_many_arguments)]
 pub fn drag_at_xy_background<F, G>(
     pid: i32,
@@ -1591,6 +1670,133 @@ where
             Ok(BackgroundDragOutcome::StoppedEarly { at: at.screen })
         }
     }
+}
+
+/// Observe a native drag session after each step. Once one appears, move to
+/// the drop point and hold there until it ends or [`DRAG_SESSION_HOLD`] expires.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn drag_at_xy_background_session_with_origin<F, G>(
+    pid: i32,
+    from: (f64, f64),
+    to: (f64, f64),
+    wid: u32,
+    duration_ms: u64,
+    steps: usize,
+    modifiers: &[&str],
+    button: DragButton,
+    mut observe: F,
+    mut session_open: G,
+    origin: (f64, f64),
+) -> anyhow::Result<BackgroundDragOutcome>
+where
+    F: FnMut(f64, f64),
+    G: FnMut() -> bool,
+{
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
+    let flags = parse_modifier_flags(modifiers);
+    let (cg_button, down_type, dragged_type, up_type, button_number) = match button {
+        DragButton::Left => (
+            CGMouseButton::Left,
+            CGEventType::LeftMouseDown,
+            CGEventType::LeftMouseDragged,
+            CGEventType::LeftMouseUp,
+            0,
+        ),
+        DragButton::Right => (
+            CGMouseButton::Right,
+            CGEventType::RightMouseDown,
+            CGEventType::RightMouseDragged,
+            CGEventType::RightMouseUp,
+            1,
+        ),
+        DragButton::Middle => (
+            CGMouseButton::Center,
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseDragged,
+            CGEventType::OtherMouseUp,
+            2,
+        ),
+    };
+    let gesture_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as i64;
+    let route = post_route(MousePostMode::SkyLightPreferred, skylight_available());
+    let plan = background_gesture_plan(from, to, steps, duration_ms);
+    let mut io = MouseGestureIo {
+        route: GestureRoute::Background {
+            pid,
+            wid,
+            origin,
+            id: gesture_id,
+            route,
+            window_local: window_location_is_window_local(),
+        },
+        source: Some(source),
+        button: cg_button,
+        down: down_type,
+        dragged: dragged_type,
+        up: up_type,
+        button_number,
+        flags,
+        observe: &mut observe,
+    };
+    use super::gesture::{GestureIo, GestureOutcome};
+    let prepared = super::gesture::prepare_gesture(&mut io, &plan)?;
+    let mut session_ended = None;
+    let result = super::gesture::run_prepared_with_drag_hook(
+        &mut io,
+        plan,
+        prepared,
+        || true,
+        |io, step, release_at| {
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(step.delay_ms);
+            let mut open = session_open();
+            while !open && std::time::Instant::now() < end {
+                let left = end.saturating_duration_since(std::time::Instant::now());
+                std::thread::sleep(left.min(DRAG_SESSION_POLL));
+                open = session_open();
+            }
+            if !open {
+                return Ok((true, None));
+            }
+            let destination = super::gesture::Placement {
+                screen: to,
+                window_local: None,
+            };
+            let mut drop_step = *step;
+            drop_step.placement = destination;
+            drop_step.delay_ms = DRAG_SESSION_TICK_MS;
+            let deadline = std::time::Instant::now() + DRAG_SESSION_HOLD;
+            let mut ended = false;
+            while std::time::Instant::now() < deadline {
+                io.prepare(&drop_step);
+                let mut event = io.create(&drop_step)?;
+                io.stamp(&mut event, &drop_step);
+                io.post(&event, &drop_step);
+                *release_at = destination;
+                io.observe(&drop_step);
+                io.settle(&drop_step);
+                if !session_open() {
+                    ended = true;
+                    break;
+                }
+            }
+            session_ended = Some(ended);
+            Ok((true, Some(destination)))
+        },
+    )?;
+    Ok(match session_ended {
+        Some(ended) => BackgroundDragOutcome::DragSession { ended },
+        None => match result {
+            GestureOutcome::Completed => BackgroundDragOutcome::Completed,
+            GestureOutcome::StoppedEarly { at } => {
+                BackgroundDragOutcome::StoppedEarly { at: at.screen }
+            }
+        },
+    })
 }
 
 fn foreground_gesture_plan(
@@ -2441,6 +2647,7 @@ pub(crate) mod post_sink {
         /// Click state (field 1) and event location, parallel to `posted`.
         clicks: Vec<(i64, (f64, f64))>,
         window_routing: Vec<[i64; 4]>,
+        locations: Vec<(f64, f64)>,
     }
 
     thread_local! {
@@ -2461,6 +2668,7 @@ pub(crate) mod post_sink {
                     modifiers: Vec::new(),
                     clicks: Vec::new(),
                     window_routing: Vec::new(),
+                    locations: Vec::new(),
                 });
             });
             Self
@@ -2495,6 +2703,11 @@ pub(crate) mod post_sink {
 
         pub(super) fn window_routing(&self) -> Vec<[i64; 4]> {
             STATE.with(|state| state.borrow().as_ref().unwrap().window_routing.clone())
+        }
+
+        /// Each posted event's screen location.
+        pub(super) fn locations(&self) -> Vec<(f64, f64)> {
+            STATE.with(|state| state.borrow().as_ref().unwrap().locations.clone())
         }
     }
 
@@ -2584,6 +2797,8 @@ pub(crate) mod post_sink {
             state
                 .window_routing
                 .push([51, 91, 92, 58].map(|field| event.get_integer_value_field(field)));
+            let location = event.location();
+            state.locations.push((location.x, location.y));
             true
         })
     }
@@ -2931,6 +3146,22 @@ mod tests {
 
     /// The check before the first target down sees the move and primer
     /// already sent; when it fails no target down goes out.
+    #[test]
+    fn pre_target_check_stops_the_target_after_preparation() {
+        let mut target_sends = 0;
+        let result = check_before_target(&mut || anyhow::bail!("sheet appeared"), 1)
+            .map(|()| target_sends += 1);
+        assert_eq!(
+            result
+                .unwrap_err()
+                .downcast_ref::<TargetCheckFailed>()
+                .unwrap()
+                .events_sent,
+            1
+        );
+        assert_eq!(target_sends, 0);
+    }
+
     #[test]
     fn a_failed_target_check_stops_before_the_first_target_click() {
         for (delivery, sent) in [
@@ -3432,9 +3663,78 @@ mod tests {
                 "LeftMouseDragged",
                 "LeftMouseDragged",
                 "LeftMouseUp"
-            ],
-            "no drag after the stop, and the release still goes out"
+            ]
         );
+    }
+
+    /// A drag-and-drop session that shows after the second step: the path is
+    /// cut there, the drag moves straight to the drop point and repeats there
+    /// until the session ends, and the release goes out at the drop point.
+    #[test]
+    fn background_drag_session_holds_the_drop_point_until_it_ends() {
+        let capture = Capture::start(true);
+        let mut checks = 0;
+        let outcome = drag_at_xy_background_session_with_origin(
+            42,
+            (0.0, 0.0),
+            (100.0, 0.0),
+            7,
+            0,
+            4,
+            &[],
+            DragButton::Left,
+            |_, _| {},
+            || {
+                checks += 1;
+                // Not open after step 1; open after step 2 and for two
+                // holds at the drop point; closed after the third.
+                (2..=4).contains(&checks)
+            },
+            (0.0, 0.0),
+        )
+        .unwrap();
+        assert_eq!(outcome, BackgroundDragOutcome::DragSession { ended: true });
+        let gesture: Vec<_> = capture.posted()[3..]
+            .iter()
+            .map(|posted| posted.event.clone())
+            .zip(capture.locations()[3..].iter().copied())
+            .collect();
+        let at = |event: &str, x: f64| (event.to_owned(), (x, 0.0));
+        assert_eq!(
+            gesture,
+            [
+                at("LeftMouseDown", 0.0),
+                at("LeftMouseDragged", 25.0),
+                at("LeftMouseDragged", 50.0),
+                at("LeftMouseDragged", 100.0),
+                at("LeftMouseDragged", 100.0),
+                at("LeftMouseDragged", 100.0),
+                at("LeftMouseUp", 100.0),
+            ],
+            "the rest of the path is skipped and every later event is at the drop point"
+        );
+    }
+
+    #[test]
+    fn background_drag_session_that_never_ends_reports_it() {
+        let capture = Capture::start(true);
+        let outcome = drag_at_xy_background_session_with_origin(
+            42,
+            (0.0, 0.0),
+            (100.0, 0.0),
+            7,
+            0,
+            2,
+            &[],
+            DragButton::Left,
+            |_, _| {},
+            || true,
+            (0.0, 0.0),
+        )
+        .unwrap();
+        assert_eq!(outcome, BackgroundDragOutcome::DragSession { ended: false });
+        assert_eq!(capture.posted().last().unwrap().event, "LeftMouseUp");
+        assert_eq!(capture.locations().last(), Some(&(100.0, 0.0)));
     }
 
     /// Every global-HID pointer primitive checks for a security prompt before

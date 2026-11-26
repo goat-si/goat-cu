@@ -9,10 +9,10 @@ use cua_driver_core::{
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use super::click::acquire_uia_pattern;
 use super::impl_::{
     element_target_rect, overlay_glide_to_target, pin_overlay_above, resolve_cursor_key, ToolState,
 };
-use super::click::acquire_uia_pattern;
 
 // ── set_value ─────────────────────────────────────────────────────────────────
 
@@ -154,6 +154,8 @@ impl Tool for SetValueTool {
                         let elem = std::mem::ManuallyDrop::new(unsafe {
                             IUIAutomationElement::from_raw(ptr as *mut _)
                         });
+                        let password = unsafe { elem.CurrentIsPassword() }.ok().map(|v| v.as_bool());
+                        let secure = !crate::combo_privacy::may_expose(password, false);
                         // A native Win32 combo box (or its edit field): select the
                         // option and notify the app the way the control does. A UIA
                         // value write would only change the displayed text.
@@ -169,8 +171,9 @@ impl Tool for SetValueTool {
                             });
                         }
                         if let Some(combo) = native {
-                            let write = crate::win32::combo::set_value(combo, &value)?;
-                            return Ok(SetValueRoute::Win32Combo { combo, write });
+                            let secure = !crate::combo_privacy::may_expose(password, crate::win32::combo::has_password_edit(combo));
+                            let write = crate::win32::combo::set_value(combo, &value, secure)?;
+                            return Ok(SetValueRoute::Win32Combo { combo, write, secure });
                         }
                         let is_combo = unsafe { elem.CurrentControlType() }
                             .is_ok_and(|control_type| control_type == UIA_ComboBoxControlTypeId);
@@ -217,11 +220,11 @@ impl Tool for SetValueTool {
                             let parsed: f64 = match value.parse::<f64>() {
                                 Ok(parsed) if parsed.is_finite() => parsed,
                                 _ => {
-                                    parse_error = Some(anyhow::anyhow!(
+                                    parse_error = Some(if secure { anyhow::anyhow!("set_value: `value` must be a parseable finite number.") } else { anyhow::anyhow!(
                                         "set_value: target element exposes RangeValuePattern (Slider / \
                                  ProgressBar / numeric range). `value` must be a parseable f64; \
                                  got {value:?}."
-                                    ));
+                                    ) });
                                     return RungOutcome::Absent;
                                 }
                             };
@@ -242,13 +245,13 @@ impl Tool for SetValueTool {
                         match decision {
                             SetValueDecision::Delivered { rung: 0 } => {
                                 return Ok(if is_combo {
-                                    SetValueRoute::ComboValuePattern
+                                    SetValueRoute::ComboValuePattern { secure }
                                 } else {
-                                    SetValueRoute::Pattern("ValuePattern")
+                                    SetValueRoute::Pattern("ValuePattern", secure)
                                 })
                             }
                             SetValueDecision::Delivered { rung: 1 } => {
-                                return Ok(SetValueRoute::Pattern("RangeValuePattern"))
+                                return Ok(SetValueRoute::Pattern("RangeValuePattern", secure))
                             }
                             failure @ (SetValueDecision::Refused { .. }
                             | SetValueDecision::Uncertain { .. }) => {
@@ -267,10 +270,13 @@ impl Tool for SetValueTool {
                 })
                 .await;
                 match result {
-                    Ok(Ok(SetValueRoute::Pattern(pattern_name))) => {
+                    Ok(Ok(SetValueRoute::Pattern(_, true) | SetValueRoute::ComboValuePattern { secure: true })) => {
+                        crate::combo_privacy::write_result(idx, &value, true)
+                    }
+                    Ok(Ok(SetValueRoute::Pattern(pattern_name, false))) => {
                         ToolResult::text(format!("✅ Set AXValue on [{idx}] (UIA {pattern_name})."))
                     }
-                    Ok(Ok(SetValueRoute::ComboValuePattern)) => ToolResult::text(format!(
+                    Ok(Ok(SetValueRoute::ComboValuePattern { secure: false })) => ToolResult::text(format!(
                         "Set the UIA value of combo box [{idx}] to '{value}'. This combo box is not a \
                          native Win32 one, and a UIA value write may change the shown text without \
                          the app treating it as a selection. Check with get_window_state; if the app \
@@ -286,8 +292,17 @@ impl Tool for SetValueTool {
                         crate::uia_mutation::chain_error(reason, json!({"code":"element_not_actionable", "path":"ax", "verified":false}),
                             [cua_driver_core::mutation::WriteOutcome::StopNotDelivered(cua_driver_core::mutation::Reason::InvalidArgument)], true)
                     }
-                    Ok(Ok(SetValueRoute::Win32Combo { combo, write })) => {
-                        win32_combo_set_value_result(idx, &value, combo, write, &args)
+                    Ok(Ok(SetValueRoute::Win32Combo { combo, write, secure })) => {
+                        if secure {
+                            if matches!(write, crate::win32::combo::ComboWrite::NoSuchOption { .. }) {
+                                ToolResult::error(format!("set_value: combo box [{idx}] has no matching option; nothing was changed."))
+                                    .with_structured(json!({"code":"option_not_found", "effect":"none", "verification_withheld":true}))
+                            } else {
+                                crate::combo_privacy::write_result(idx, &value, true)
+                            }
+                        } else {
+                            win32_combo_set_value_result(idx, &value, combo, write, &args)
+                        }
                     }
                     Ok(Err(e)) => crate::uia_mutation::chain_error(e.to_string(), json!({"path":"ax", "verified":false}),
                         [cua_driver_core::mutation::WriteOutcome::StopUncertain(cua_driver_core::mutation::Reason::Unknown)], true),
@@ -310,13 +325,16 @@ enum SetValueRoute {
     },
     WriteFailure(crate::uia_mutation::SetValueDecision),
     /// A UIA pattern on a non-combo element (`ValuePattern`, `RangeValuePattern`).
-    Pattern(&'static str),
+    Pattern(&'static str, bool),
     /// UIA `ValuePattern` on a combo box that has no native Win32 window.
-    ComboValuePattern,
+    ComboValuePattern {
+        secure: bool,
+    },
     /// Win32 combo messages plus the app's change notifications.
     Win32Combo {
         combo: crate::win32::combo::Combo,
         write: crate::win32::combo::ComboWrite,
+        secure: bool,
     },
 }
 

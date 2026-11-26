@@ -15,6 +15,78 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+/// Combine runtime evidence with an existing browser-product classification.
+pub fn classify_electron_runtime(
+    product: super::types::BrowserProduct,
+    known_consumer: bool,
+    electron_runtime: bool,
+) -> super::types::BrowserProduct {
+    if known_consumer && product == super::types::BrowserProduct::Electron {
+        super::types::BrowserProduct::Other
+    } else if electron_runtime && !known_consumer {
+        super::types::BrowserProduct::Electron
+    } else {
+        product
+    }
+}
+
+/// Match consumer process names, never directory names that happen to contain
+/// a browser or Electron token.
+pub fn is_consumer_browser_name(name: &str) -> bool {
+    let executable = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    executable
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|token| {
+            matches!(
+                token,
+                "chrome"
+                    | "chromium"
+                    | "msedge"
+                    | "edge"
+                    | "brave"
+                    | "vivaldi"
+                    | "opera"
+                    | "arc"
+                    | "thorium"
+                    | "iridium"
+                    | "yandex"
+                    | "firefox"
+                    | "safari"
+            )
+        })
+}
+
+pub fn resolve_consumer_product(
+    name_product: super::types::BrowserProduct,
+    path_product: super::types::BrowserProduct,
+    chrome_name: bool,
+) -> super::types::BrowserProduct {
+    use super::types::BrowserProduct;
+    if !matches!(
+        name_product,
+        BrowserProduct::Other | BrowserProduct::Electron
+    ) {
+        name_product
+    } else if chrome_name {
+        if path_product == BrowserProduct::Chromium {
+            BrowserProduct::Chromium
+        } else {
+            BrowserProduct::GoogleChrome
+        }
+    } else if !matches!(
+        path_product,
+        BrowserProduct::Other | BrowserProduct::Electron
+    ) {
+        path_product
+    } else {
+        name_product
+    }
+}
+
 /// Parse Chromium's `DevToolsActivePort` file.
 ///
 /// The file must hold exactly two non-empty lines: the listener port and one
@@ -117,6 +189,23 @@ pub fn is_firefox(identity: &str) -> bool {
         .any(|token| token == "firefox")
 }
 
+/// Whether `executable` sits in an Electron app's install layout.
+///
+/// Electron apps carry their own product name (`Obsidian`, `slack.exe`), so a
+/// name never identifies them. On Linux and Windows every packaged Electron
+/// app keeps its JavaScript bundle in `resources/app.asar` or `resources/app/`
+/// next to the executable, and a bare Electron runtime ships
+/// `resources/default_app.asar`; Chromium browsers have neither. (macOS
+/// bundles are recognized by their `Electron Framework.framework` instead.)
+pub fn is_electron_app_layout(executable: &std::path::Path) -> bool {
+    let Some(resources) = executable.parent().map(|dir| dir.join("resources")) else {
+        return false;
+    };
+    resources.join("app.asar").is_file()
+        || resources.join("app").join("package.json").is_file()
+        || resources.join("default_app.asar").is_file()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BrowserCursorBinding {
     window_id: u64,
@@ -172,6 +261,43 @@ impl BrowserCursorTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn known_consumer_never_becomes_electron_from_a_layout_marker() {
+        use crate::browser::types::BrowserProduct;
+        for product in [
+            BrowserProduct::GoogleChrome,
+            BrowserProduct::MicrosoftEdge,
+            BrowserProduct::Firefox,
+            BrowserProduct::Safari,
+            BrowserProduct::Other,
+        ] {
+            assert_eq!(classify_electron_runtime(product, true, true), product);
+        }
+        assert_eq!(
+            classify_electron_runtime(BrowserProduct::Other, false, true),
+            BrowserProduct::Electron
+        );
+        assert_eq!(
+            classify_electron_runtime(BrowserProduct::Electron, true, true),
+            BrowserProduct::Other
+        );
+        assert!(is_consumer_browser_name("/home/jun/electron/chrome"));
+        assert!(is_consumer_browser_name("/opt/electron/firefox"));
+        assert!(!is_consumer_browser_name("/opt/chrome/electron"));
+        assert_eq!(
+            resolve_consumer_product(BrowserProduct::Other, BrowserProduct::Chromium, true),
+            BrowserProduct::Chromium
+        );
+        assert_eq!(
+            resolve_consumer_product(BrowserProduct::Firefox, BrowserProduct::Electron, false),
+            BrowserProduct::Firefox
+        );
+        assert_eq!(
+            resolve_consumer_product(BrowserProduct::Other, BrowserProduct::Firefox, true),
+            BrowserProduct::GoogleChrome
+        );
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
@@ -235,6 +361,32 @@ mod tests {
         ] {
             assert!(!is_firefox(identity), "{identity}");
         }
+    }
+
+    #[test]
+    fn electron_layout_is_the_app_bundle_next_to_the_executable() {
+        let root = tempfile::tempdir().unwrap();
+        let install = |name: &str, bundle: &str| {
+            let dir = root.path().join(name);
+            let file = dir.join("resources").join(bundle);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"{}").unwrap();
+            dir.join(name)
+        };
+        assert!(is_electron_app_layout(&install("obsidian", "app.asar")));
+        assert!(is_electron_app_layout(&install(
+            "unpacked",
+            "app/package.json"
+        )));
+        assert!(is_electron_app_layout(&install(
+            "electron",
+            "default_app.asar"
+        )));
+        // Chrome's resources hold paks and locales, never an app bundle.
+        assert!(!is_electron_app_layout(&install("chrome", "resources.pak")));
+        assert!(!is_electron_app_layout(&install("empty-app", "app/README")));
+        assert!(!is_electron_app_layout(&root.path().join("missing/app")));
+        assert!(!is_electron_app_layout(std::path::Path::new("/")));
     }
 
     #[test]

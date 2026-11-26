@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 use cua_driver_contract::MoveCursorInput;
 use cua_driver_core::{
+    action_record::{ActionExecutionRecord, ActionTransport},
     protocol::ToolResult,
     tool::{Tool, ToolDef},
     tool_args::parse_typed_projection,
@@ -40,7 +41,7 @@ fn def() -> &'static ToolDef {
             "type": "object",
             "required": ["x", "y"],
             "properties": {
-                "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session." },
+                "session": cua_driver_core::tool_schema::session_schema(),
                 "x": { "type": "number", "description": "Destination X. Window target: window screenshot pixels. No target: screen points for the agent cursor overlay. Desktop scope: native get_desktop_state screenshot pixels." },
                 "y": { "type": "number", "description": "Destination Y, in the same space as x." },
                 "scope": { "type": "string", "enum": ["window", "desktop"], "default": "window", "description": "\"window\" (default) moves only the agent cursor overlay; \"desktop\" moves the real OS pointer." },
@@ -116,7 +117,13 @@ impl MoveCursorTool {
                             "x": x,
                             "y": y,
                             "effect": "unverifiable"
-                        })),
+                        }))
+                        .with_action_record(
+                            ActionExecutionRecord::cursor_move(
+                                ActionTransport::MacosCgEventHid,
+                                &args,
+                            ),
+                        ),
                         Ok(Err(error)) => {
                             ToolResult::error(format!("desktop pointer move failed: {error}"))
                         }
@@ -145,6 +152,12 @@ impl MoveCursorTool {
             Err(e) => return e,
         };
         let cursor_id = super::cursor_tools::resolve_cursor_key(&args);
+        if !crate::cursor::overlay::send_required(
+            cursor_id.clone(),
+            cursor_overlay::OverlayCommand::Unpin,
+        ) {
+            return ToolResult::error("Cursor move refused: overlay command queue unavailable.");
+        }
 
         self.state.cursor_registry.update_position(&cursor_id, x, y);
         // Drive the DRAWN cursor via the same path as click's animation. A raw
@@ -157,6 +170,10 @@ impl MoveCursorTool {
         crate::cursor::overlay::animate_cursor_to(cursor_id.clone(), x, y).await;
         ToolResult::text(format!(
             "Agent cursor '{cursor_id}' moved to ({x:.1}, {y:.1})."
+        ))
+        .with_action_record(ActionExecutionRecord::cursor_move(
+            ActionTransport::AgentCursorOverlay,
+            &args,
         ))
     }
 }
@@ -236,6 +253,7 @@ impl MoveCursorTool {
                     "hover_delivered": false,
                     "effect": "unverifiable"
                 }))
+                .with_action_record(ActionExecutionRecord::cursor_move(ActionTransport::AgentCursorOverlay, args))
             },
             async {
         // Try the hover routes that leave the real pointer alone.
@@ -260,7 +278,7 @@ impl MoveCursorTool {
             };
             let revealed = reveal.revealed_new_controls();
             if !revealed && chromium {
-                return browser_hover_result(&cursor_id, pid, wid, x, y, screen_x, screen_y);
+                return browser_hover_result(&cursor_id, args, pid, wid, x, y, screen_x, screen_y);
             }
             let outcome = if revealed {
                 format!(
@@ -282,15 +300,15 @@ impl MoveCursorTool {
                 "Agent cursor '{cursor_id}' moved over window {wid} at ({x:.0}, {y:.0}). {outcome}"
             ))
             .with_structured(serde_json::json!({
-                "scope": "window",
-                "window_id": wid,
-                "screen_point": [screen_x, screen_y],
-                "hover_delivered": true,
-                "hover_route": "ax_alternate_ui",
+                "scope": "window", "window_id": wid, "screen_point": [screen_x, screen_y],
+                "hover_delivered": true, "hover_route": "ax_alternate_ui",
                 "alternate_ui_visible": reveal.visible,
                 "new_elements": reveal.elements_after.saturating_sub(reveal.elements_before),
                 "effect": if revealed { "confirmed" } else { "unverifiable" }
-            }));
+            }))
+            .with_action_record(ActionExecutionRecord::cursor_move(
+                ActionTransport::AgentCursorOverlay, args,
+            ));
         }
         if tokio::task::spawn_blocking(move || crate::browser::ElectronJs::is_electron(pid))
             .await
@@ -306,18 +324,17 @@ impl MoveCursorTool {
                          native tooltips do not show."
                     ))
                     .with_structured(serde_json::json!({
-                        "scope": "window",
-                        "window_id": wid,
-                        "screen_point": [screen_x, screen_y],
-                        "hover_delivered": true,
-                        "hover_route": "electron_input",
-                        "effect": "unverifiable"
-                    }));
+                        "scope": "window", "window_id": wid, "screen_point": [screen_x, screen_y],
+                        "hover_delivered": true, "hover_route": "electron_input", "effect": "unverifiable"
+                    }))
+                    .with_action_record(ActionExecutionRecord::cursor_move(
+                        ActionTransport::AgentCursorOverlay, args,
+                    ));
                 }
             }
         }
         if chromium {
-            return browser_hover_result(&cursor_id, pid, wid, x, y, screen_x, screen_y);
+            return browser_hover_result(&cursor_id, args, pid, wid, x, y, screen_x, screen_y);
         }
                 ToolResult::text(format!(
                     "Agent cursor '{cursor_id}' moved over window {wid} at ({x:.0}, {y:.0}); the real \
@@ -330,6 +347,7 @@ impl MoveCursorTool {
                     "hover_delivered": false,
                     "effect": "unverifiable"
                 }))
+                .with_action_record(ActionExecutionRecord::cursor_move(ActionTransport::AgentCursorOverlay, args))
             },
         )
         .await
@@ -350,8 +368,10 @@ async fn route_window_hover_after_overlay(
 /// hover, and the browser tools are the route that delivers one without the
 /// user's pointer. Bench v2 PR-03 agents read the generic note's desktop
 /// option as the way forward and moved the user's pointer.
+#[allow(clippy::too_many_arguments)]
 fn browser_hover_result(
     cursor_id: &str,
+    args: &Value,
     pid: i32,
     wid: u32,
     x: f64,
@@ -364,16 +384,14 @@ fn browser_hover_result(
          pointer did not move and the page saw no hover. {BROWSER_HOVER_NOTE}"
     ))
     .with_structured(serde_json::json!({
-        "scope": "window",
-        "window_id": wid,
-        "screen_point": [screen_x, screen_y],
-        "hover_delivered": false,
-        "effect": "unverifiable",
-        "next_call": {
-            "tool": "get_browser_state",
-            "arguments": { "pid": pid, "window_id": wid },
-        },
+        "scope":"window", "window_id":wid, "screen_point":[screen_x, screen_y],
+        "hover_delivered":false, "effect":"unverifiable",
+        "next_call":{"tool":"get_browser_state", "arguments":{"pid":pid,"window_id":wid}}
     }))
+    .with_action_record(ActionExecutionRecord::cursor_move(
+        ActionTransport::AgentCursorOverlay,
+        args,
+    ))
 }
 
 /// The browser route for hover on a background web page.
@@ -432,7 +450,10 @@ mod tests {
 
     #[test]
     fn the_browser_hover_note_routes_to_the_browser_tools_not_the_desktop() {
-        let result = super::browser_hover_result("default", 8601, 659, 344.0, 450.0, 384.0, 490.0);
+        use cua_driver_core::action_record::{ActionExecutionRecord, ActionTransport};
+        let args = serde_json::json!({"pid": 8601, "window_id": 659, "x": 344.0, "y": 450.0});
+        let result =
+            super::browser_hover_result("default", &args, 8601, 659, 344.0, 450.0, 384.0, 490.0);
         let value = serde_json::to_value(&result).unwrap();
         let text = value["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("the page saw no hover"));
@@ -440,10 +461,17 @@ mod tests {
         assert!(text.contains("browser_pointer with action \"hover\""));
         assert!(text.contains("detail.next_call"));
         assert!(!text.contains("scope:\"desktop\""));
-        let structured = result.structured_content.unwrap();
+        let structured = result.structured_content.as_ref().unwrap();
         assert_eq!(structured["hover_delivered"], false);
         assert_eq!(structured["next_call"]["tool"], "get_browser_state");
         assert_eq!(structured["next_call"]["arguments"]["pid"], 8601);
+        assert_eq!(
+            result.action_record,
+            Some(ActionExecutionRecord::cursor_move(
+                ActionTransport::AgentCursorOverlay,
+                &args
+            ))
+        );
     }
 
     #[test]

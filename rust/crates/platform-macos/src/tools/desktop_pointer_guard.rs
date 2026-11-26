@@ -277,7 +277,7 @@ mod tests {
             (384.0, 490.0),
             Some(&chrome()),
             Some(1),
-            DeliveryMode::Background,
+            DeliveryMode::BackgroundPreferred,
         )
         .expect("refuses");
         assert_eq!(refusal.is_error, Some(true));
@@ -308,7 +308,7 @@ mod tests {
                 (10.0, 10.0),
                 Some(&benchlab()),
                 Some(1),
-                DeliveryMode::Background,
+                DeliveryMode::BackgroundPreferred,
             )
             .expect("refuses");
             let message = text(&refusal);
@@ -331,7 +331,7 @@ mod tests {
             (1.0, 1.0),
             Some(&chrome()),
             Some(8601),
-            DeliveryMode::Background,
+            DeliveryMode::BackgroundPreferred,
         )
         .is_none());
         // The caller explicitly accepted using the real pointer.
@@ -349,7 +349,7 @@ mod tests {
             (1.0, 1.0),
             None,
             Some(1),
-            DeliveryMode::Background,
+            DeliveryMode::BackgroundPreferred,
         )
         .is_none());
     }
@@ -361,7 +361,7 @@ mod tests {
             (1.0, 1.0),
             Some(&benchlab()),
             None,
-            DeliveryMode::Background,
+            DeliveryMode::BackgroundPreferred,
         )
         .is_some());
     }
@@ -421,7 +421,7 @@ mod task_failure_tests {
             (1.0, 2.0),
             Some(&window),
             Some(1),
-            DeliveryMode::Background,
+            DeliveryMode::BackgroundPreferred,
         )
         .unwrap();
         let result = check_with(

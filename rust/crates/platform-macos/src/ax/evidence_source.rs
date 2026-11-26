@@ -179,6 +179,11 @@ impl<B: TreeBatch> TreeBatch for EvidenceBatch<B> {
         self.record(slot, read_status(&value), None);
         value
     }
+    fn url(&self, slot: usize) -> Read<String> {
+        let value = self.inner.url(slot);
+        self.record(slot, read_status(&value), None);
+        value
+    }
 }
 
 impl<S: AxTreeSource> AxTreeSource for EvidenceSource<'_, S> {
@@ -206,6 +211,11 @@ impl<S: AxTreeSource> AxTreeSource for EvidenceSource<'_, S> {
             self.record_status(e, name, EvidenceStatus::Unavailable);
         }
         v
+    }
+    fn url(&self, e: &Self::Element) -> Read<String> {
+        let value = self.source.url(e);
+        self.record(e, "AXURL", &value);
+        value
     }
     fn text_status(&self, e: &Self::Element, name: &str) -> AttrStatus {
         let v = self.source.text_status(e, name);

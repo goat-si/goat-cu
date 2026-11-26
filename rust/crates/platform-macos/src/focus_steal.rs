@@ -499,11 +499,9 @@ impl Dispatcher {
 
 /// Register the NSWorkspace.didActivateApplicationNotification observer.
 ///
-/// The returned token and the queue are intentionally `mem::forget`-leaked
-/// — the singleton is process-lifetime, so we never tear the observer
-/// down. Forgetting avoids having to thread `!Send` `Retained<...>`
-/// handles through `FocusStealPreventer` (which lives in `Arc<...>` /
-/// `OnceLock<...>` and therefore needs to be `Send + Sync`).
+/// The token and observer queue live for the lifetime of the process.
+static OBSERVER_QUEUE: OnceLock<objc2::rc::Retained<NSOperationQueue>> = OnceLock::new();
+
 fn install_observer(dispatcher: &Arc<Dispatcher>) {
     use block2::RcBlock;
     use objc2_foundation::NSNotification;
@@ -541,11 +539,9 @@ fn install_observer(dispatcher: &Arc<Dispatcher>) {
         )
     };
 
-    // Intentionally leak both — the observer needs to outlive any
-    // particular `Arc<FocusStealPreventer>` and the singleton has
-    // process lifetime.
+    // Keep the observer and its serial queue for the process lifetime.
     std::mem::forget(token);
-    std::mem::forget(queue);
+    let _ = OBSERVER_QUEUE.set(queue);
 }
 
 /// App activations seen since the observer was installed.
@@ -585,6 +581,7 @@ fn handle_activation(dispatcher: &Arc<Dispatcher>, note: &objc2_foundation::NSNo
         pid as i32
     };
 
+    note_activation(activated_pid);
     let restore_pids =
         dispatcher.snapshot_matches(activated_pid, |watch| watch.decide() == Decision::Undo);
     for pid in restore_pids {
@@ -598,6 +595,75 @@ fn restore_focus(pid: i32) {
     unsafe {
         if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
             let _ = app.activateWithOptions(NSApplicationActivationOptions(0));
+        }
+    }
+}
+
+// ── Activation records ──────────────────────────────────────────────────────
+
+/// Live [`ActivationRecord`]s: the pid each watches and its seen flag.
+static ACTIVATION_RECORDS: Mutex<Vec<(Uuid, i32, Arc<std::sync::atomic::AtomicBool>)>> =
+    Mutex::new(Vec::new());
+
+fn activation_records(
+) -> std::sync::MutexGuard<'static, Vec<(Uuid, i32, Arc<std::sync::atomic::AtomicBool>)>> {
+    ACTIVATION_RECORDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// While alive, records whether `pid` was activated, from the activation
+/// notification itself, so an activation that is undone or switched away from
+/// within milliseconds is still seen. `Drop` stops recording.
+pub struct ActivationRecord {
+    id: Uuid,
+    seen: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ActivationRecord {
+    pub fn start(pid: i32) -> Self {
+        Self::start_with(pid, || {
+            FocusStealPreventer::shared();
+        })
+    }
+
+    fn start_with(pid: i32, install: impl FnOnce()) -> Self {
+        install();
+        let id = Uuid::new_v4();
+        let seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        activation_records().push((id, pid, seen.clone()));
+        Self { id, seen }
+    }
+
+    pub fn seen(&self) -> bool {
+        let Some(queue) = OBSERVER_QUEUE.get() else {
+            return true;
+        };
+        self.seen_after(|| {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let barrier = block2::RcBlock::new(move || {
+                let _ = tx.send(());
+            });
+            unsafe { queue.addBarrierBlock(&barrier) };
+            rx.recv().is_ok()
+        })
+    }
+
+    fn seen_after(&self, drain: impl FnOnce() -> bool) -> bool {
+        !drain() || self.seen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for ActivationRecord {
+    fn drop(&mut self) {
+        activation_records().retain(|(id, _, _)| *id != self.id);
+    }
+}
+
+fn note_activation(activated_pid: i32) {
+    for (_, pid, seen) in activation_records().iter() {
+        if *pid == activated_pid {
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 }
@@ -627,6 +693,43 @@ mod tests {
         assert!(d
             .snapshot_matches(42, |w| w.epoch() == armed.next())
             .is_empty());
+    }
+
+    /// An activation record sees only its own pid's activation, keeps it
+    /// after the pid loses the front again, and stops recording when dropped.
+    #[test]
+    fn activation_record_drains_queued_notification_before_finish() {
+        let record = ActivationRecord::start_with(-4820, || {});
+        let (release, queued) = std::sync::mpsc::sync_channel::<()>(0);
+        let (done, delivered) = std::sync::mpsc::sync_channel::<()>(0);
+        let callback = std::thread::spawn(move || {
+            queued.recv().unwrap();
+            note_activation(-4820);
+            done.send(()).unwrap();
+        });
+        let seen = record.seen_after(|| {
+            release.send(()).unwrap();
+            delivered.recv().unwrap();
+            true
+        });
+        assert!(seen);
+        callback.join().unwrap();
+    }
+
+    #[test]
+    fn activation_record_keeps_a_brief_activation_of_its_pid() {
+        let record = ActivationRecord::start_with(-4810, || {});
+        note_activation(-4811);
+        assert!(!record.seen_after(|| true));
+        note_activation(-4810);
+        note_activation(-4811);
+        assert!(record.seen_after(|| true));
+        drop(record);
+        let later = ActivationRecord::start_with(-4810, || {});
+        assert!(!later.seen_after(|| true));
+        assert!(!activation_records()
+            .iter()
+            .any(|(_, pid, seen)| *pid == -4810 && seen.load(std::sync::atomic::Ordering::SeqCst)));
     }
 
     /// Dispatcher::add returns a handle, the entry is reachable by

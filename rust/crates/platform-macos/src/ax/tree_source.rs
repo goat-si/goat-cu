@@ -33,6 +33,9 @@ pub(crate) trait TreeBatch {
     fn number(&self, slot: usize) -> Read<f64>;
     fn position(&self, slot: usize) -> Read<(f64, f64)>;
     fn size(&self, slot: usize) -> Read<(f64, f64)>;
+    fn url(&self, _slot: usize) -> Read<String> {
+        Read::Unknown(ReadFailure::WrongType)
+    }
 }
 
 /// The copied batch array owns all slots until decoding is complete.
@@ -70,6 +73,9 @@ impl TreeBatch for NativeBatch {
     fn size(&self, slot: usize) -> Read<(f64, f64)> {
         self.decode(slot, size_from_cf)
     }
+    fn url(&self, slot: usize) -> Read<String> {
+        self.decode(slot, super::batch_attrs::url_from_cf)
+    }
 }
 
 pub(crate) trait AxTreeSource {
@@ -86,6 +92,9 @@ pub(crate) trait AxTreeSource {
     fn set_messaging_timeout(&self, element: &Self::Element);
     fn set_optional_timeout(&self, element: &Self::Element, seconds: f32);
     fn text(&self, element: &Self::Element, name: &str) -> Read<String>;
+    fn url(&self, _element: &Self::Element) -> Read<String> {
+        Read::Unknown(ReadFailure::WrongType)
+    }
     fn text_status(&self, element: &Self::Element, name: &str) -> AttrStatus;
     fn boolean(&self, element: &Self::Element, name: &str) -> Read<bool>;
     fn number(&self, element: &Self::Element, name: &str) -> Read<f64>;

@@ -83,6 +83,7 @@ impl Tool for ListWindowsTool {
                 app_filter.as_deref(),
                 std::process::id() as i32,
                 crate::apps::bundle_id_for_pid,
+                crate::apps::bundle_names_for_pid,
                 crate::ax::bindings::ax_window_ids_of_pid,
             );
             label_window_records(&mut structured, |pid| {
@@ -135,6 +136,7 @@ fn compose_listing(
     app_filter: Option<&str>,
     own_pid: i32,
     mut bundle_id_of: impl FnMut(i32) -> Option<String>,
+    mut bundle_names_of: impl FnMut(i32) -> Vec<String>,
     ax_window_ids_of: impl FnMut(i32) -> Option<std::collections::HashSet<u32>>,
 ) -> (Vec<crate::windows::WindowInfo>, Value) {
     let current_space_id = enumeration.current_space_id;
@@ -150,11 +152,11 @@ fn compose_listing(
             let bundle_id = bundle_ids
                 .entry(w.pid)
                 .or_insert_with(|| bundle_id_of(w.pid));
-            cua_driver_core::tool_args::app_filter_matches(
-                filter,
-                &w.app_name,
-                bundle_id.as_deref(),
-            )
+            let extra = bundle_names_of(w.pid);
+            let names: Vec<&str> = std::iter::once(w.app_name.as_str())
+                .chain(extra.iter().map(String::as_str))
+                .collect();
+            cua_driver_core::tool_args::app_filter_matches(filter, &names, bundle_id.as_deref())
         });
     }
     crate::windows::retain_ax_reachable_using(&mut windows, current_space_id, ax_window_ids_of);
@@ -272,7 +274,7 @@ mod tests {
         crate::windows::normalize_z_indices(&mut windows);
 
         let z: Vec<_> = windows.iter().map(|window| window.z_index).collect();
-        assert_eq!(z, [1, 0]);
+        assert_eq!(z, [Some(1), Some(0)]);
     }
 
     #[test]
@@ -289,7 +291,7 @@ mod tests {
                 height: 200.0,
             },
             layer: 0,
-            z_index: 7,
+            z_index: Some(7),
             is_on_screen: true,
             current_space_id: Some(1),
             on_current_space: Some(true),
@@ -351,12 +353,24 @@ mod tests {
                 height: 100.0,
             },
             layer: 0,
-            z_index: 1,
+            z_index: Some(1),
             is_on_screen: on_screen,
             current_space_id: Some(1),
             on_current_space: Some(true),
             space_ids: Some(vec![1]),
         }
+    }
+
+    #[test]
+    fn off_screen_window_record_has_null_z_index() {
+        let window = crate::windows::WindowInfo {
+            z_index: None,
+            ..window(10701, 65305, "Calculator", "", false)
+        };
+        assert_eq!(
+            window_record_json(&window)["z_index"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]
@@ -549,6 +563,7 @@ mod tests {
             app,
             own_pid,
             |_| Some("com.example.app".to_owned()),
+            |_| Vec::new(),
             |pid| (pid == 7).then(|| [42, 43, 44].into_iter().collect()),
         );
         assert!(
@@ -612,6 +627,7 @@ mod tests {
             None,
             999,
             |_| None,
+            |_| Vec::new(),
             |_| None,
         );
         assert!(windows.is_empty());

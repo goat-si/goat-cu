@@ -21,6 +21,7 @@
 
 #[allow(dead_code)]
 pub(crate) mod actionability;
+pub mod actions;
 mod batch_attrs;
 pub mod bindings;
 pub(crate) mod content_attrs;
@@ -43,6 +44,7 @@ pub mod snapshot;
 pub mod tree;
 mod tree_source;
 pub(crate) mod vocabulary;
+pub(crate) mod web_effect;
 pub mod window_scope;
 pub(crate) mod write_outcome;
 

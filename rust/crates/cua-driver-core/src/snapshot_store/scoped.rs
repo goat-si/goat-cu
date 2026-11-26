@@ -137,17 +137,15 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
             )
         })?;
         let inner = self.inner.lock().unwrap();
-        let lane = inner
-            .lanes
-            .get(&pid)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+        let lane = inner.lanes.get(&pid).map(Vec::as_slice).unwrap_or_default();
         let scoped = inner
             .scoped
             .iter()
             .filter(|((owner, _), _)| *owner == pid)
             .flat_map(|(_, entries)| entries.iter())
-            .find(|entry| entry.snapshot.id == source_id);
+            .find(|entry| {
+                entry.snapshot.id == source_id && entry.snapshot.publisher.as_deref() == session
+            });
         let (source, parent_id, parent_epoch, mut path) = if let Some(entry) = scoped {
             (
                 &entry.snapshot,
@@ -158,13 +156,17 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         } else {
             let source = lane
                 .iter()
-                .find(|entry| entry.id == source_id)
+                .find(|entry| entry.id == source_id && entry.publisher.as_deref() == session)
                 .ok_or_else(|| refusal("stale_element_token", "Root snapshot is stale.".into()))?;
             (source, source.id, source.semantic_epoch, Vec::new())
         };
         let parent = lane
             .iter()
-            .find(|entry| entry.id == parent_id && entry.semantic_epoch == parent_epoch)
+            .find(|entry| {
+                entry.id == parent_id
+                    && entry.publisher.as_deref() == session
+                    && entry.semantic_epoch == parent_epoch
+            })
             .ok_or_else(|| stale_parent(pid, window_id))?;
         if !parent.semantic || parent.window_id != window_id || source.window_id != window_id {
             return Err(refusal(
@@ -298,9 +300,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
                     root_session_retired: false,
                     instance,
                     screenshot_owner: None,
-                    screenshot_scale: None,
-                    screenshot_window_size: None,
-                    zoom: None,
+                    frame: None,
                     semantic: true,
                     payload,
                     basis: None,

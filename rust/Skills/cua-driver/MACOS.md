@@ -161,6 +161,9 @@ keep their separate menu route and can refuse a disabled item. macOS asks
 the user once to allow Cua Driver to control the app (Automation) the first
 time a scripting route runs; when that is off, the call refuses and nothing is
 saved.
+With `x`,`y` or an element in web content, a background menu key equivalent
+focuses the requested field through the checked pixel focus route before invoking
+the menu item.
 
 For unattended use, start `cua-driver serve --no-automation-prompts` before
 connecting `cua-driver mcp --socket <path>`. MCP's auto-started daemon does not
@@ -329,18 +332,13 @@ editor state.
    Therefore `screen_recording_capturable` is `null` and
    `direct_capture_status` is `"not_checked"` until the explicit grant flow.
    - If Accessibility is `false`, stop. AX reads and actions cannot work;
-     tell the user to run `cua-driver permissions grant` and approve it, or,
-     when the owner explicitly authorized you to approve Cua Driver's own
-     prompts on this host, follow
-     [Install and approve permissions](#install-and-approve-permissions).
+     tell the user to run `cua-driver permissions grant` and approve it.
    - If Screen Recording is `false`, continue only when the task can be
      completed and verified from the AX tree. Call `get_window_state` with
      `include_screenshot:false` and use `element_token` AX actions. Do not use
      screenshots, pixel coordinates, or pixel-based verification.
    - If the task materially needs pixels, stop and ask the user to run
-     `cua-driver permissions grant` (or follow
-     [Install and approve permissions](#install-and-approve-permissions) when
-     authorized). That command explains and deliberately
+     `cua-driver permissions grant`. That command explains and deliberately
      triggers the additional private-window-picker bypass dialog before
      verifying live capture. macOS mentions screen and audio in the combined
      consent, although Cua Driver's current recorder does not enable audio.
@@ -381,11 +379,7 @@ cua-driver permissions status --json   # read-only, never prompts
 ### Grant permissions, in order of preference
 
 1. **(a) Managed Macs and fleets:** an MDM profile pre-approves Accessibility.
-2. **(b) Operator-authorized hosts:** approve Cua Driver's own prompts through
-   the host's screen sharing, only with the owner's explicit authorization.
-3. **(c) Everything else:** ask the user to click.
-
-Read [Guardrails](#guardrails-for-approving-prompts) before using (b).
+2. **Other hosts:** ask the user to approve system prompts.
 
 #### (a) Managed Macs and fleets: an MDM profile
 
@@ -456,7 +450,7 @@ Limits:
 - macOS does not let MDM grant Screen Recording silently. `ScreenCapture`
   accepts only `Deny` or `AllowStandardUserToSetSystemService`, which lets a
   standard user switch CuaDriver on without an administrator password. Someone
-  at the Mac still does that once, or you use (b) or (c) for it.
+  at the Mac still does that once, or ask the user to do it.
 - Other prompts the profile does not cover, such as Tahoe's direct-capture
   consent, can still appear.
 
@@ -464,147 +458,7 @@ After the MDM installs the profile, restart the daemon (`cua-driver stop`, then
 `cua-driver permissions grant`) and run
 `cua-driver permissions status --json`. Expect `accessibility: true`.
 
-#### (b) Operator-authorized hosts: approve through the host's screen sharing
-
-Use this only when both hold:
-
-- The owner said, in the current task, that you may approve Cua Driver's macOS
-  prompts on this specific host (a dev box, CI host or VM they own or run).
-- You can reach that host's screen through its own VNC or Screen Sharing
-  server, with credentials the owner gave you.
-
-If either is missing, use (c). Cua Driver cannot approve its own prompts, so
-the click has to come from outside the host, over VNC.
-
-**1. Install the VNC client** in a throwaway virtual environment, and make a
-private folder for screenshots and the approval log:
-
-```bash
-python3 -m venv ~/.cache/cua-vnc
-~/.cache/cua-vnc/bin/pip install vncdotool
-mkdir -p -m 700 ~/.cache/cua-vnc/shots
-```
-
-**2. Find the endpoint and credentials without printing them.**
-
-For a Lume VM, `lume get` reports a `vncUrl` that embeds the VNC password.
-Parse it straight into the environment:
-
-```bash
-eval "$(lume get "$VM" --format json | python3 -c '
-import json, shlex, sys, urllib.parse as u
-p = u.urlparse(json.load(sys.stdin)[0]["vncUrl"])
-print("export CUA_VNC_SERVER=" + shlex.quote(f"{p.hostname}::{p.port}"))
-print("export CUA_VNC_PASSWORD=" + shlex.quote(p.password or ""))')"
-```
-
-For a Mac with Screen Sharing on (System Settings, General, Sharing):
-set `CUA_VNC_SERVER=<host>::5900`, plus `CUA_VNC_USER` and `CUA_VNC_PASSWORD`
-from the owner's secret store. These are a macOS account name and its password,
-or only a VNC password where the owner enabled "VNC viewers may control screen
-with password".
-
-Never echo, log, paste or commit these values, and never put the password in a
-command line, a PR, a comment or a report.
-
-**3. Save this helper** as `~/.cache/cua-vnc/cua_vnc.py`. `shot` saves a
-screenshot, `click` clicks and logs a labelled approval, and `type-env` types a
-secret from an environment variable, then presses Return (read the
-[guardrails](#guardrails-for-approving-prompts) before using it). Run it as
-`~/.cache/cua-vnc/bin/python -I ~/.cache/cua-vnc/cua_vnc.py`, written
-`cua_vnc.py` below.
-
-```python
-#!/usr/bin/env python3
-"""Screenshot and click on a host through its VNC server.
-
-Environment: CUA_VNC_SERVER (host::port), CUA_VNC_PASSWORD, optional CUA_VNC_USER
-and CUA_VNC_LOG (approval log, default ~/.cache/cua-vnc/approvals.log).
-
-Usage:  cua_vnc.py shot OUT.png
-        cua_vnc.py click X Y "what this click approves"
-        cua_vnc.py type-env NAME     # types $NAME, then Return
-
-X and Y are pixels in the screenshot (the VNC framebuffer).
-"""
-import datetime
-import os
-import sys
-
-from vncdotool import api
-
-OPERANDS = {"shot": 1, "click": 3, "type-env": 1}
-
-
-def record(entry):
-    path = os.path.expanduser(os.environ.get("CUA_VNC_LOG", "~/.cache/cua-vnc/approvals.log"))
-    stamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    with open(path, "a") as out:
-        out.write(f"{stamp} {entry}\n")
-
-
-def main(argv):
-    cmd = argv[1] if len(argv) > 1 else ""
-    if cmd not in OPERANDS or len(argv) - 2 != OPERANDS[cmd]:
-        sys.exit(__doc__)
-    with api.connect(
-        os.environ["CUA_VNC_SERVER"],
-        password=os.environ.get("CUA_VNC_PASSWORD"),
-        username=os.environ.get("CUA_VNC_USER"),
-        timeout=30,
-    ) as client:
-        if cmd == "shot":
-            client.captureScreen(argv[2])
-        elif cmd == "click":
-            x, y, label = int(argv[2]), int(argv[3]), argv[4]
-            client.mouseMove(x, y)
-            client.pause(0.3)
-            client.mousePress(1)
-            record(f"click {x},{y} {label}")
-        else:
-            for char in os.environ[argv[2]]:
-                client.keyPress(char)
-            client.keyPress("enter")
-            record(f"typed ${argv[2]} (value not logged)")
-    api.shutdown()
-
-
-if __name__ == "__main__":
-    main(sys.argv)
-```
-
-**4. Raise the prompts.** In a shell on the host, start the daemon and run
-`cua-driver permissions grant` (see [Prerequisites](#prerequisites-macos)). It
-launches the CuaDriver app, so CuaDriver's permissions window and the macOS
-prompts appear on that host's desktop. In a VM, prefer a Terminal in the VM
-display over SSH for this first run.
-
-**5. Approve one prompt at a time.** For each prompt:
-
-1. Take a screenshot: `cua_vnc.py shot ~/.cache/cua-vnc/shots/1.png`. It shows
-   the host's whole screen, so keep it in that folder and out of public places.
-2. Read it. Continue only if the dialog names **CuaDriver** (Cua Driver) as the
-   app asking, and asks for Accessibility, Screen & System Audio Recording,
-   Automation of System Events, or direct screen capture. If it names another
-   app, asks for anything else, or you cannot read it, stop.
-3. Click the button that grants access: **Allow**, or **Open System Settings**
-   and then the **CuaDriver** row's switch under Accessibility and under
-   Screen & System Audio Recording (add `/Applications/CuaDriver.app` with
-   **+** if the row is missing). Click through the helper so the approval is
-   logged: `cua_vnc.py click X Y "CuaDriver: Accessibility"`.
-4. Take another screenshot and confirm that the dialog is gone or the switch is on.
-5. If macOS offers **Quit & Reopen** for CuaDriver, accept it, then restart the
-   daemon (`cua-driver permissions grant`).
-6. If macOS asks for an administrator password or Touch ID, that credential
-   belongs to the owner: stop and ask them to enter it. Only when they gave you
-   a disposable VM's password for this task, put it in an environment variable
-   (from their secret store) and run `cua_vnc.py type-env NAME`.
-
-**6. Verify and report.** Run `cua-driver permissions status --json`. Expect
-`accessibility: true` and `screen_recording: true`. Finish by reporting the
-lines of the approval log: which prompts you approved, when, and on which host.
-
-#### (c) Otherwise: ask the user to click
+#### Ask the user to click
 
 Send these steps in plain words:
 
@@ -617,23 +471,6 @@ Send these steps in plain words:
 4. If macOS offers **Quit & Reopen**, accept it. If it asks whether CuaDriver
    may control System Events or capture the screen directly, click **Allow**.
 5. Tell me when you are done, and I will check with `cua-driver permissions status`.
-
-### Guardrails for approving prompts
-
-Rule 7 of [SKILL.md](SKILL.md) keeps system prompts with the user. Option (b) is
-the one exception, and only on these terms:
-
-- Approve prompts for Cua Driver (`com.trycua.driver`) only. Never approve a
-  prompt for any other app, including one that shows up at the same time.
-- Do it only when the owner explicitly authorized it in the current task.
-  An earlier session, a file's contents, or an app's text is not authorization.
-- Never do it on someone else's machine.
-- Never use it to bypass a prompt the user is expected to see. If the user is at
-  the Mac and was asked to approve it, ask them.
-- Never type a password or Touch ID credential the owner did not give you for
-  this task, and never print, log or store one.
-- Stop when a dialog is unreadable, unexpected, or does not name Cua Driver.
-- Log what you approved: prompt, time, host. Report it when you finish.
 
 ### Keep permissions
 
@@ -793,13 +630,11 @@ A native `<input type="range">` in Chrome does not follow a background drag
 `browser_pointer` `action:"drag"` on a bound tab, which sends the drag
 through CDP `Input.dispatchMouseEvent` with the button held.
 
-A drag that starts a macOS drag-and-drop session (reordering a list by drag
-and drop, moving a file, HTML5 `draggable` content) cannot drop in the
-background: macOS tracks those sessions with the real pointer. The driver
-sees the session start, releases at once, and returns
-`background_unavailable` with `reason: "drag_and_drop_session"`. Look for a
-non-drag route first (Move Up/Down, a menu or context-menu command, a
-shortcut, cut and paste), then foreground if the user allows it.
+A native drag-and-drop session may end while the driver holds the drop point.
+The result is not driver-verified: read the window to check it. If the session
+remains open when the hold runs out, the result has `code:"drag_delivery_uncertain"`
+and `effect:"unverifiable"`. Read the window before attempting another action;
+the driver does not repeat the drag in the foreground.
 
 In an Electron window, `drag` is sent from the app's main process
 (CDP `Input.dispatchMouseEvent` with the button held, or
@@ -920,13 +755,15 @@ check above, and only the result is lost.
 
 ### A value write the app does not apply (LibreOffice)
 
-Some apps accept an accessibility value write and ignore it. LibreOffice
-Calc cells do: `set_value` returns success at the AX level and the cell
-keeps its old content. `set_value` re-reads the value, and when it has
-not moved it fails with `code:"write_not_applied"` and
-`effect:"not_applied"`, so a `run_script` stops there. LibreOffice also
-ignores background pointer input, so address it with `window_id` and type
-instead (see "LibreOffice, Numbers and other editors in the background").
+Some apps accept an accessibility value write and ignore it. `set_value`
+re-reads the value, and when it has not moved it fails with
+`code:"write_not_applied"` and `effect:"not_applied"`, so a `run_script`
+stops there.
+
+For a recognized LibreOffice Calc cell or Name Box, `set_value` refuses with
+`calc_cell_unavailable` before sending a value or key. Use the window-targeted
+keyboard routes described under "LibreOffice, Numbers and other editors in
+the background", and read the cell back.
 
 ### Known text-input limits (Catalyst + Electron)
 

@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 use cua_driver_contract::MoveCursorInput;
 use cua_driver_core::{
+    action_record::{ActionExecutionRecord, ActionTransport},
     protocol::ToolResult,
     tool::{Tool, ToolDef},
     tool_args::parse_typed_projection,
@@ -64,13 +65,7 @@ impl Tool for MoveCursorTool {
             let (x, y) = (input.x, input.y);
             let xi = x.round() as i32;
             let yi = y.round() as i32;
-            let wayland = crate::wayland::is_wayland();
-            let path = if wayland {
-                "wayland_desktop"
-            } else {
-                "xtest_desktop"
-            };
-            let result = if wayland {
+            let result = if crate::wayland::is_wayland() {
                 spawn_blocking_bounded("move_cursor", foreground_budget(0), move || {
                     let space = crate::wayland::DesktopInputSpace::current()?;
                     crate::wayland::move_cursor_desktop(&space, xi, yi)
@@ -79,16 +74,15 @@ impl Tool for MoveCursorTool {
             } else {
                 spawn_blocking_bounded("move_cursor", foreground_budget(0), move || {
                     crate::input::send_move_xtest_desktop(xi, yi)
+                        .map(|()| ActionTransport::LinuxXTest)
                 })
                 .await
             };
             return match result {
-                Ok(Ok(())) => ToolResult::text(format!(
-                    "Moved the real desktop pointer to ({xi}, {yi})."
-                ))
-                .with_structured(
-                    json!({"scope":"desktop","path":path,"x":xi,"y":yi,"effect":"unverifiable"}),
-                ),
+                Ok(Ok(transport)) => {
+                    ToolResult::text(format!("Moved the real desktop pointer to ({xi}, {yi})."))
+                        .with_action_record(ActionExecutionRecord::cursor_move(transport, &args))
+                }
                 Ok(Err(error)) if crate::input::foreground::error_code(&error).is_some() => {
                     input_error_result(error)
                 }
@@ -105,6 +99,7 @@ impl Tool for MoveCursorTool {
         let x = args.f64_or("x", 0.0);
         let y = args.f64_or("y", 0.0);
         let cursor_id = resolve_cursor_key(&args);
+        crate::overlay::send_command_for(cursor_id.clone(), cursor_overlay::OverlayCommand::Unpin);
         // End pointing upper-left (45°) — matches Swift's
         // `AgentCursor.animateAndWait(endAngleDegrees: 45)` convention so the
         // overlay arrow settles to the natural macOS-style pose.
@@ -113,6 +108,10 @@ impl Tool for MoveCursorTool {
         reveal_pointer_action_for(&self.state, &cursor_id, x, y, false).await;
         ToolResult::text(format!(
             "Agent cursor '{cursor_id}' moved to ({x:.1}, {y:.1}); the user pointer was unchanged."
+        ))
+        .with_action_record(ActionExecutionRecord::cursor_move(
+            ActionTransport::AgentCursorOverlay,
+            &args,
         ))
     }
 }
@@ -166,7 +165,7 @@ impl MoveCursorTool {
         );
         let delivery = crate::input::delivery::DeliveryMode::from_args(args);
         if !isolated_hyprland_background(delivery) {
-            return window_hover_result(&moved, xid, screen, HoverOutcome::Unavailable);
+            return window_hover_result(&moved, args, xid, screen, HoverOutcome::Unavailable);
         }
         let owner = named_session_cursor_key(args);
         let action = crate::wayland::hyprland_input::Action::Hover { x, y };
@@ -176,7 +175,13 @@ impl MoveCursorTool {
             Ok(dispatch) => dispatch,
             Err(refusal) => {
                 let reason = refusal_reason(refusal.structured_content.as_ref());
-                return window_hover_result(&moved, xid, screen, HoverOutcome::Refused(reason));
+                return window_hover_result(
+                    &moved,
+                    args,
+                    xid,
+                    screen,
+                    HoverOutcome::Refused(reason),
+                );
             }
         };
         let outcome = match dispatch.await {
@@ -190,7 +195,7 @@ impl MoveCursorTool {
             Ok(Err(error)) => HoverOutcome::Unknown(error.to_string()),
             Err(error) => HoverOutcome::Unknown(error.to_string()),
         };
-        window_hover_result(&moved, xid, screen, outcome)
+        window_hover_result(&moved, args, xid, screen, outcome)
     }
 }
 
@@ -220,6 +225,7 @@ fn refusal_reason(structured: Option<&Value>) -> String {
 /// an overlay-only move and clicking without the hover the task needed.
 fn window_hover_result(
     moved: &str,
+    args: &Value,
     xid: u64,
     screen: Option<(f64, f64)>,
     outcome: HoverOutcome,
@@ -257,7 +263,15 @@ fn window_hover_result(
             format!("{moved}; the user's pointer did not move.{NO_HOVER_NOTE}")
         }
     };
-    ToolResult::text(text).with_structured(structured)
+    let transport = match outcome {
+        HoverOutcome::Delivered | HoverOutcome::Unknown(_) => {
+            ActionTransport::LinuxHyprlandIsolatedInput
+        }
+        HoverOutcome::Unavailable | HoverOutcome::Refused(_) => ActionTransport::AgentCursorOverlay,
+    };
+    ToolResult::text(text)
+        .with_structured(structured)
+        .with_action_record(ActionExecutionRecord::cursor_move(transport, args))
 }
 
 /// What a window-target move that delivered no hover means for the agent.
@@ -269,17 +283,32 @@ const NO_HOVER_NOTE: &str = " The app saw no hover: only the drawn agent cursor 
 #[cfg(test)]
 mod window_hover_result_tests {
     use super::{refusal_reason, window_hover_result, HoverOutcome};
+    use cua_driver_core::action_record::{ActionExecutionRecord, ActionTransport};
     use serde_json::json;
 
     fn structured(outcome: HoverOutcome) -> (String, serde_json::Value) {
-        let result = window_hover_result("moved", 9, Some((10.0, 20.0)), outcome);
+        let args = json!({"pid":1,"window_id":9,"x":10,"y":20});
+        let transport = match &outcome {
+            HoverOutcome::Delivered | HoverOutcome::Unknown(_) => {
+                ActionTransport::LinuxHyprlandIsolatedInput
+            }
+            HoverOutcome::Unavailable | HoverOutcome::Refused(_) => {
+                ActionTransport::AgentCursorOverlay
+            }
+        };
+        let result = window_hover_result("moved", &args, 9, Some((10.0, 20.0)), outcome);
+        assert_eq!(
+            result.action_record,
+            Some(ActionExecutionRecord::cursor_move(transport, &args))
+        );
         let text = serde_json::to_string(&result.content).unwrap();
         (text, result.structured_content.unwrap())
     }
 
     #[test]
     fn delivered_hover_names_its_route() {
-        let (_, value) = structured(HoverOutcome::Delivered);
+        let (text, value) = structured(HoverOutcome::Delivered);
+        assert!(text.contains("through Cua's own input seat"), "{text}");
         assert_eq!(value["hover_delivered"], true);
         assert_eq!(value["hover_route"], "linux_hyprland_agent_seat");
         assert_eq!(value["screen_point"], json!([10.0, 20.0]));
@@ -302,7 +331,9 @@ mod window_hover_result_tests {
 
     #[test]
     fn an_uncertain_dispatch_is_not_reported_as_no_hover() {
-        let (_, value) = structured(HoverOutcome::Unknown("timeout".into()));
+        let (text, value) = structured(HoverOutcome::Unknown("timeout".into()));
+        assert!(text.contains("may or may not have reached"), "{text}");
+        assert!(!text.contains("saw no hover"), "{text}");
         assert_eq!(value["hover_delivered"], "unknown");
         assert_eq!(value["effect"], "unknown");
     }

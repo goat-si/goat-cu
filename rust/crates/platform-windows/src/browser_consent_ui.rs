@@ -293,6 +293,47 @@ fn select_language_independent_actions(
     ))
 }
 
+fn dialog_buttons<F>(
+    nodes: &[UiaNode],
+    (start, end): (usize, usize),
+    properties: &mut F,
+) -> Result<Vec<ConsentButtonCandidate>, BrowserRefusal>
+where
+    F: FnMut(usize) -> Result<(String, bool), BrowserRefusal>,
+{
+    let mut candidates = Vec::new();
+    for node in nodes[(start + 1)..end].iter().filter(|node| {
+        is_trusted_prompt_node(nodes, node)
+            && node.control_type == "Button"
+            && node.actions.iter().any(|action| action == "invoke")
+            && node.enabled != Some(false)
+            && node.element_ptr != 0
+            && node.rect.is_some()
+    }) {
+        let (class_name, has_keyboard_focus) = properties(node.element_ptr)?;
+        if class_name != CHROMIUM_DIALOG_BUTTON_CLASS {
+            continue;
+        }
+        let rect = node.rect.expect("filtered above");
+        if rect.0 >= rect.2 || rect.1 >= rect.3 {
+            continue;
+        }
+        if candidates
+            .iter()
+            .any(|candidate: &ConsentButtonCandidate| candidate.rect == rect)
+        {
+            continue;
+        }
+        candidates.push(ConsentButtonCandidate {
+            element_ptr: node.element_ptr,
+            rect,
+            has_keyboard_focus,
+        });
+    }
+    Ok(candidates)
+}
+
+/// Refuse an unrecognized native surface rather than acting on an ambiguous prompt.
 fn exact_consent_actions_with<F>(
     nodes: &[UiaNode],
     mut properties: F,
@@ -306,35 +347,7 @@ where
     }
     let mut matches = Vec::new();
     for (start, end) in surfaces {
-        let mut candidates = Vec::new();
-        for node in nodes[(start + 1)..end].iter().filter(|node| {
-            is_trusted_prompt_node(nodes, node)
-                && node.control_type == "Button"
-                && node.actions.iter().any(|action| action == "invoke")
-                && node.enabled != Some(false)
-                && node.element_ptr != 0
-                && node.rect.is_some()
-        }) {
-            let (class_name, has_keyboard_focus) = properties(node.element_ptr)?;
-            if class_name != CHROMIUM_DIALOG_BUTTON_CLASS {
-                continue;
-            }
-            let rect = node.rect.expect("filtered above");
-            if rect.0 >= rect.2 || rect.1 >= rect.3 {
-                continue;
-            }
-            if candidates
-                .iter()
-                .any(|candidate: &ConsentButtonCandidate| candidate.rect == rect)
-            {
-                continue;
-            }
-            candidates.push(ConsentButtonCandidate {
-                element_ptr: node.element_ptr,
-                rect,
-                has_keyboard_focus,
-            });
-        }
+        let candidates = dialog_buttons(nodes, (start, end), &mut properties)?;
         let (allow, cancel) = select_language_independent_actions(&candidates)?;
         let rect_of = |ptr: usize| {
             candidates
@@ -414,13 +427,22 @@ pub fn dismiss(pid: u32, hwnd: u64) -> Result<bool, BrowserRefusal> {
     loop {
         prove_window_owner(hwnd, pid)?;
         let tree = crate::uia::walk_tree(hwnd, None);
-        let prompt_present = native_prompt_surface_present(&tree.nodes);
-        if !prompt_present {
+        if !native_prompt_surface_present(&tree.nodes) {
             release_nodes(&tree.nodes);
             return Ok(dismissed);
         }
-        let cancel = exact_cancel_button(&tree.nodes);
-        let invoked = match cancel {
+        if dismissed {
+            release_nodes(&tree.nodes);
+            if Instant::now() >= deadline {
+                return Err(BrowserRefusal::new(
+                    BrowserRefusalCode::BrowserWrongTargetRefused,
+                    "the remote-debugging consent prompt remained after its one cancel action",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        let invoked = match exact_cancel_button(&tree.nodes) {
             Ok(Some(element)) => unsafe { invoke(element) },
             Ok(None) => Err(BrowserRefusal::new(
                 BrowserRefusalCode::BrowserWrongTargetRefused,
@@ -517,6 +539,7 @@ mod tests {
             selected: None,
             checked: None,
             expanded: None,
+            is_password: None,
             element_ptr: 0,
             center_x: 0,
             center_y: 0,
@@ -891,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn matcher_refuses_chromium_buttons_outside_the_bound_prompt_subtree() {
+    fn matcher_ignores_chromium_buttons_outside_the_bound_prompt_subtree() {
         let title = "opaque consent surface";
         let nodes = vec![
             dialog_node("Pane", title, 2),
@@ -909,6 +932,34 @@ mod tests {
                 .code,
             BrowserRefusalCode::BrowserWrongTargetRefused
         );
+    }
+
+    /// Edge 156 on a page in another language: the translate bubble is a sibling native surface.
+    fn translate_bubble() -> Vec<UiaNode> {
+        let title = "Translate page from Russian?";
+        let mut more = button("More", 23, (700, 200, 730, 232));
+        more.actions = vec!["expand".to_owned()];
+        vec![
+            dialog_node("Pane", title, 2),
+            dialog_node("Text", title, 3),
+            dialog_node("Text", title, 7),
+            button("Close", 21, (730, 100, 750, 120)),
+            button("Translate", 22, (600, 200, 690, 232)),
+            more,
+        ]
+    }
+
+    #[test]
+    fn matcher_refuses_ambiguous_native_bubbles_beside_the_consent_prompt() {
+        let mut nodes = translate_bubble();
+        nodes.extend(chromium_153_prompt(
+            "Allow remote debugging?",
+            ["Turn off in settings", "Allow", "Cancel"],
+        ));
+        // An unrecognized native surface is ambiguous; GOAT refuses it
+        // even when another surface resembles a consent prompt.
+        assert!(exact_consent_actions_with(&nodes, properties).is_err());
+        assert!(exact_allow_button_with(&translate_bubble(), properties).is_err());
     }
 
     #[test]

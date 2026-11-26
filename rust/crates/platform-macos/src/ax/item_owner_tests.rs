@@ -180,6 +180,7 @@ fn deferred_row_keeps_both_owners() {
         collection: 0,
         element: unsafe { RetainedElement::retain(0) },
         depth: 0,
+        walk_depth: 0,
         parent_index: None,
         parent_role: "AXCell".into(),
         label_path: path,

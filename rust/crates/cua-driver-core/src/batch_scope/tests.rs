@@ -532,6 +532,7 @@ impl Tool for Fake {
             "launch_app" => ToolResult::text("launched").with_structured(json!({"pid": 42})),
             _ if args["fail_message"].is_string() => {
                 ToolResult::error(args["fail_message"].as_str().unwrap_or_default().to_owned())
+                    .with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED)
             }
             _ if args["need_foreground"] == true
                 && args.get("delivery_mode").and_then(Value::as_str) != Some("foreground") =>
@@ -541,6 +542,7 @@ impl Tool for Fake {
                         "code": "background_unavailable",
                         "escalation": {"recommended": "foreground", "reason": "delivery_failed"}
                     }))
+                    .with_disposition(cua_driver_contract::ErrorDisposition::NOT_DELIVERED)
             }
             _ => ToolResult::text(format!("{name} done")).with_structured(json!({
                 "effect": "unverifiable", "path": "ax"

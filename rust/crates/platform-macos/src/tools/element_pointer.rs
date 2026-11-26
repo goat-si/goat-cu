@@ -149,6 +149,8 @@ impl Drop for AncestorWalk {
 /// live target talks to the app; tests substitute one per pid.
 #[async_trait]
 pub(super) trait ElementTarget: Send + Sync {
+    fn sheet_clear(&self) -> bool;
+    fn exact_foreground(&self) -> bool;
     /// Take the per-pid background lease after gating `action` on the exact window.
     async fn gate(&self, action: BackgroundAction) -> Result<BackgroundMutationLease, ToolResult>;
     /// The background refusal for a Chromium `<select>`, which a click would open
@@ -329,6 +331,33 @@ pub(super) fn checked_point(
     })
 }
 
+pub(super) fn checked_selection_point(
+    target: &dyn ElementTarget,
+    expected: ElementPoint,
+    foreground: bool,
+) -> Result<ElementPoint, NotDispatched> {
+    if !target.sheet_clear() {
+        return Err(refuse(
+            "sheet_blocked",
+            "An attached sheet blocks the selection target or its ancestry is unreadable.",
+        ));
+    }
+    let actual = checked_point(target, foreground)?;
+    if actual != expected {
+        return Err(refuse(
+            "element_moved",
+            "The selection target or window moved before the click.",
+        ));
+    }
+    if foreground && !target.exact_foreground() {
+        return Err(refuse(
+            "foreground_unavailable",
+            "The exact target window is no longer foreground.",
+        ));
+    }
+    Ok(actual)
+}
+
 /// Pointer clicks handed to the event transport.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct PointerClicks {
@@ -354,6 +383,13 @@ fn pointer_clicks(
     // The pointer move (and the background primer) can change what is under
     // the point: prove it again right before the first target click.
     let mut recheck = || -> anyhow::Result<()> {
+        if !target.sheet_clear() {
+            return Err(refuse(
+                "stale_element_token",
+                "an attached sheet blocks the target or its ancestry is unreadable",
+            )
+            .into());
+        }
         match checked_point(target, foreground) {
             Ok(now) if now == point => Ok(()),
             Ok(_) => Err(refuse("element_moved", "the element moved").into()),
@@ -425,6 +461,13 @@ fn dispatch(
     use_ax_open: bool,
     foreground: bool,
 ) -> anyhow::Result<Performed> {
+    if !target.sheet_clear() {
+        return Err(refuse(
+            "stale_element_token",
+            "an attached sheet blocks the target or its ancestry is unreadable",
+        )
+        .into());
+    }
     if count != 2 {
         return pointer_clicks(target, count, foreground).map(Performed::Clicks);
     }
@@ -1002,6 +1045,15 @@ struct LiveTarget {
     element: RetainedElement,
 }
 
+fn exact_foreground_evidence(
+    front: Option<i32>,
+    pid: i32,
+    focused: Option<u32>,
+    requested: u32,
+) -> bool {
+    front == Some(pid) && focused == Some(requested)
+}
+
 impl LiveTarget {
     fn element(&self) -> AXUIElementRef {
         self.element.as_ptr() as AXUIElementRef
@@ -1010,6 +1062,17 @@ impl LiveTarget {
 
 #[async_trait]
 impl ElementTarget for LiveTarget {
+    fn sheet_clear(&self) -> bool {
+        unsafe { crate::ax::exact_target::element_blocked_by_sheet(self.element()) == Some(false) }
+    }
+    fn exact_foreground(&self) -> bool {
+        exact_foreground_evidence(
+            crate::apps::frontmost_pid(),
+            self.pid,
+            crate::ax::bindings::focused_window_id_of_pid(self.pid),
+            self.window_id,
+        )
+    }
     async fn gate(&self, action: BackgroundAction) -> Result<BackgroundMutationLease, ToolResult> {
         super::gate_background_window_action(
             self.pid,

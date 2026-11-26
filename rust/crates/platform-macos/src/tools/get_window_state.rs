@@ -89,9 +89,11 @@ fn def() -> &'static ToolDef {
         description: "Snapshot a window: the accessibility tree plus a screenshot. The tree is one compact Markdown \
             rendering by default (`tree_format:\"markdown\"`): row `[N]` is `element_token` \
             `<snapshot_id>:N`, with `snapshot_id` in the header and structuredContent; \
-            `tree_format:\"elements\"` returns the structured `elements` array instead, `\"both\"` both. A \
+            `tree_format:\"elements\"` returns the structured `elements` array instead, `\"both\"` both. \
+            Actionable links may include their destination `url`, which can contain tokens. A \
             read walks at most 250 nodes by default and says `truncated:true` when cut; raise \
-            `max_elements`, or narrow with `query` and `max_depth`. Long lists and tables are read last, \
+            `max_elements`, or narrow with `query` and `max_depth`. Query accepts `a|b` for either \
+            alternative and reports zero matches. Long lists and tables are read last, \
             on-screen rows first; skipped off-screen rows show as one \"(offscreen rows: N ...)\" line \
             unless `query` is set. `verbose:true` adds `_note` and the full `background_input` report; \
             `full_output:true` restores the full response (both forms, all metadata, ≤2 000 nodes).\n\
@@ -119,10 +121,10 @@ fn def() -> &'static ToolDef {
             "type": "object",
             "required": ["pid", "window_id"],
             "properties": {
-                "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it." },
+                "session": cua_driver_core::tool_schema::session_schema(),
                 "pid": { "type": "integer", "description": "Target process ID." },
                 "window_id": { "type": "integer", "description": "Target window ID from list_windows." },
-                "query": { "type": "string", "description": "Case-insensitive substring filter: returns matching rows plus ancestors; element_index values are not renumbered. Try this before a full read." },
+                "query": { "type": "string", "description": "Case-insensitive substring filter; `a|b` matches rows containing either. Returns matching rows plus ancestors, or says `0 of N elements match` when none does; element_index values are not renumbered. Try this before a full read." },
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
                 "include_accessibility_tree": {
                     "type": "boolean",
@@ -504,7 +506,9 @@ impl Tool for GetWindowStateTool {
         // Fast path `on`: re-reads skip the screenshot unless asked for one.
         let should_capture = should_capture
             && !cua_driver_core::fast_path::wire::skip_reread_screenshot(
+                &self.state.guard_store,
                 &args,
+                session_id.as_deref(),
                 pid,
                 u64::from(window_id),
             );
@@ -651,6 +655,7 @@ impl Tool for GetWindowStateTool {
                         depth_truncated: false,
                         walk,
                         window_scope: Some(crate::ax::window_scope::WindowScope::Matched),
+                        ax_enumeration: None,
                     };
                     let payload = crate::ax::snapshot::AxSnapshot::from_nodes(&tree.nodes);
                     return (tree, payload, std::collections::HashMap::new());
@@ -717,7 +722,11 @@ impl Tool for GetWindowStateTool {
         let scope_matched = window_scope.as_ref().is_none_or(|s| s.is_matched());
 
         let removed = (!scope_matched && !observation_only)
-            .then(|| self.state.snapshots.remove(pid, u64::from(window_id)))
+            .then(|| {
+                self.state
+                    .snapshots
+                    .remove(pid, u64::from(window_id), session_id.as_deref())
+            })
             .flatten();
 
         // Capture the screenshot and deliver it alongside the tree — the
@@ -748,7 +757,6 @@ impl Tool for GetWindowStateTool {
         let screenshot = if should_capture {
             let out_file = screenshot_out_file.clone();
             let panel_args = args.clone();
-            let fast_path_session = session_id.clone();
             let side_facts = !want_tree && !display_only;
             let res = latency::spawn_blocking(move || {
                 std::thread::scope(|scope| {
@@ -767,6 +775,7 @@ impl Tool for GetWindowStateTool {
                     u32,
                     crate::windows::WindowBounds,
                     f64,
+                    Option<cua_driver_core::fast_path::store::ReadImage>,
                 ),
                 super::px_frame::PxFrameError,
             > {
@@ -780,13 +789,9 @@ impl Tool for GetWindowStateTool {
                     &bounds,
                     || crate::capture::screenshot_window_image(window_id),
                 )?;
-                crate::fast_path_guard::record_read_image(
-                    pid,
-                    window_id,
-                    &raw,
-                    &bounds,
-                    fast_path_session.as_deref(),
-                );
+                // Published after the join, while this call still holds its
+                // session, so a cancelled read cannot outlive session_end.
+                let guard_read = crate::fast_path_guard::read_image(pid, window_id, &raw, &bounds);
                 // Resize and encode once from the raw pixels; the PNG bytes
                 // are identical to the former encode-decode-resize round trip.
                 // The model-sized screenshot is capped at point resolution by
@@ -835,6 +840,7 @@ impl Tool for GetWindowStateTool {
                         orig_h,
                         bounds,
                         scale,
+                        guard_read,
                     ))
                 } else {
                     Ok((
@@ -846,6 +852,7 @@ impl Tool for GetWindowStateTool {
                         orig_h,
                         bounds,
                         scale,
+                        guard_read,
                     ))
                 }
             })();
@@ -860,7 +867,12 @@ impl Tool for GetWindowStateTool {
                 Err(e) => Err(e),
             };
             match res {
-                Ok(Ok((png, file_path, w, h, orig_w, orig_h, bounds, scale))) => {
+                Ok(Ok((png, file_path, w, h, orig_w, orig_h, bounds, scale, guard_read))) => {
+                    if let Some(read) = guard_read {
+                        self.state
+                            .guard_store
+                            .put_image(session_id.as_deref(), pid, read);
+                    }
                     if !observation_only {
                         screenshot_resize_scale = Some(orig_w as f64 / w as f64);
                     }
@@ -997,14 +1009,20 @@ impl Tool for GetWindowStateTool {
         if let (Some(sid), Some(tree)) = (snapshot_id, tree_result.as_ref()) {
             if !observation_only {
                 crate::fast_path_guard::record_snapshot(
+                    &self.state.guard_store,
+                    session_id.as_deref(),
                     pid,
                     u64::from(window_id),
                     sid,
                     &tree.nodes,
-                    session_id.as_deref(),
                 );
                 if screenshot.is_none() {
-                    crate::fast_path_guard::record_window(pid, window_id, session_id.as_deref());
+                    crate::fast_path_guard::record_window(
+                        &self.state.guard_store,
+                        session_id.as_deref(),
+                        pid,
+                        window_id,
+                    );
                 }
             }
         }
@@ -1091,6 +1109,19 @@ impl Tool for GetWindowStateTool {
         if let Some(label) = &process_instance {
             structured["process_instance"] = serde_json::json!(label);
         }
+        if scope_matched {
+            if let Some(r) = tree_result.as_ref() {
+                cua_driver_core::element_query::publish_observations(
+                    &mut structured,
+                    if observation_only {
+                        Vec::new()
+                    } else {
+                        build_observations(&r.nodes)
+                    },
+                    query.as_deref(),
+                );
+            }
+        }
         // Surface 6: an opaque snapshot identifier consumers can log
         // alongside the per-element tokens for debug correlation. Same value
         // embedded in every `element_token` emitted in `elements[]` above.
@@ -1110,6 +1141,19 @@ impl Tool for GetWindowStateTool {
         }
         if let Some(capture_id) = capture_id {
             structured["capture_id"] = serde_json::json!(capture_id);
+        }
+        // Set only when the window scope is unresolved (issue #4039).
+        if let Some(summary) = tree_result
+            .as_ref()
+            .and_then(|result| result.ax_enumeration.as_ref())
+        {
+            structured["ax_enumeration"] = serde_json::json!({
+                "children_count": summary.children_count,
+                "windows_count": summary.windows_count,
+                "union_count": summary.union_count,
+                "ax_window_count": summary.ax_window_count,
+                "mapped_window_count": summary.mapped_window_count,
+            });
         }
         if let Some(id) = refreshed {
             let sid = cua_driver_core::element_token::format_snapshot_id(id);
@@ -1240,6 +1284,9 @@ impl Tool for GetWindowStateTool {
                 cua_driver_core::background_input::background_input_capability_report(
                     cua_driver_core::background_input::ExactWindowTarget { pid, window_id },
                     &facts,
+                    super::window_keyboard_action(
+                        cua_driver_core::background_input::BackgroundAction::GenericKey,
+                    ),
                     Some(capture_available),
                 )
             })
@@ -1302,6 +1349,7 @@ impl Tool for GetWindowStateTool {
             cua_driver_core::window_state_view::apply(
                 &view,
                 &cua_driver_core::window_state_view::ViewContext {
+                    session: session_id.as_deref(),
                     pid: i64::from(pid),
                     window_id: u64::from(window_id),
                     key: cua_driver_core::window_state_view::ViewKey {
@@ -1560,13 +1608,7 @@ pub(crate) fn build_elements_array_with_token(
         .collect()
 }
 
-/// Observation-only `elements` for `verify_state`: every actionable row as
-/// [`build_elements_array_with_token`] emits it, plus the display-only rows
-/// (static text, labels, read-only values) the public array omits, in DFS
-/// order. Display-only rows carry `"display_only": true` and no
-/// `element_index`/`element_token`, because they are not addressable. They let
-/// a postcondition read text that only a display node holds, such as a
-/// label-less AXStaticText whose content lives in AXValue (#4526).
+/// Full node projection used by GOAT's internal verification reads.
 pub(crate) fn build_observation_elements_array(
     nodes: &[crate::ax::tree::AXNode],
 ) -> Vec<serde_json::Value> {
@@ -1574,6 +1616,47 @@ pub(crate) fn build_observation_elements_array(
         .iter()
         .enumerate()
         .map(|(index, node)| element_entry(node, None, inherited_row_label(nodes, index)))
+        .collect()
+}
+
+/// The walk's display-only rows (static text, labels, read-only values) as
+/// `observations`, in DFS order. They carry no `element_index` or
+/// `element_token` because no action can target them; they let a caller and
+/// `verify_state` read text only a display node holds, such as Calculator's
+/// result (#2958) or a label-less AXStaticText whose content lives in AXValue
+/// (#4526).
+pub(crate) fn build_observations(
+    nodes: &[crate::ax::tree::AXNode],
+) -> Vec<cua_driver_contract::WindowObservation> {
+    nodes
+        .iter()
+        .filter(|node| node.element_index.is_none())
+        .filter_map(|node| {
+            let value = node
+                .value_state
+                .clone()
+                .or_else(|| node.value.clone())
+                .filter(|value| !value.is_empty());
+            let label = node
+                .title
+                .clone()
+                .or_else(|| node.description.clone())
+                .or_else(|| node.value.clone())
+                .or_else(|| node.identifier.clone());
+            // An unindexed window or sheet row is kept in the tree for
+            // structure; with no text it has nothing to observe.
+            (label.is_some() || value.is_some()).then(|| cua_driver_contract::WindowObservation {
+                role: node.role.clone(),
+                depth: node.depth as u32,
+                label,
+                value,
+                frame: node
+                    .frame
+                    .map(|[x, y, w, h]| cua_driver_contract::ElementFrame { x, y, w, h }),
+                parent_index: node.parent_element_index.map(|index| index as u64),
+                in_web_content: node.in_web_content.then_some(true),
+            })
+        })
         .collect()
 }
 
@@ -1920,8 +2003,27 @@ pub(crate) fn element_entry(
             .collect();
         entry["actions"] = serde_json::json!(actions);
     }
+    if !node.custom_actions.is_empty() {
+        entry["custom_actions"] = serde_json::Value::Array(
+            node.custom_actions
+                .iter()
+                .map(|action| {
+                    serde_json::json!({
+                        "name": action.name,
+                        "raw": action.raw,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
     if node.in_web_content {
         entry["in_web_content"] = serde_json::Value::Bool(true);
+    }
+    // A link's navigation target (AXURL). Without it a caller reading
+    // web content could see a link's text but not where it leads, and
+    // would have to press it to find out.
+    if let Some(url) = node.url.clone() {
+        entry["url"] = serde_json::Value::String(url);
     }
     if let Some(frame) = frame {
         entry["frame"] = frame;
@@ -2637,6 +2739,7 @@ mod tests {
             identifier: None,
             help: None,
             actions,
+            custom_actions: vec![],
             element_ptr: 0,
             depth,
             parent_element_index: parent,
@@ -2647,6 +2750,7 @@ mod tests {
             max_value: None,
             enabled: None,
             selected: None,
+            url: None,
             in_web_content: false,
         }
     }
@@ -2729,6 +2833,47 @@ mod tests {
         assert!(display.get("element_token").is_none());
         assert_eq!(observed[2]["element_index"], 1);
         assert!(observed[2].get("display_only").is_none());
+    }
+
+    #[test]
+    fn display_only_rows_are_observations_without_action_handles() {
+        // #2958 / #4526: a label-less static text whose content lives in
+        // AXValue is not addressable, so it stays out of `elements` and is
+        // published as an observation instead.
+        let mut text = node(None, "AXStaticText", None, 1, Some(0), None, vec![]);
+        text.value = Some("\u{200e}6".into());
+        text.frame = Some([10.0, 20.0, 30.0, 40.0]);
+        let mut sheet = node(None, "AXSheet", None, 1, Some(0), None, vec![]);
+        sheet.title = None;
+        let nodes = vec![
+            node(Some(0), "AXGroup", Some("Form"), 0, None, None, vec![]),
+            text,
+            sheet,
+            node(Some(1), "AXButton", Some("OK"), 1, Some(0), None, vec![]),
+        ];
+
+        let elements = build_elements_array_with_token(&nodes, Some(3));
+        assert_eq!(elements.len(), 2);
+        assert!(elements.iter().all(|e| e.get("display_only").is_none()));
+
+        let observations = build_observations(&nodes);
+        assert_eq!(
+            observations.len(),
+            1,
+            "a text-less sheet row is not an observation"
+        );
+        let wire = serde_json::to_value(&observations[0]).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "role": "AXStaticText",
+                "depth": 1,
+                "label": "\u{200e}6",
+                "value": "\u{200e}6",
+                "frame": {"x": 10.0, "y": 20.0, "w": 30.0, "h": 40.0},
+                "parent_index": 0
+            })
+        );
     }
 
     #[test]
@@ -2946,6 +3091,22 @@ mod tests {
     }
 
     #[test]
+    fn elements_surface_link_url() {
+        let mut nodes = vec![node(
+            Some(0),
+            "AXLink",
+            Some("Background mode"),
+            2,
+            None,
+            None,
+            vec!["AXPress".into()],
+        )];
+        nodes[0].url = Some("https://example.com/docs/guides/background".into());
+        let entry = &build_elements_array_with_token(&nodes, None)[0];
+        assert_eq!(entry["url"], "https://example.com/docs/guides/background");
+    }
+
+    #[test]
     fn checkbox_value_state_normalizes_to_selected() {
         let mut nodes = vec![node(
             Some(0),
@@ -2966,7 +3127,14 @@ mod tests {
         // Stock behaviour is unchanged for elements without control state.
         let nodes = vec![node(Some(0), "AXButton", Some("OK"), 0, None, None, vec![])];
         let entry = &build_elements_array_with_token(&nodes, None)[0];
-        for key in ["value_description", "min", "max", "enabled", "selected"] {
+        for key in [
+            "value_description",
+            "min",
+            "max",
+            "enabled",
+            "selected",
+            "url",
+        ] {
             assert!(entry.get(key).is_none(), "{key} must be omitted");
         }
     }
@@ -3495,6 +3663,7 @@ mod completeness_output_tests {
             None,
         );
         let context = cua_driver_core::window_state_view::ViewContext {
+            session: None,
             pid: 42,
             window_id: 91001,
             key: cua_driver_core::window_state_view::ViewKey {
@@ -3556,6 +3725,7 @@ mod completeness_output_tests {
     fn since_pair(window: u64, first_meta: Value, next_meta: Value) -> Value {
         use cua_driver_core::window_state_view::{self, ViewContext, ViewKey, ViewOptions};
         let context = ViewContext {
+            session: None,
             pid: 42,
             window_id: window,
             key: ViewKey {
@@ -3711,6 +3881,7 @@ mod completeness_output_tests {
                 window_state_view::mark_display_only(&mut payload);
             }
             let context = ViewContext {
+                session: None,
                 pid: 42,
                 window_id: 99,
                 key: ViewKey {
@@ -3914,6 +4085,7 @@ mod completeness_output_tests {
             let options =
                 cua_driver_core::window_state_view::ViewOptions::from_args(&args).unwrap();
             let context = cua_driver_core::window_state_view::ViewContext {
+                session: None,
                 pid: 42,
                 window_id: 99,
                 key: cua_driver_core::window_state_view::ViewKey {
@@ -4086,6 +4258,7 @@ mod canonical_output_tests {
         use cua_driver_core::window_state_view::{apply, ViewContext, ViewKey, ViewOptions};
         let md = "- [0] AXButton \"Example\"\n";
         let ctx = ViewContext {
+            session: None,
             pid: 91811,
             window_id: 81811,
             key: ViewKey {

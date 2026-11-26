@@ -47,6 +47,8 @@ pub(crate) enum KeyRoute {
     /// The HID queue with flags. `Some(pid)` is the app the chord is aimed
     /// at; `None` (desktop scope) means whichever app is frontmost.
     Global(Option<i32>),
+    /// Desktop HID: refuse each key-down if the admitted app is no longer frontmost.
+    GuardedGlobal(i32, u64),
     /// The HID queue without flags, aimed at `pid` (the route Screen Sharing
     /// targets use).
     BareGlobal(i32),
@@ -104,7 +106,7 @@ pub(crate) fn deliver(
     duration: Option<Duration>,
     control: &HoldControl,
 ) -> anyhow::Result<()> {
-    let source = if matches!(route, KeyRoute::Global(_)) {
+    let source = if matches!(route, KeyRoute::Global(_) | KeyRoute::GuardedGlobal(..)) {
         Some(
             CGEventSource::new(CGEventSourceStateID::HIDSystemState)
                 .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?,
@@ -116,12 +118,16 @@ pub(crate) fn deliver(
     // #6659), Screen Sharing keeping US positions. A desktop-scope chord
     // reaches the frontmost app, which may itself be Screen Sharing.
     let target = layout_target(route, crate::apps::frontmost_pid);
+    let mut guarded_down = std::collections::HashMap::new();
     deliver_with_pacing(
         key,
         modifiers,
         duration.unwrap_or_else(keyboard::key_gap),
         (
-            matches!(route, KeyRoute::Global(_) | KeyRoute::BareGlobal(_)),
+            matches!(
+                route,
+                KeyRoute::Global(_) | KeyRoute::GuardedGlobal(..) | KeyRoute::BareGlobal(_)
+            ),
             matches!(route, KeyRoute::BareGlobal(_)),
         ),
         |key, modifiers| keyboard::target_key_code(target, key, modifiers),
@@ -132,6 +138,21 @@ pub(crate) fn deliver(
                 code,
                 down,
                 flags,
+            ),
+            KeyRoute::GuardedGlobal(pid, start) => post_if_foreground(
+                (pid, start),
+                current_frontmost_instance,
+                code,
+                down,
+                &mut guarded_down,
+                || {
+                    keyboard::post_global_key(
+                        source.as_ref().expect("global source"),
+                        code,
+                        down,
+                        flags,
+                    )
+                },
             ),
             KeyRoute::BareGlobal(_) => {
                 let event = keyboard::create_bare_keyboard_event(code, down)?;
@@ -145,10 +166,56 @@ pub(crate) fn deliver(
     )
 }
 
+fn instance_matches(expected: Option<u64>, actual: Option<u64>) -> bool {
+    expected.is_some() && expected == actual
+}
+
+fn post_if_foreground(
+    expected: (i32, u64),
+    frontmost: impl FnOnce() -> Option<(i32, u64)>,
+    code: u16,
+    down: bool,
+    posted_down: &mut std::collections::HashMap<u16, Vec<bool>>,
+    post: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    if down {
+        let current = frontmost();
+        if current.map(|instance| instance.0) != Some(expected.0)
+            || !instance_matches(Some(expected.1), current.map(|instance| instance.1))
+        {
+            posted_down.entry(code).or_default().push(false);
+            anyhow::bail!("the frontmost application changed during the chord; modifier events may have been sent, do not resend");
+        }
+        // A failed post may still have sent the event, so arm cleanup first.
+        posted_down.entry(code).or_default().push(true);
+        return post();
+    }
+    let Some(was_posted) = posted_down.get_mut(&code).and_then(Vec::pop) else {
+        return Ok(());
+    };
+    if !was_posted {
+        return Ok(());
+    }
+    let result = post();
+    if result.is_err() {
+        posted_down.entry(code).or_default().push(true);
+    }
+    result
+}
+
+fn current_frontmost_instance() -> Option<(i32, u64)> {
+    let pid = crate::apps::frontmost_pid()?;
+    let start = crate::process_identity::process_fingerprint(i64::from(pid))?.start_time?;
+    (crate::apps::frontmost_pid() == Some(pid)).then_some((pid, start))
+}
+
 /// The app whose keyboard layout resolves a chord's key on `route`.
 fn layout_target(route: KeyRoute, frontmost: impl FnOnce() -> Option<i32>) -> Option<i32> {
     match route {
-        KeyRoute::Pid(pid) | KeyRoute::BareGlobal(pid) | KeyRoute::Global(Some(pid)) => Some(pid),
+        KeyRoute::Pid(pid)
+        | KeyRoute::BareGlobal(pid)
+        | KeyRoute::Global(Some(pid))
+        | KeyRoute::GuardedGlobal(pid, _) => Some(pid),
         KeyRoute::Global(None) => frontmost(),
     }
 }
@@ -357,6 +424,146 @@ mod u29b_cleanup_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_chord_stops_on_foreground_switch_and_releases_modifiers() {
+        let frontmost = std::cell::Cell::new(7);
+        let events = std::cell::RefCell::new(Vec::new());
+        let mut posted_down = std::collections::HashMap::new();
+        let result = deliver_with(
+            "a",
+            &["cmd"],
+            Duration::ZERO,
+            |code, down, _| {
+                post_if_foreground(
+                    (7, 11),
+                    || Some((frontmost.get(), 11)),
+                    code,
+                    down,
+                    &mut posted_down,
+                    || {
+                        events.borrow_mut().push((code, down));
+                        if code == 55 && down {
+                            frontmost.set(8);
+                        }
+                        Ok(())
+                    },
+                )
+            },
+            || false,
+            |_| false,
+        );
+        assert!(result.is_err());
+        assert_eq!(*events.borrow(), vec![(55, true), (55, false)]);
+    }
+
+    #[test]
+    fn desktop_chord_duplicate_modifier_and_base_keeps_both_release_transitions() {
+        for switch_before_base in [false, true] {
+            let frontmost = std::cell::Cell::new(7);
+            let events = std::cell::RefCell::new(Vec::new());
+            let mut posted_down = std::collections::HashMap::new();
+            let result = deliver_with(
+                "shift",
+                &["shift"],
+                Duration::ZERO,
+                |code, down, _| {
+                    post_if_foreground(
+                        (7, 11),
+                        || Some((frontmost.get(), 11)),
+                        code,
+                        down,
+                        &mut posted_down,
+                        || {
+                            events.borrow_mut().push((code, down));
+                            if switch_before_base && down {
+                                frontmost.set(8);
+                            }
+                            Ok(())
+                        },
+                    )
+                },
+                || false,
+                |_| false,
+            );
+            if switch_before_base {
+                assert!(result.is_err());
+                assert_eq!(*events.borrow(), vec![(56, true), (56, false)]);
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(
+                    *events.borrow(),
+                    vec![(56, true), (56, true), (56, false), (56, false)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_chord_refuses_reused_or_unreadable_process_instance() {
+        assert!(instance_matches(Some(11), Some(11)));
+        assert!(!instance_matches(Some(11), Some(12)));
+        assert!(!instance_matches(Some(11), None));
+        assert!(!instance_matches(None, None));
+        let mut sent = false;
+        let mut posted_down = std::collections::HashMap::new();
+        let result = post_if_foreground(
+            (7, 11),
+            || Some((7, 12)),
+            0,
+            true,
+            &mut posted_down,
+            || {
+                sent = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(!sent, "a reused PID must not receive a key-down");
+    }
+
+    #[test]
+    fn duplicate_base_release_failures_still_send_modifier_release() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let mut posted_down = std::collections::HashMap::new();
+        let mut failed_ups = 0;
+        let result = deliver_with(
+            "shift",
+            &["shift"],
+            Duration::ZERO,
+            |code, down, flags| {
+                post_if_foreground(
+                    (7, 11),
+                    || Some((7, 11)),
+                    code,
+                    down,
+                    &mut posted_down,
+                    || {
+                        events.borrow_mut().push((code, down, flags));
+                        if !down && failed_ups < 2 {
+                            failed_ups += 1;
+                            anyhow::bail!("base release failed");
+                        }
+                        Ok(())
+                    },
+                )
+            },
+            || false,
+            |_| false,
+        );
+        assert!(result.is_err());
+        let events = events.borrow();
+        assert_eq!(events.len(), 5);
+        assert_eq!(
+            events.last().map(|event| (event.0, event.1)),
+            Some((56, false))
+        );
+        assert!(!events
+            .last()
+            .unwrap()
+            .2
+            .contains(CGEventFlags::CGEventFlagShift));
+    }
 
     /// A bare-global key reaches the HID queue: it must be in the HID history,
     /// or a pending pixel focus restoration abandons with reason user_input.
