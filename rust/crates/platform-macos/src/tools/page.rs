@@ -322,16 +322,33 @@ fn build_query_selector_js(selector: &str, attributes: &[String]) -> String {
   var els = Array.from(document.querySelectorAll(sel));
   return JSON.stringify(els.map(function(el){{
     var obj = {{}};
+    function secureInput(node) {{
+      var tag = node.tagName;
+      if (typeof tag !== 'string') return true;
+      if (tag.toLowerCase() !== 'input') return false;
+      var type = node.type;
+      return typeof type !== 'string' || type.toLowerCase() === 'password';
+    }}
+    var secure = true;
+    try {{ secure = secureInput(el); }} catch (_) {{}}
+    function containsSecureInput() {{
+      try {{ return Array.from(el.querySelectorAll('input')).some(secureInput); }}
+      catch (_) {{ return true; }}
+    }}
+    var allowed = {{tagname:'tagName', textcontent:'textContent', innertext:'innerText',
+      href:'href', id:'id', class:'class', type:'type', value:'value',
+      defaultvalue:'defaultValue', placeholder:'placeholder', name:'name',
+      outerhtml:'outerHTML', innerhtml:'innerHTML', 'aria-label':'aria-label', role:'role'}};
     attrs.forEach(function(a){{
-      if (String(a).toLowerCase() === 'value') {{
-        var tag, type;
-        try {{ tag = el.tagName; type = el.type; }} catch (_) {{ return; }}
-        if (typeof tag !== 'string' || (tag.toLowerCase() === 'input' &&
-            (typeof type !== 'string' || type.toLowerCase() === 'password'))) return;
-      }}
-      obj[a] = el[a] !== undefined ? el[a] : el.getAttribute(a);
+      var key = String(a).toLowerCase();
+      if (!Object.prototype.hasOwnProperty.call(allowed, key)) return;
+      if (secure && ['value','defaultvalue','outerhtml','innerhtml','textcontent','innertext'].indexOf(key) !== -1) return;
+      if ((key === 'outerhtml' || key === 'innerhtml') && containsSecureInput()) return;
+      var prop = allowed[key];
+      var value = el[prop] !== undefined ? el[prop] : el.getAttribute(prop);
+      if (value === null || ['string','number','boolean'].indexOf(typeof value) !== -1) obj[a] = value;
     }});
-    obj.textContent = (el.textContent||'').trim().substring(0,200);
+    if (!secure) obj.textContent = (el.textContent||'').trim().substring(0,200);
     return obj;
   }}));
 }})();"#
@@ -351,6 +368,55 @@ fn json_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn query_fixture(selector: &str, attrs: &[&str]) -> String {
+        use std::io::Write;
+        let attrs = attrs.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let script = build_query_selector_js(selector, &attrs);
+        let mut child = std::process::Command::new(
+            "/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc",
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+        let expression = script.trim_end_matches(';');
+        write!(child.stdin.take().unwrap(), r#"
+var secret = {{tagName:'INPUT',type:'PaSsWoRd',value:'marker-password',defaultValue:'marker-password',outerHTML:'<input value="marker-password">',innerHTML:'marker-password',textContent:'marker-password',innerText:'marker-password',getAttribute:function(a){{return a.toLowerCase()==='value'?'marker-password':null}},querySelectorAll:function(){{return []}}}};
+var control = {{tagName:'INPUT',type:'text',value:'visible-control',defaultValue:'visible-control',outerHTML:'<input value="visible-control">',textContent:'control',getAttribute:function(a){{return a.toLowerCase()==='value'?'visible-control':null}},querySelectorAll:function(){{return []}}}};
+var parent = {{tagName:'DIV',innerHTML:'<input value="marker-password">',outerHTML:'<div><input value="marker-password"></div>',textContent:'parent',getAttribute:function(){{return null}},querySelectorAll:function(){{return [secret]}}}};
+var clean = {{tagName:'DIV',innerHTML:'<input value="visible-control">',outerHTML:'<div>visible-control</div>',textContent:'control',getAttribute:function(){{return null}},querySelectorAll:function(){{return [control]}}}};
+var unknown = {{tagName:'DIV',outerHTML:'marker-password',innerHTML:'marker-password',textContent:'unknown',getAttribute:function(){{return null}},querySelectorAll:function(){{return [{{tagName:'INPUT'}}]}}}};
+var document = {{querySelectorAll:function(s){{return s==='parent'?[parent,clean,unknown]:[secret,control]}}}};
+print({expression});"#).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[test]
+    fn query_dom_password_properties_are_hidden() {
+        let result = query_fixture(
+            "input",
+            &[
+                "defaultValue",
+                "outerHTML",
+                "VaLuE",
+                "innerHTML",
+                "textContent",
+                "innerText",
+            ],
+        );
+        assert!(!result.contains("marker-password"), "{result}");
+        assert!(result.contains("visible-control"), "{result}");
+    }
+
+    #[test]
+    fn query_dom_parent_markup_is_hidden() {
+        let result = query_fixture("parent", &["innerHTML", "outerHTML"]);
+        assert!(!result.contains("marker-password"), "{result}");
+        assert!(result.contains("visible-control"), "{result}");
+    }
 
     #[test]
     fn query_dom_suppresses_password_values() {
