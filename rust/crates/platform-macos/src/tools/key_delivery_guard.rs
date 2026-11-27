@@ -2,6 +2,100 @@
 
 use std::sync::Arc;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FocusConfirmation {
+    Confirmed,
+    SecureInput,
+    WrongProcess,
+    WrongWindow,
+}
+
+pub(super) fn classify_focus_confirmation(
+    expected_pid: i32,
+    expected_window: u32,
+    observed_pid: Option<i32>,
+    observed_window: Option<u32>,
+    secure_input_active: bool,
+) -> FocusConfirmation {
+    if secure_input_active {
+        FocusConfirmation::SecureInput
+    } else if observed_pid != Some(expected_pid) {
+        FocusConfirmation::WrongProcess
+    } else if observed_window != Some(expected_window) {
+        FocusConfirmation::WrongWindow
+    } else {
+        FocusConfirmation::Confirmed
+    }
+}
+
+pub(super) fn split_key_segments(text: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    for (index, ch) in text.char_indices() {
+        if matches!(ch, '\t' | '\n' | '\r') {
+            let end = index + ch.len_utf8();
+            segments.push(&text[start..end]);
+            start = end;
+        }
+    }
+    if start < text.len() {
+        segments.push(&text[start..]);
+    }
+    segments
+}
+
+pub(super) fn drive_key_segments<E>(
+    text: &str,
+    mut check: impl FnMut() -> FocusConfirmation,
+    mut send: impl FnMut(&str, bool) -> Result<usize, E>,
+) -> Result<(usize, Option<FocusConfirmation>), E> {
+    let segments = split_key_segments(text);
+    let mut delivered = 0;
+    for (index, segment) in segments.iter().enumerate() {
+        let sent = send(segment, index == 0)?;
+        delivered += sent;
+        if sent < segment.chars().count() {
+            return Ok((delivered, None));
+        }
+        if index + 1 < segments.len()
+            && segment
+                .chars()
+                .last()
+                .is_some_and(|ch| matches!(ch, '\t' | '\n' | '\r'))
+        {
+            let focus = check();
+            if focus != FocusConfirmation::Confirmed {
+                return Ok((delivered, Some(focus)));
+            }
+        }
+    }
+    Ok((delivered, None))
+}
+
+pub(super) fn capture_post_focus(
+    result: anyhow::Result<()>,
+    pid: i32,
+    window: Option<u32>,
+    sample: &std::sync::Mutex<Option<bool>>,
+) -> anyhow::Result<()> {
+    if result.is_ok() {
+        if let Some(wid) = window {
+            let routed = crate::input::skylight::window_routes_keys(pid, wid);
+            let confirmation =
+                classify_focus_confirmation(pid, wid, Some(pid), routed.then_some(wid), false);
+            *sample.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(confirmation == FocusConfirmation::Confirmed);
+        }
+    }
+    result
+}
+
+pub(super) fn add_focus_confirmation(value: &mut serde_json::Value, sample: Option<bool>) {
+    if let Some(confirmed) = sample {
+        value["focus_confirmed"] = serde_json::json!(confirmed);
+    }
+}
+
 pub(super) fn final_window_sample(
     pid: i32,
     wid: u32,
@@ -128,6 +222,109 @@ pub(super) async fn with_disconnect_control<F: std::future::Future>(
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn split_key_segments_preserves_boundaries_and_unicode() {
+        assert_eq!(split_key_segments(""), Vec::<&str>::new());
+        assert_eq!(split_key_segments("한글"), vec!["한글"]);
+        assert_eq!(split_key_segments("a\t"), vec!["a\t"]);
+        assert_eq!(split_key_segments("a\r\nb"), vec!["a\r", "\n", "b"]);
+        assert_eq!(split_key_segments("\t\tb"), vec!["\t", "\t", "b"]);
+    }
+
+    #[test]
+    fn focus_confirmation_requires_process_window_and_no_secure_input() {
+        use FocusConfirmation::*;
+        assert_eq!(
+            classify_focus_confirmation(7, 9, Some(7), Some(9), false),
+            Confirmed
+        );
+        assert_eq!(
+            classify_focus_confirmation(7, 9, Some(7), Some(10), false),
+            WrongWindow
+        );
+        assert_eq!(
+            classify_focus_confirmation(7, 9, Some(8), Some(9), false),
+            WrongProcess
+        );
+        assert_eq!(
+            classify_focus_confirmation(7, 9, Some(7), None, false),
+            WrongWindow
+        );
+        assert_eq!(
+            classify_focus_confirmation(7, 9, Some(7), Some(9), true),
+            SecureInput
+        );
+    }
+
+    #[test]
+    fn segmented_delivery_stops_at_first_focus_failure() {
+        let mut sent = Vec::new();
+        let result = drive_key_segments(
+            "한\tremaining\nlast",
+            || FocusConfirmation::WrongWindow,
+            |segment, _| {
+                sent.push(segment.to_owned());
+                Ok::<usize, ()>(segment.chars().count())
+            },
+        );
+        assert_eq!(result, Ok((2, Some(FocusConfirmation::WrongWindow))));
+        assert_eq!(sent, vec!["한\t"]);
+    }
+
+    #[test]
+    fn segmented_delivery_checks_boundaries_and_stops_on_each_failure() {
+        for failure in [
+            FocusConfirmation::SecureInput,
+            FocusConfirmation::WrongProcess,
+            FocusConfirmation::WrongWindow,
+        ] {
+            let mut sent = Vec::new();
+            let result = drive_key_segments(
+                "a\tb\nc",
+                || failure,
+                |unit, first| {
+                    sent.push((unit.to_owned(), first));
+                    Ok::<_, ()>(unit.chars().count())
+                },
+            );
+            assert_eq!(result, Ok((2, Some(failure))));
+            assert_eq!(sent, vec![("a\t".to_owned(), true)]);
+        }
+        let mut checks = 0;
+        let mut sent = Vec::new();
+        let result = drive_key_segments(
+            "a\tb\nc",
+            || {
+                checks += 1;
+                FocusConfirmation::Confirmed
+            },
+            |unit, first| {
+                sent.push((unit.to_owned(), first));
+                Ok::<_, ()>(unit.chars().count())
+            },
+        );
+        assert_eq!(result, Ok((5, None)));
+        assert_eq!(checks, 2);
+        assert_eq!(
+            sent,
+            vec![
+                ("a\t".to_owned(), true),
+                ("b\n".to_owned(), false),
+                ("c".to_owned(), false)
+            ]
+        );
+    }
+
+    #[test]
+    fn focus_confirmation_payload_is_optional_and_preserves_fields() {
+        for confirmed in [true, false] {
+            let mut value = serde_json::json!({"effect": "unverifiable"});
+            add_focus_confirmation(&mut value, Some(confirmed));
+            assert_eq!(value["focus_confirmed"], confirmed);
+            assert_eq!(value["effect"], "unverifiable");
+        }
+    }
 
     #[tokio::test]
     async fn disconnect_signals_worker_without_dropping_its_future() {

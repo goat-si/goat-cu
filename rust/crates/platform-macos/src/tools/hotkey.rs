@@ -875,6 +875,8 @@ impl Tool for HotkeyTool {
         let prompt = PromptInput::from_args(&args);
 
         let control = Arc::new(crate::input::key_hold::HoldControl::default());
+        let focus_sample = Arc::new(std::sync::Mutex::new(None));
+        let focus_sample_in = focus_sample.clone();
         let result = focus_guard::with_focus_suppressed(
             Some(pid),
             prior_front,
@@ -913,9 +915,9 @@ impl Tool for HotkeyTool {
                                 wid,
                                 || {
                                     if screen_sharing_target {
-                                        { crate::security_prompt::refuse_frontmost_keys(prompt)?; crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control) }
+                                        { crate::security_prompt::refuse_frontmost_keys(prompt)?; super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control), pid, window_id, &focus_sample_in) }
                                     } else {
-                                        { crate::security_prompt::refuse_frontmost_keys(prompt)?; crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Global(Some(pid)), &key, &m, duration, &control) }
+                                        { crate::security_prompt::refuse_frontmost_keys(prompt)?; super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Global(Some(pid)), &key, &m, duration, &control), pid, window_id, &focus_sample_in) }
                                     }
                                 },
                             )?;
@@ -931,7 +933,7 @@ impl Tool for HotkeyTool {
                                 wid,
                                 || {
                                     focus_hotkey_element(pid, ptr)?;
-                                    { crate::security_prompt::refuse_frontmost_keys(prompt)?; crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control) }
+                                    { crate::security_prompt::refuse_frontmost_keys(prompt)?; super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control), pid, window_id, &focus_sample_in) }
                                 },
                             )?;
                             Ok(())
@@ -941,7 +943,7 @@ impl Tool for HotkeyTool {
                                 pid as libc::pid_t,
                                 wid,
                                 || {
-                                    { crate::security_prompt::refuse_frontmost_keys(prompt)?; crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control) }
+                                    { crate::security_prompt::refuse_frontmost_keys(prompt)?; super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control), pid, window_id, &focus_sample_in) }
                                 },
                             )?;
                             Ok(())
@@ -950,9 +952,9 @@ impl Tool for HotkeyTool {
                         // raise — even when window_id was supplied for targeting.
                         (false, false, _, Some(ptr)) => {
                             focus_hotkey_element(pid, ptr)?;
-                            crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Pid(pid), &key, &m, duration, &control)
+                            super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Pid(pid), &key, &m, duration, &control), pid, window_id, &focus_sample_in)
                         }
-                        _ => crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Pid(pid), &key, &m, duration, &control),
+                        _ => super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Pid(pid), &key, &m, duration, &control), pid, window_id, &focus_sample_in),
                     }
                 })
                 .await
@@ -974,7 +976,11 @@ impl Tool for HotkeyTool {
                     })
                     .await
                     .unwrap_or(false);
-                let structured = delivered_structured(fg, chromium_embedder);
+                let mut structured = delivered_structured(fg, chromium_embedder);
+                super::key_delivery_guard::add_focus_confirmation(
+                    &mut structured,
+                    *focus_sample.lock().unwrap_or_else(|e| e.into_inner()),
+                );
                 let note = if chromium_embedder {
                     format!(" {}", super::CHROMIUM_BACKGROUND_KEY_NOTE)
                 } else {

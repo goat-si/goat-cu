@@ -995,6 +995,12 @@ pub(crate) fn text_delivery_failure(prefix: &str, error: &anyhow::Error) -> Tool
         return refusal;
     }
     let message = format!("{prefix}: {error:#}");
+    if let Some(abort) = error.downcast_ref::<TextFocusAbort>() {
+        return ToolResult::error(message).with_structured(serde_json::json!({
+            "code": "key_delivery_uncertain", "effect": "unverifiable", "retryable": false,
+            "characters_sent": abort.sent, "focus_confirmed": false,
+        }));
+    }
     if let Some(write) = error.downcast_ref::<TextWriteError>() {
         let effect = if write.chain.no_input() {
             "refused"
@@ -1068,6 +1074,12 @@ pub(crate) fn text_delivery_failure(prefix: &str, error: &anyhow::Error) -> Tool
         })),
         None => ToolResult::error(message),
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("focus could not be confirmed after text delivery")]
+struct TextFocusAbort {
+    sent: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2291,15 +2303,46 @@ fn cgevent_type_verified_with(
             )
         }
     }
+    let confirm_text_focus = |wid| {
+        super::key_delivery_guard::classify_focus_confirmation(
+            pid,
+            wid,
+            Some(pid),
+            crate::input::skylight::window_routes_keys(pid, wid).then_some(wid),
+            crate::input::keyboard::secure_event_input_active(),
+        )
+    };
     let send_guarded_text = |payload: &str| -> anyhow::Result<()> {
         if let Some(wid) = exact_keys_window.or_else(|| element_ptr_and_idx.and(window_id)) {
-            let sent = crate::input::keyboard::type_text_while(pid, payload, delay_ms, || {
-                key_delivery_allowed(
-                    crate::input::skylight::sibling_window_focused(pid, wid),
-                    element_ptr_and_idx
-                        .is_none_or(|(ptr, _)| element_has_exact_app_focus(pid, wid, ptr)),
-                )
-            })?;
+            let prior_sent = std::cell::Cell::new(0usize);
+            let (sent, abort) = super::key_delivery_guard::drive_key_segments(
+                payload,
+                || confirm_text_focus(wid),
+                |segment, first| {
+                    let may_send = || {
+                        key_delivery_allowed(
+                            crate::input::skylight::sibling_window_focused(pid, wid),
+                            element_ptr_and_idx
+                                .is_none_or(|(ptr, _)| element_has_exact_app_focus(pid, wid, ptr)),
+                        )
+                    };
+                    let result = if first {
+                        crate::input::keyboard::type_text_while(pid, segment, delay_ms, may_send)
+                    } else {
+                        crate::input::keyboard::type_text_while_with_paste(
+                            pid, segment, delay_ms, may_send, false,
+                        )
+                    };
+                    let sent = result.map_err(|error| {
+                        crate::input::keyboard::key_construction_error(error, prior_sent.get())
+                    })?;
+                    prior_sent.set(prior_sent.get() + sent);
+                    Ok::<usize, anyhow::Error>(sent)
+                },
+            )?;
+            if abort.is_some() {
+                return Err(TextFocusAbort { sent }.into());
+            }
             if sent < payload.chars().count() {
                 if element_ptr_and_idx
                     .is_some_and(|(ptr, _)| !element_has_exact_app_focus(pid, wid, ptr))
@@ -2489,6 +2532,24 @@ fn cgevent_type_verified_with(
                     .or_else(|| text.strip_suffix('\r'))
                     .unwrap_or(text);
                 send_guarded_text(body)?;
+                if body
+                    .chars()
+                    .last()
+                    .is_some_and(|ch| matches!(ch, '\t' | '\n' | '\r'))
+                {
+                    if let Some(wid) =
+                        exact_keys_window.or_else(|| element_ptr_and_idx.and(window_id))
+                    {
+                        if confirm_text_focus(wid)
+                            != super::key_delivery_guard::FocusConfirmation::Confirmed
+                        {
+                            return Err(TextFocusAbort {
+                                sent: body.chars().count(),
+                            }
+                            .into());
+                        }
+                    }
+                }
                 if let Some(wid) = exact_keys_window {
                     if crate::input::skylight::sibling_window_focused(pid, wid) {
                         return Err(crate::input::keyboard::key_construction_error(
@@ -4540,6 +4601,15 @@ mod u32_outcome_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn focus_abort_payload_contains_delivered_count() {
+        let error = anyhow::Error::new(super::TextFocusAbort { sent: 3 });
+        let result = super::text_delivery_failure("typing failed", &error);
+        let payload = result.structured_content.unwrap();
+        assert_eq!(payload["characters_sent"], 3);
+        assert_eq!(payload["focus_confirmed"], false);
+        assert_eq!(payload["effect"], "unverifiable");
+    }
     #[test]
     fn focus_change_during_clipboard_preparation_sends_no_paste() {
         use crate::input::keyboard::{

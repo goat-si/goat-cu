@@ -124,6 +124,10 @@ fn text_target_may_be_secret(pid: Option<i32>) -> bool {
     secure_event_input || focus_may_take_a_secret(false, focused_field_meta(pid).as_ref())
 }
 
+pub(crate) fn secure_event_input_active() -> bool {
+    (unsafe { IsSecureEventInputEnabled() }) != 0
+}
+
 /// Deliver `text` either as pasteboard runs split around control keys, or as
 /// one typed run when the pasteboard route is not wanted or
 /// `pasteboard_allowed` refuses it. A paste that failed before Cmd+V went out
@@ -732,7 +736,17 @@ pub fn type_text_while(
     pid: i32,
     text: &str,
     inter_char_delay_ms: u64,
+    may_send: impl FnMut() -> bool,
+) -> anyhow::Result<usize> {
+    type_text_while_with_paste(pid, text, inter_char_delay_ms, may_send, true)
+}
+
+pub(crate) fn type_text_while_with_paste(
+    pid: i32,
+    text: &str,
+    inter_char_delay_ms: u64,
     mut may_send: impl FnMut() -> bool,
+    allow_paste: bool,
 ) -> anyhow::Result<usize> {
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
@@ -773,7 +787,7 @@ pub fn type_text_while(
     };
     let result = deliver_text_runs(
         text,
-        || !text_target_may_be_secret(Some(pid)),
+        || allow_paste && !text_target_may_be_secret(Some(pid)),
         |run| {
             if !guard.borrow_mut()() {
                 return Err(stopped());
