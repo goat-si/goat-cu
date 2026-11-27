@@ -79,21 +79,19 @@ impl PageBackend for LinuxPageBackend {
             .nodes
             .iter()
             .filter(|n| match role.as_deref() {
-                Some(r) => n.role.eq_ignore_ascii_case(r),
+                Some(r) => {
+                    n.role.eq_ignore_ascii_case(r)
+                        || (r == "entry" && n.role.eq_ignore_ascii_case("password text"))
+                }
                 None => true, // safe now — only reached when selector is wildcard
             })
             .map(|n| {
-                let name = n.name.as_deref().unwrap_or("");
-                let value = n.value.as_deref().unwrap_or("");
-                let index = n
-                    .element_index
-                    .map(|i| format!("[{i}] "))
-                    .unwrap_or_default();
-                if value.is_empty() {
-                    format!("- {index}{} \"{}\"", n.role, name)
-                } else {
-                    format!("- {index}{} \"{}\" = \"{}\"", n.role, name, value)
-                }
+                format_query_node(
+                    &n.role,
+                    n.element_index,
+                    n.name.as_deref(),
+                    n.value.as_deref(),
+                )
             })
             .collect();
 
@@ -103,6 +101,26 @@ impl PageBackend for LinuxPageBackend {
             lines.join("\n")
         };
         Ok(PageReadResult::text(content))
+    }
+}
+
+fn format_query_node(
+    role: &str,
+    index: Option<usize>,
+    name: Option<&str>,
+    value: Option<&str>,
+) -> String {
+    let index = index.map(|i| format!("[{i}] ")).unwrap_or_default();
+    if crate::atspi_text::is_password_field(
+        crate::atspi_text::RoleRead::NotRead,
+        &role.to_ascii_lowercase(),
+    ) {
+        return format!("- {index}{role}");
+    }
+    let name = name.unwrap_or("");
+    match value.filter(|v| !v.is_empty()) {
+        Some(value) => format!("- {index}{role} \"{name}\" = \"{value}\""),
+        None => format!("- {index}{role} \"{name}\""),
     }
 }
 
@@ -148,4 +166,24 @@ fn extract_text_from_markdown(md: &str) -> String {
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::format_query_node;
+
+    #[test]
+    fn password_fields_hide_name_value_and_markup() {
+        for role in ["password text", "Password Text", "secure entry"] {
+            let line = format_query_node(
+                role,
+                Some(7),
+                Some("secret-name"),
+                Some("<input value=secret-value>"),
+            );
+            assert_eq!(line, format!("- [7] {role}"));
+        }
+        let line = format_query_node("entry", Some(3), Some("label"), Some("visible"));
+        assert_eq!(line, "- [3] entry \"label\" = \"visible\"");
+    }
 }
