@@ -1195,6 +1195,103 @@ unsafe fn sheet_blocked_at_point(pid: i32, window_id: u32, x: f64, y: f64) -> Op
     crate::ax::exact_target::element_blocked_by_sheet(element.0)
 }
 
+fn background_titlebar_pixel_click(
+    mode: super::DeliveryMode,
+    is_raw_pixel: bool,
+    role: Option<&str>,
+    subrole: Option<&str>,
+) -> bool {
+    mode.is_background()
+        && is_raw_pixel
+        && (role == Some("AXTitleBar")
+            || matches!(
+                subrole,
+                Some("AXCloseButton" | "AXMinimizeButton" | "AXFullScreenButton" | "AXZoomButton")
+            ))
+}
+
+unsafe fn titlebar_pixel_hit(
+    pid: i32,
+    window_id: u32,
+    x: f64,
+    y: f64,
+    mode: super::DeliveryMode,
+) -> bool {
+    let Some(element) = element_at_screen_position(pid, x, y).map(Retained) else {
+        return false;
+    };
+    if !crate::ax::exact_target::element_window_ids(element.0)
+        .is_some_and(|window| window.is(window_id))
+    {
+        return false;
+    }
+    let role = copy_string_attr(element.0, "AXRole");
+    let subrole = copy_string_attr(element.0, "AXSubrole");
+    background_titlebar_pixel_click(mode, true, role.as_deref(), subrole.as_deref())
+}
+
+#[cfg(test)]
+mod titlebar_pixel_guard_tests {
+    use super::super::DeliveryMode;
+    use super::background_titlebar_pixel_click;
+
+    #[test]
+    fn background_titlebar_role_and_chrome_subroles_are_refused() {
+        for mode in [
+            DeliveryMode::BackgroundPreferred,
+            DeliveryMode::BackgroundStrict,
+        ] {
+            assert!(background_titlebar_pixel_click(
+                mode,
+                true,
+                Some("AXTitleBar"),
+                None
+            ));
+            for subrole in [
+                "AXCloseButton",
+                "AXMinimizeButton",
+                "AXFullScreenButton",
+                "AXZoomButton",
+            ] {
+                assert!(background_titlebar_pixel_click(
+                    mode,
+                    true,
+                    Some("AXButton"),
+                    Some(subrole)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn background_toolbar_and_client_area_are_allowed() {
+        for role in ["AXButton", "AXTextArea"] {
+            assert!(!background_titlebar_pixel_click(
+                DeliveryMode::BackgroundStrict,
+                true,
+                Some(role),
+                None
+            ));
+        }
+    }
+
+    #[test]
+    fn foreground_and_element_token_bypass_titlebar_guard() {
+        assert!(!background_titlebar_pixel_click(
+            DeliveryMode::Foreground,
+            true,
+            Some("AXTitleBar"),
+            None
+        ));
+        assert!(!background_titlebar_pixel_click(
+            DeliveryMode::BackgroundStrict,
+            false,
+            Some("AXButton"),
+            Some("AXCloseButton")
+        ));
+    }
+}
+
 /// The public `hit` record of an element a pointer route hit: its role,
 /// name and identifier, each omitted when unreadable; `None` when none is.
 ///
@@ -3002,6 +3099,20 @@ impl ClickTool {
                     super::refuse_point_under_own_popup(pid, wid, screen_x, screen_y).await
                 {
                     return refusal;
+                }
+            }
+
+            if let Some(wid) = window_id.filter(|_| !delivery_mode.is_foreground() && !simulated) {
+                let titlebar_hit = latency::spawn_action_blocking(move || unsafe {
+                    titlebar_pixel_hit(pid, wid, screen_x, screen_y, delivery_mode)
+                })
+                .await
+                .unwrap_or(false);
+                if titlebar_hit {
+                    return super::pre_dispatch_refusal(
+                        "titlebar_would_raise_window",
+                        "A background pixel click on the window title bar would raise or disrupt the window. Nothing was sent.",
+                    );
                 }
             }
 
