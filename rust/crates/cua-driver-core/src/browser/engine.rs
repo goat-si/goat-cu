@@ -2120,7 +2120,7 @@ impl BrowserEngine {
     /// page target) is ignored. Each operation attaches its own fresh
     /// tab session, so the parent-session filter is per-operation
     /// unique even on the shared pooled connection.
-    async fn attached_iframe_children(
+    pub(crate) async fn attached_iframe_children(
         &self,
         conn: &CdpConnection,
         tab_session: &str,

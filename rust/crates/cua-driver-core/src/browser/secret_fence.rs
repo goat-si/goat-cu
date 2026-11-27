@@ -11,13 +11,13 @@
 //! The fence keeps no value: only a loader id and salted 64-bit FNV-1a
 //! digests that the page recomputes for its own field values.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, Weak};
 
 use serde_json::{json, Value};
 
 use super::cdp_ws::CdpConnection;
-use super::engine::BrowserEngine;
+use super::engine::{AttachError, BrowserEngine};
 use super::refusal::{BrowserRefusal, BrowserRefusalCode};
 use super::types::ProcessFingerprint;
 use crate::protocol::ToolResult;
@@ -194,13 +194,32 @@ pub(crate) const HOLDS: &str = r#"function (pairs) {
     return hash.toString(16).padStart(16, "0");
   };
   let seen = 0;
-  const roots = [document];
+  const maxFrameDepth = 16;
+  const visitedDocuments = new Set([document]);
+  const roots = [[document, 0]];
+  const frameDocumentOf = (element) => {
+    try {
+      return element.contentDocument || null;
+    } catch (error) {
+      return null;
+    }
+  };
   while (roots.length) {
-    const walker = document.createTreeWalker(roots.pop(), NodeFilter.SHOW_ELEMENT);
+    const [root, depth] = roots.pop();
+    const walker = (root.ownerDocument || root).createTreeWalker(root, 1);
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       if (++seen > 200000) return "unknown";
-      if (node.shadowRoot) roots.push(node.shadowRoot);
-      if ((node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) && node.value &&
+      if (node.shadowRoot) roots.push([node.shadowRoot, depth]);
+      const name = node.localName;
+      if (name === "iframe" || name === "frame" || name === "object") {
+        const frameDocument = frameDocumentOf(node);
+        if (frameDocument && !visitedDocuments.has(frameDocument)) {
+          if (depth >= maxFrameDepth) return "unknown";
+          visitedDocuments.add(frameDocument);
+          roots.push([frameDocument, depth + 1]);
+        }
+      }
+      if ((name === "input" || name === "textarea") && typeof node.value === "string" && node.value &&
           pairs.some((pair) => digest(pair[0], node.value) === pair[1])) return true;
     }
   }
@@ -213,8 +232,165 @@ enum FenceCheck {
     Clear,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameProbe {
+    Clear,
+    Holds,
+    Failed,
+}
+
+const MAX_ATTACHED_FRAME_DEPTH: usize = 8;
+const MAX_ATTACHED_FRAME_SESSIONS: usize = 64;
+
+fn frame_probe_from_reply<E>(reply: Result<Value, E>) -> FrameProbe {
+    let Ok(reply) = reply else {
+        return FrameProbe::Failed;
+    };
+    if reply.get("exceptionDetails").is_some() {
+        return FrameProbe::Failed;
+    }
+    match reply.pointer("/result/value") {
+        Some(Value::Bool(false)) => FrameProbe::Clear,
+        Some(Value::Bool(true)) => FrameProbe::Holds,
+        _ => FrameProbe::Failed,
+    }
+}
+
+fn fence_check_from_probes(probes: impl IntoIterator<Item = FrameProbe>) -> FenceCheck {
+    let mut probed_any = false;
+    for probe in probes {
+        probed_any = true;
+        if probe != FrameProbe::Clear {
+            return FenceCheck::Held;
+        }
+    }
+    if probed_any {
+        FenceCheck::Clear
+    } else {
+        FenceCheck::Held
+    }
+}
+
+fn holds_expression(fence: &SecretFence) -> String {
+    let pairs: Vec<Value> = fence
+        .digests
+        .iter()
+        .map(|entry| json!([entry.salt, entry.digest]))
+        .collect();
+    format!("({HOLDS})({})", Value::Array(pairs))
+}
+
+async fn probe_frame_session(
+    conn: &CdpConnection,
+    cdp_session: &str,
+    expression: &str,
+) -> FrameProbe {
+    frame_probe_from_reply(
+        conn.call(
+            Some(cdp_session),
+            "Runtime.evaluate",
+            json!({ "expression": expression, "returnByValue": true }),
+        )
+        .await,
+    )
+}
+
+struct AttachedFrameSessionWalk {
+    probes: Vec<FrameProbe>,
+    auto_attached_sessions: Vec<String>,
+    minted_sessions: Vec<(String, String)>,
+}
+
+impl AttachedFrameSessionWalk {
+    fn new() -> Self {
+        Self {
+            probes: Vec::new(),
+            auto_attached_sessions: Vec::new(),
+            minted_sessions: Vec::new(),
+        }
+    }
+
+    fn settled_held(&self) -> bool {
+        self.probes.iter().any(|probe| *probe != FrameProbe::Clear)
+    }
+
+    async fn release(&self, conn: &CdpConnection) {
+        for parent_session in self.auto_attached_sessions.iter().rev() {
+            let _ = conn
+                .call(
+                    Some(parent_session),
+                    "Target.setAutoAttach",
+                    json!({ "autoAttach": false, "waitForDebuggerOnStart": false, "flatten": true }),
+                )
+                .await;
+        }
+        for (parent_session, child_session) in self.minted_sessions.iter().rev() {
+            let _ = conn
+                .call(
+                    Some(parent_session),
+                    "Target.detachFromTarget",
+                    json!({ "sessionId": child_session }),
+                )
+                .await;
+        }
+    }
+}
+
+impl BrowserEngine {
+    async fn probe_attached_frame_sessions(
+        &self,
+        conn: &CdpConnection,
+        tab_session: &str,
+        expression: &str,
+    ) -> Vec<FrameProbe> {
+        let mut walk = AttachedFrameSessionWalk::new();
+        let mut probed_targets: HashSet<String> = HashSet::new();
+        let mut pending = vec![(tab_session.to_owned(), 0usize)];
+        while let Some((parent_session, depth)) = pending.pop() {
+            if walk.settled_held() {
+                break;
+            }
+            let children = match self.attached_iframe_children(conn, &parent_session).await {
+                Ok(children) => children,
+                Err(AttachError::Unsupported) => continue,
+                Err(AttachError::Failed(_)) => {
+                    walk.auto_attached_sessions.push(parent_session);
+                    walk.probes.push(FrameProbe::Failed);
+                    break;
+                }
+            };
+            walk.auto_attached_sessions.push(parent_session.clone());
+            for child in children {
+                walk.minted_sessions
+                    .push((parent_session.clone(), child.session_id.clone()));
+                if walk.settled_held() || !probed_targets.insert(child.target_id) {
+                    continue;
+                }
+                if depth >= MAX_ATTACHED_FRAME_DEPTH
+                    || probed_targets.len() > MAX_ATTACHED_FRAME_SESSIONS
+                {
+                    walk.probes.push(FrameProbe::Failed);
+                    continue;
+                }
+                let probe = probe_frame_session(conn, &child.session_id, expression).await;
+                walk.probes.push(probe);
+                if probe == FrameProbe::Clear {
+                    pending.push((child.session_id, depth + 1));
+                }
+            }
+        }
+        walk.release(conn).await;
+        walk.probes
+    }
+}
+
 /// Check one fence through an attached session on its tab.
-async fn check_on(conn: &CdpConnection, cdp_session: &str, fence: &SecretFence) -> FenceCheck {
+async fn check_on(
+    engine: &BrowserEngine,
+    conn: &CdpConnection,
+    cdp_session: &str,
+    fence: &SecretFence,
+) -> FenceCheck {
     let Ok(tree) = conn
         .call(Some(cdp_session), "Page.getFrameTree", json!({}))
         .await
@@ -231,28 +407,15 @@ async fn check_on(conn: &CdpConnection, cdp_session: &str, fence: &SecretFence) 
     if loader != fence.loader_id {
         return FenceCheck::Clear;
     }
-    let pairs: Vec<Value> = fence
-        .digests
-        .iter()
-        .map(|entry| json!([entry.salt, entry.digest]))
-        .collect();
-    let expression = format!("({HOLDS})({})", Value::Array(pairs));
-    match conn
-        .call(
-            Some(cdp_session),
-            "Runtime.evaluate",
-            json!({ "expression": expression, "returnByValue": true }),
-        )
-        .await
-    {
-        Ok(reply)
-            if reply.get("exceptionDetails").is_none()
-                && reply.pointer("/result/value") == Some(&Value::Bool(false)) =>
-        {
-            FenceCheck::Clear
-        }
-        _ => FenceCheck::Held,
+    let expression = holds_expression(fence);
+    let top_level = probe_frame_session(conn, cdp_session, &expression).await;
+    if top_level != FrameProbe::Clear {
+        return FenceCheck::Held;
     }
+    let attached_frames = engine
+        .probe_attached_frame_sessions(conn, cdp_session, &expression)
+        .await;
+    fence_check_from_probes(std::iter::once(top_level).chain(attached_frames))
 }
 
 pub(crate) fn held_refusal(context: &str) -> BrowserRefusal {
@@ -300,7 +463,7 @@ impl BrowserEngine {
         };
         let check = match self.connection_for_record(session, &record).await {
             Ok(conn) => match self.attach(&conn, &key.cdp_target_id).await {
-                Ok(cdp_session) => check_on(&conn, &cdp_session, &fence).await,
+                Ok(cdp_session) => check_on(self, &conn, &cdp_session, &fence).await,
                 Err(_) => FenceCheck::Held,
             },
             Err(_) => FenceCheck::Held,
@@ -365,7 +528,7 @@ impl BrowserEngine {
             let check = match self.store.get_target(&fence.session, &fence.target_id) {
                 Ok(record) => match self.connection_for_record(&fence.session, &record).await {
                     Ok(conn) => match self.attach(&conn, &key.cdp_target_id).await {
-                        Ok(cdp_session) => check_on(&conn, &cdp_session, &fence).await,
+                        Ok(cdp_session) => check_on(self, &conn, &cdp_session, &fence).await,
                         Err(_) => FenceCheck::Held,
                     },
                     Err(_) => FenceCheck::Held,
@@ -507,6 +670,59 @@ mod tests {
         assert_eq!(digest("", "a"), "af63dc4c8601ec8c");
         assert_eq!(digest("s", "a"), digest("", "sa"));
         assert_ne!(digest("s1", "pw"), digest("s2", "pw"));
+    }
+
+    #[test]
+    fn a_cleared_top_level_with_a_frame_still_holding_keeps_the_fence() {
+        assert_eq!(
+            fence_check_from_probes([FrameProbe::Clear, FrameProbe::Holds]),
+            FenceCheck::Held
+        );
+        assert_eq!(
+            fence_check_from_probes([FrameProbe::Clear, FrameProbe::Clear, FrameProbe::Holds]),
+            FenceCheck::Held
+        );
+    }
+
+    #[test]
+    fn every_frame_cleared_lets_the_fence_clear() {
+        assert_eq!(
+            fence_check_from_probes([FrameProbe::Clear]),
+            FenceCheck::Clear
+        );
+        assert_eq!(
+            fence_check_from_probes([FrameProbe::Clear, FrameProbe::Clear]),
+            FenceCheck::Clear
+        );
+    }
+
+    #[test]
+    fn a_failed_or_missing_frame_probe_fails_closed() {
+        assert_eq!(
+            fence_check_from_probes([FrameProbe::Clear, FrameProbe::Failed]),
+            FenceCheck::Held
+        );
+        assert_eq!(fence_check_from_probes([]), FenceCheck::Held);
+        assert_eq!(frame_probe_from_reply::<()>(Err(())), FrameProbe::Failed);
+        assert_eq!(
+            frame_probe_from_reply::<()>(Ok(json!({ "result": { "value": "unknown" } }))),
+            FrameProbe::Failed
+        );
+        assert_eq!(
+            frame_probe_from_reply::<()>(Ok(json!({
+                "result": { "value": false },
+                "exceptionDetails": { "text": "thrown" }
+            }))),
+            FrameProbe::Failed
+        );
+        assert_eq!(
+            frame_probe_from_reply::<()>(Ok(json!({ "result": { "value": true } }))),
+            FrameProbe::Holds
+        );
+        assert_eq!(
+            frame_probe_from_reply::<()>(Ok(json!({ "result": { "value": false } }))),
+            FrameProbe::Clear
+        );
     }
 
     #[test]

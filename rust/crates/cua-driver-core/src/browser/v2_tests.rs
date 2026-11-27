@@ -207,6 +207,8 @@ pub(super) struct FillPage {
     /// The fence check's answer; `None` fails the call.
     pub(super) holds: Option<Value>,
     pub(super) holds_checks: usize,
+    pub(super) attached_frame_holds: Option<Option<Value>>,
+    pub(super) attached_frame_holds_checks: usize,
 }
 
 impl Default for FixtureState {
@@ -1183,6 +1185,19 @@ fn fill_page_reply(st: &mut FixtureState, call: &super::mock_cdp::MockCall) -> O
     let is_find =
         declaration.contains("CUA_SECRET_FILL_FIND") || expression.contains("CUA_SECRET_FILL_FIND");
     if expression.contains("CUA_SECRET_FENCE_HOLDS") {
+        let on_attached_frame = call
+            .session_id
+            .as_deref()
+            .is_some_and(|session| session.starts_with("oopif-sess-"));
+        if on_attached_frame {
+            if let Some(attached_frame_holds) = st.fill.attached_frame_holds.clone() {
+                st.fill.attached_frame_holds_checks += 1;
+                return Some(match attached_frame_holds {
+                    Some(value) => MockReply::ok(json!({ "result": { "value": value } })),
+                    None => MockReply::err(-32000, "fixture attached frame check failure"),
+                });
+            }
+        }
         st.fill.holds_checks += 1;
         return Some(match st.fill.holds.clone() {
             Some(value) => MockReply::ok(json!({ "result": { "value": value } })),
