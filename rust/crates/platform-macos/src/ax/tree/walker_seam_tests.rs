@@ -402,6 +402,7 @@ fn run_fake_inner(
     mut budget: WalkBudget,
     include_web_content: bool,
 ) -> TreeWalkResult {
+    let _pending_scope = PendingSiblings::reset();
     let ledger = SkipLedger::start();
     let mut nodes = Vec::new();
     let mut lines = Vec::new();
@@ -2899,4 +2900,114 @@ fn an_unusable_range_leaves_the_position_unknown() {
             });
         assert_eq!(attribute_failed, read_failed, "{index}: {output}");
     }
+}
+
+#[test]
+fn non_windowed_dense_body_leaves_budget_for_toolbar_controls() {
+    fn container_steps(id: usize, role: &str, title: &str, children: Vec<usize>) -> Vec<Step> {
+        vec![
+            step(&format!("timeout {id}"), Reply::Unit),
+            step(
+                &format!("text {id} AXRole"),
+                Reply::Text(Read::Known(role.into())),
+            ),
+            step(
+                &format!("batch {id} {CONTENT}"),
+                Reply::Batch(Ok(content(Some(title)))),
+            ),
+            step(&format!("value {id}"), Reply::Value(Ok(None))),
+            step(
+                &format!("actions {id}"),
+                Reply::Actions(Read::Known(vec![])),
+            ),
+            step(
+                &format!("batch {id} {FRAME}"),
+                Reply::Batch(Ok(frame_batch())),
+            ),
+            step(
+                &format!("children {id}"),
+                Reply::Children(Read::Known(children)),
+            ),
+        ]
+    }
+    fn button_steps(id: usize, title: &str) -> Vec<Step> {
+        vec![
+            step(&format!("timeout {id}"), Reply::Unit),
+            step(
+                &format!("text {id} AXRole"),
+                Reply::Text(Read::Known("AXButton".into())),
+            ),
+            step(
+                &format!("batch {id} {CONTENT}"),
+                Reply::Batch(Ok(content(Some(title)))),
+            ),
+            step(&format!("value {id}"), Reply::Value(Ok(None))),
+            step(
+                &format!("actions {id}"),
+                Reply::Actions(Read::Known(vec!["AXPress".into()])),
+            ),
+            step(
+                &format!("batch {id} {CONTROL}"),
+                Reply::Batch(Ok(control_batch())),
+            ),
+            step(&format!("snapshot {id}"), Reply::Unit),
+            step(&format!("children {id}"), Reply::Children(Read::Absent)),
+        ]
+    }
+    const TABLE: usize = 2;
+    const TOOLBAR: usize = 100;
+    let rows: Vec<usize> = (3..33).collect();
+    let toolbar_buttons: Vec<usize> = (101..110).collect();
+    let mut script = container_steps(1, "AXWindow", "Window", vec![TABLE, TOOLBAR]);
+    script.extend(container_steps(TABLE, "AXTable", "Items", rows.clone()));
+    for &row in rows.iter().take(10) {
+        script.extend(button_steps(row, &format!("Item {row}")));
+    }
+    script.extend(container_steps(
+        TOOLBAR,
+        "AXToolbar",
+        "Tools",
+        toolbar_buttons.clone(),
+    ));
+    for &button in &toolbar_buttons {
+        script.extend(button_steps(button, &format!("Tool {button}")));
+    }
+    let window_children = [TABLE, TOOLBAR];
+    let mut entries: Vec<(usize, usize, usize, &[usize])> = vec![
+        (1, 1, 1, &window_children),
+        (TABLE, TABLE, TABLE, &rows),
+        (TOOLBAR, TOOLBAR, TOOLBAR, &toolbar_buttons),
+    ];
+    for &id in rows.iter().chain(&toolbar_buttons) {
+        entries.push((id, id, id, &[]));
+    }
+    let source = Fake::new(&entries, script);
+    let root = source.handle(1);
+    let result = with_dense_rows_windowed(false, || {
+        run_fake(&source, &root, None, 10, WalkBudget::nodes_only(30), true)
+    });
+    drop(root);
+    source.assert_consumed();
+    let tools: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|node| node.role == "AXButton")
+        .filter_map(|node| node.title.clone())
+        .filter(|title| title.starts_with("Tool "))
+        .collect();
+    assert_eq!(
+        tools,
+        toolbar_buttons
+            .iter()
+            .map(|button| format!("Tool {button}"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(result.walk.reason(), Some("node_budget"));
+    assert!(result.nodes_skipped);
+    let mut output = serde_json::json!({});
+    result.walk.apply(&mut output);
+    assert!(output["observation_incomplete_reasons"]
+        .as_array()
+        .expect("incomplete reasons")
+        .contains(&serde_json::json!({"kind": "budget", "detail": "node_budget"})));
 }

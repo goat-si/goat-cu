@@ -138,6 +138,11 @@ impl WalkBudget {
         true
     }
 
+    pub fn free_nodes(&self) -> usize {
+        self.max_elements
+            .saturating_sub(self.visited.saturating_add(self.reserved))
+    }
+
     /// Hold back up to `count` nodes of the unreserved node budget and return
     /// how many were held. A walker holds nodes for the siblings it has not
     /// walked yet and [`WalkBudget::release`]s each sibling's share before
