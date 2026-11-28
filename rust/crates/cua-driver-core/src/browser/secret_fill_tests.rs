@@ -608,6 +608,66 @@ async fn unsupported_child_frame_discovery_fails_closed() {
 }
 
 #[tokio::test]
+async fn a_child_frame_attached_during_the_check_keeps_the_fence() {
+    const TRANSPORT: &str = "transport-fill-late-child-frame";
+    let (f, target, tab) = claimed(TRANSPORT, login_page).await;
+    let filled = fill(&f, login_args(&target, &tab)).await;
+    assert_eq!(structured(&filled)["status"], "ok");
+    {
+        let mut st = f.state.lock().unwrap();
+        st.fill.holds = Some(json!(false));
+        st.fill.attach_child_during_check = true;
+    }
+    let refused = read(&f, &target, &tab, json!({})).await;
+    assert_eq!(refusal_code(&refused), "browser_secret_held");
+    assert!(held(&f));
+    let released: Vec<String> = recorded_calls(&f, "Target.detachFromTarget")
+        .into_iter()
+        .filter_map(|(_, params)| params["sessionId"].as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        released.iter().any(|session| session == "oopif-late-sess"),
+        "{released:?}"
+    );
+
+    let cleared = read(&f, &target, &tab, json!({})).await;
+    assert_eq!(
+        structured(&cleared)["status"],
+        "ok",
+        "{}",
+        structured(&cleared)
+    );
+    assert!(!held(&f));
+    crate::session::fire_session_end(TRANSPORT);
+}
+
+#[tokio::test]
+async fn a_same_process_frame_changing_during_the_check_keeps_the_fence() {
+    const TRANSPORT: &str = "transport-fill-local-frame-changes";
+    let (f, target, tab) = claimed(TRANSPORT, login_page).await;
+    let filled = fill(&f, login_args(&target, &tab)).await;
+    assert_eq!(structured(&filled)["status"], "ok");
+    {
+        let mut st = f.state.lock().unwrap();
+        st.fill.holds = Some(json!(false));
+        st.fill.navigate_local_frame_during_check = true;
+    }
+    let refused = read(&f, &target, &tab, json!({})).await;
+    assert_eq!(refusal_code(&refused), "browser_secret_held");
+    assert!(held(&f));
+
+    let cleared = read(&f, &target, &tab, json!({})).await;
+    assert_eq!(
+        structured(&cleared)["status"],
+        "ok",
+        "{}",
+        structured(&cleared)
+    );
+    assert!(!held(&f));
+    crate::session::fire_session_end(TRANSPORT);
+}
+
+#[tokio::test]
 async fn an_abandoned_fence_check_still_releases_child_frame_sessions() {
     const TRANSPORT: &str = "transport-fill-abandoned-frame-check";
     let (f, target, tab) = claimed(TRANSPORT, login_page).await;

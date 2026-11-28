@@ -15,8 +15,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 
-use super::cdp_ws::CdpConnection;
+use super::cdp_ws::{CdpConnection, CdpEvent};
 use super::engine::BrowserEngine;
 use super::refusal::{BrowserRefusal, BrowserRefusalCode};
 use super::types::ProcessFingerprint;
@@ -311,55 +312,54 @@ async fn probe_local_frame(
     )
 }
 
-fn local_frame_ids(tree: &Value) -> Option<Vec<String>> {
-    let mut ids = Vec::new();
+type LocalFrames = Vec<(String, String)>;
+
+fn local_frames(tree: &Value) -> Option<LocalFrames> {
+    let mut frames = Vec::new();
     let mut pending = vec![tree.get("frameTree")?];
     while let Some(node) = pending.pop() {
-        let id = node
-            .pointer("/frame/id")
+        let frame = node.get("frame")?;
+        let id = frame
+            .get("id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())?;
-        ids.push(id.to_owned());
-        if ids.len() > MAX_LOCAL_FRAMES {
+        let loader = frame
+            .get("loaderId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        frames.push((id.to_owned(), loader.to_owned()));
+        if frames.len() > MAX_LOCAL_FRAMES {
             return None;
         }
         if let Some(children) = node.get("childFrames") {
             pending.extend(children.as_array()?);
         }
     }
-    Some(ids)
+    frames.sort();
+    Some(frames)
+}
+
+async fn session_frames(conn: &CdpConnection, cdp_session: &str) -> Option<LocalFrames> {
+    let tree = conn
+        .call(Some(cdp_session), "Page.getFrameTree", json!({}))
+        .await
+        .ok()?;
+    local_frames(&tree)
 }
 
 async fn probe_local_frames(
     conn: &CdpConnection,
     cdp_session: &str,
-    tree: &Value,
+    frames: &LocalFrames,
     expression: &str,
 ) -> FrameProbe {
-    let Some(frame_ids) = local_frame_ids(tree) else {
-        return FrameProbe::Failed;
-    };
-    for frame_id in frame_ids {
-        let probe = probe_local_frame(conn, cdp_session, &frame_id, expression).await;
+    for (frame_id, _) in frames {
+        let probe = probe_local_frame(conn, cdp_session, frame_id, expression).await;
         if probe != FrameProbe::Clear {
             return probe;
         }
     }
     FrameProbe::Clear
-}
-
-async fn probe_frame_session(
-    conn: &CdpConnection,
-    cdp_session: &str,
-    expression: &str,
-) -> FrameProbe {
-    match conn
-        .call(Some(cdp_session), "Page.getFrameTree", json!({}))
-        .await
-    {
-        Ok(tree) => probe_local_frames(conn, cdp_session, &tree, expression).await,
-        Err(_) => FrameProbe::Failed,
-    }
 }
 
 async fn release_frame_sessions(
@@ -392,6 +392,7 @@ struct AttachedFrameSessionWalk {
     probes: Vec<FrameProbe>,
     auto_attached_sessions: Vec<String>,
     minted_sessions: Vec<(String, String)>,
+    probed_frames: Vec<(String, LocalFrames)>,
 }
 
 impl AttachedFrameSessionWalk {
@@ -401,11 +402,53 @@ impl AttachedFrameSessionWalk {
             probes: Vec::new(),
             auto_attached_sessions: Vec::new(),
             minted_sessions: Vec::new(),
+            probed_frames: Vec::new(),
         }
     }
 
     fn settled_held(&self) -> bool {
         self.probes.iter().any(|probe| *probe != FrameProbe::Clear)
+    }
+
+    fn take_late_attachments(&mut self, events: &mut mpsc::UnboundedReceiver<CdpEvent>) {
+        while let Ok(event) = events.try_recv() {
+            if event.method != "Target.attachedToTarget" {
+                continue;
+            }
+            let Some(parent_session) = event.session_id else {
+                continue;
+            };
+            if !self.auto_attached_sessions.contains(&parent_session) {
+                continue;
+            }
+            if event.params["targetInfo"]["type"].as_str() != Some("iframe") {
+                continue;
+            }
+            let Some(child_session) = event.params["sessionId"].as_str() else {
+                continue;
+            };
+            let known = self
+                .minted_sessions
+                .iter()
+                .any(|(_, minted)| minted == child_session);
+            if !known {
+                self.minted_sessions
+                    .push((parent_session, child_session.to_owned()));
+                self.probes.push(FrameProbe::Failed);
+            }
+        }
+    }
+
+    async fn confirm_frames_unchanged(&mut self) {
+        if self.settled_held() {
+            return;
+        }
+        for (cdp_session, frames) in &self.probed_frames {
+            if session_frames(&self.conn, cdp_session).await.as_ref() != Some(frames) {
+                self.probes.push(FrameProbe::Failed);
+                return;
+            }
+        }
     }
 
     async fn finish(mut self) -> Vec<FrameProbe> {
@@ -443,9 +486,13 @@ impl BrowserEngine {
         &self,
         conn: &Arc<CdpConnection>,
         tab_session: &str,
+        tab_frames: LocalFrames,
         expression: &str,
     ) -> Vec<FrameProbe> {
+        let mut events = conn.subscribe();
         let mut walk = AttachedFrameSessionWalk::new(conn);
+        walk.probed_frames
+            .push((tab_session.to_owned(), tab_frames));
         let mut probed_targets: HashSet<String> = HashSet::new();
         let mut pending = vec![(tab_session.to_owned(), 0usize)];
         while let Some((parent_session, depth)) = pending.pop() {
@@ -469,13 +516,20 @@ impl BrowserEngine {
                     walk.probes.push(FrameProbe::Failed);
                     continue;
                 }
-                let probe = probe_frame_session(conn, &child.session_id, expression).await;
+                let Some(frames) = session_frames(conn, &child.session_id).await else {
+                    walk.probes.push(FrameProbe::Failed);
+                    continue;
+                };
+                let probe = probe_local_frames(conn, &child.session_id, &frames, expression).await;
                 walk.probes.push(probe);
                 if probe == FrameProbe::Clear {
+                    walk.probed_frames.push((child.session_id.clone(), frames));
                     pending.push((child.session_id, depth + 1));
                 }
             }
         }
+        walk.confirm_frames_unchanged().await;
+        walk.take_late_attachments(&mut events);
         walk.finish().await
     }
 }
@@ -503,13 +557,16 @@ async fn check_on(
     if loader != fence.loader_id {
         return FenceCheck::Clear;
     }
+    let Some(tab_frames) = local_frames(&tree) else {
+        return FenceCheck::Held;
+    };
     let expression = holds_expression(fence);
-    let top_level = probe_local_frames(conn, cdp_session, &tree, &expression).await;
+    let top_level = probe_local_frames(conn, cdp_session, &tab_frames, &expression).await;
     if top_level != FrameProbe::Clear {
         return FenceCheck::Held;
     }
     let attached_frames = engine
-        .probe_attached_frame_sessions(conn, cdp_session, &expression)
+        .probe_attached_frame_sessions(conn, cdp_session, tab_frames, &expression)
         .await;
     fence_check_from_probes(std::iter::once(top_level).chain(attached_frames))
 }

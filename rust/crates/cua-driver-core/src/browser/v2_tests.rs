@@ -211,6 +211,8 @@ pub(super) struct FillPage {
     pub(super) attached_frame_holds_checks: usize,
     pub(super) attached_frame_hangs: bool,
     pub(super) same_process_frame_holds: Option<Value>,
+    pub(super) attach_child_during_check: bool,
+    pub(super) navigate_local_frame_during_check: bool,
 }
 
 impl Default for FixtureState {
@@ -1202,6 +1204,32 @@ fn fill_page_reply(st: &mut FixtureState, call: &super::mock_cdp::MockCall) -> O
             .is_some_and(|session| session.starts_with("oopif-sess-"));
         if on_attached_frame && st.fill.attached_frame_hangs {
             return Some(MockReply::hang());
+        }
+        if on_attached_frame && std::mem::take(&mut st.fill.attach_child_during_check) {
+            return Some(
+                MockReply::ok(json!({ "result": { "value": false } })).with_events(vec![
+                    MockEvent {
+                        method: "Target.attachedToTarget".into(),
+                        session_id: Some(format!("tab-sess-{}", st.tab_sessions)),
+                        params: json!({
+                            "sessionId": "oopif-late-sess",
+                            "targetInfo": {
+                                "targetId": "T_OOPIF_LATE",
+                                "type": "iframe",
+                                "url": "https://late.example/frame",
+                                "attached": true,
+                            },
+                            "waitingForDebugger": false,
+                        }),
+                    },
+                ]),
+            );
+        }
+        if call.params["contextId"].as_i64() == Some(1002)
+            && std::mem::take(&mut st.fill.navigate_local_frame_during_check)
+        {
+            st.iframe_loader = "L_IFRAME_2".into();
+            return Some(MockReply::ok(json!({ "result": { "value": false } })));
         }
         if call.params["contextId"].as_i64() == Some(1002) {
             if let Some(value) = st.fill.same_process_frame_holds.clone() {
