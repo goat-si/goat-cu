@@ -2405,22 +2405,56 @@ fn cgevent_type_verified_with(
             Ok(())
         } else if super::key_delivery_guard::has_checked_boundary(payload, more_follows) {
             let prior_sent = std::cell::Cell::new(0usize);
+            let anchor = std::cell::Cell::new(None::<Option<(u32, u32)>>);
             let (sent, abort) = super::key_delivery_guard::drive_key_segments(
                 payload,
                 more_follows,
                 &boundary_probe,
-                |before| confirm_text_focus(window_id, before),
+                |before| {
+                    let window = before.window();
+                    let focus = confirm_text_focus(window_id, before);
+                    if focus == super::key_delivery_guard::FocusConfirmation::Confirmed {
+                        anchor.set(Some(window));
+                    }
+                    focus
+                },
                 |unit, _| {
-                    send_text(pid, unit, delay_ms).map_err(|error| {
+                    let sent = match anchor.get() {
+                        None => send_text(pid, unit, delay_ms).map(|()| unit.chars().count()),
+                        Some(window) => crate::input::keyboard::type_text_while_with_paste(
+                            pid,
+                            unit,
+                            delay_ms,
+                            || match window_id {
+                                Some(wid) => {
+                                    !crate::input::skylight::sibling_window_focused(pid, wid)
+                                }
+                                None => super::key_delivery_guard::same_observed_window(
+                                    window,
+                                    crate::ax::bindings::focused_window_ids_of_pid(pid)
+                                        .map(|focused| (focused.own, focused.root)),
+                                ),
+                            },
+                            false,
+                        ),
+                    }
+                    .map_err(|error| {
                         crate::input::keyboard::offset_posted(error, prior_sent.get())
                     })?;
-                    let sent = unit.chars().count();
                     prior_sent.set(prior_sent.get() + sent);
                     Ok::<usize, anyhow::Error>(sent)
                 },
             )?;
             if abort.is_some() {
                 return Err(TextFocusAbort { sent }.into());
+            }
+            if sent < payload.chars().count() {
+                return Err(crate::input::keyboard::key_construction_error(
+                    anyhow::anyhow!(
+                        "the focused window changed after a confirmed tab or return; no further text was sent"
+                    ),
+                    sent,
+                ));
             }
             Ok(())
         } else {

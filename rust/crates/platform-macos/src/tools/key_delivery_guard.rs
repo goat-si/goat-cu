@@ -125,6 +125,10 @@ impl BoundaryProbe {
         self.secure_input
     }
 
+    pub(super) fn window(&self) -> Option<(u32, u32)> {
+        self.window
+    }
+
     pub(super) fn keeps_window_of(&self, before: &Self) -> bool {
         same_observed_window(before.window, self.window)
     }
@@ -141,7 +145,7 @@ impl BoundaryProbe {
     }
 }
 
-fn same_observed_window(before: Option<(u32, u32)>, after: Option<(u32, u32)>) -> bool {
+pub(super) fn same_observed_window(before: Option<(u32, u32)>, after: Option<(u32, u32)>) -> bool {
     before.is_some() && before == after
 }
 
