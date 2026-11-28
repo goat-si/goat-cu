@@ -33,6 +33,7 @@ mod screen_size_resolution;
 mod uncertain_ax_result;
 
 pub mod basis_eligibility;
+pub mod display_awake;
 pub mod health_report;
 pub mod overlay;
 pub mod overlay_capture;
@@ -297,6 +298,8 @@ pub fn no_display_hint() -> String {
 
 pub fn register_tools() -> ToolRegistry {
     #[cfg(target_os = "linux")]
+    display_awake::install();
+    #[cfg(target_os = "linux")]
     wayland::ensure_nested_session();
     tools::build_registry(false)
 }
@@ -312,6 +315,8 @@ pub fn register_tools_with_cursor_and_provider(
     cfg: cursor_overlay::CursorConfig,
     compat: bool,
 ) -> ToolRegistry {
+    #[cfg(target_os = "linux")]
+    display_awake::install();
     #[cfg(target_os = "linux")]
     wayland::ensure_nested_session();
     #[cfg(target_os = "linux")]

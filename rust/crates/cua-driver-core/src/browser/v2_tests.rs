@@ -207,6 +207,12 @@ pub(super) struct FillPage {
     /// The fence check's answer; `None` fails the call.
     pub(super) holds: Option<Value>,
     pub(super) holds_checks: usize,
+    pub(super) attached_frame_holds: Option<Option<Value>>,
+    pub(super) attached_frame_holds_checks: usize,
+    pub(super) attached_frame_hangs: bool,
+    pub(super) same_process_frame_holds: Option<Value>,
+    pub(super) attach_child_during_check: bool,
+    pub(super) navigate_local_frame_during_check: bool,
 }
 
 impl Default for FixtureState {
@@ -882,6 +888,15 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                     "loaderId": "L_MAIN_NAVIGATED",
                 }))
             }
+            "Target.setAutoAttach" if is_oopif => MockReply::ok(json!({})),
+            "Page.createIsolatedWorld" if is_tab || is_oopif => {
+                match call.params["frameId"].as_str() {
+                    Some("F_MAIN") => MockReply::ok(json!({ "executionContextId": 1001 })),
+                    Some("F_IFRAME") => MockReply::ok(json!({ "executionContextId": 1002 })),
+                    Some("F_OOPIF") => MockReply::ok(json!({ "executionContextId": 1003 })),
+                    _ => MockReply::err(-32000, "No frame for given id found"),
+                }
+            }
             "Target.setAutoAttach" if is_tab => {
                 if call.params["autoAttach"].as_bool() == Some(false) {
                     return MockReply::ok(json!({}));
@@ -1183,6 +1198,53 @@ fn fill_page_reply(st: &mut FixtureState, call: &super::mock_cdp::MockCall) -> O
     let is_find =
         declaration.contains("CUA_SECRET_FILL_FIND") || expression.contains("CUA_SECRET_FILL_FIND");
     if expression.contains("CUA_SECRET_FENCE_HOLDS") {
+        let on_attached_frame = call
+            .session_id
+            .as_deref()
+            .is_some_and(|session| session.starts_with("oopif-sess-"));
+        if on_attached_frame && st.fill.attached_frame_hangs {
+            return Some(MockReply::hang());
+        }
+        if on_attached_frame && std::mem::take(&mut st.fill.attach_child_during_check) {
+            return Some(
+                MockReply::ok(json!({ "result": { "value": false } })).with_events(vec![
+                    MockEvent {
+                        method: "Target.attachedToTarget".into(),
+                        session_id: Some(format!("tab-sess-{}", st.tab_sessions)),
+                        params: json!({
+                            "sessionId": "oopif-late-sess",
+                            "targetInfo": {
+                                "targetId": "T_OOPIF_LATE",
+                                "type": "iframe",
+                                "url": "https://late.example/frame",
+                                "attached": true,
+                            },
+                            "waitingForDebugger": false,
+                        }),
+                    },
+                ]),
+            );
+        }
+        if call.params["contextId"].as_i64() == Some(1002)
+            && std::mem::take(&mut st.fill.navigate_local_frame_during_check)
+        {
+            st.iframe_loader = "L_IFRAME_2".into();
+            return Some(MockReply::ok(json!({ "result": { "value": false } })));
+        }
+        if call.params["contextId"].as_i64() == Some(1002) {
+            if let Some(value) = st.fill.same_process_frame_holds.clone() {
+                return Some(MockReply::ok(json!({ "result": { "value": value } })));
+            }
+        }
+        if on_attached_frame {
+            if let Some(attached_frame_holds) = st.fill.attached_frame_holds.clone() {
+                st.fill.attached_frame_holds_checks += 1;
+                return Some(match attached_frame_holds {
+                    Some(value) => MockReply::ok(json!({ "result": { "value": value } })),
+                    None => MockReply::err(-32000, "fixture attached frame check failure"),
+                });
+            }
+        }
         st.fill.holds_checks += 1;
         return Some(match st.fill.holds.clone() {
             Some(value) => MockReply::ok(json!({ "result": { "value": value } })),

@@ -30,6 +30,7 @@ use cua_driver_core::tool::ToolRegistry;
 mod desktop_target;
 
 pub mod diagnostics;
+pub mod display_awake;
 #[cfg(target_os = "windows")]
 pub mod dpi;
 pub mod health_report;
@@ -118,6 +119,9 @@ mod secure_field;
 #[cfg(any(target_os = "windows", test))]
 mod combo_privacy;
 
+#[cfg(any(target_os = "windows", test))]
+mod page_privacy;
+
 // Pure restore rule for foreground input turns; runs its table test on any host.
 #[cfg(any(target_os = "windows", test))]
 mod typing_turn;
@@ -191,6 +195,8 @@ pub mod wgc;
 pub mod launch_uwp;
 
 pub fn register_tools() -> ToolRegistry {
+    #[cfg(target_os = "windows")]
+    display_awake::install();
     tools::build_registry(false)
 }
 
@@ -205,6 +211,8 @@ pub fn register_tools_with_cursor_and_provider(
     cfg: cursor_overlay::CursorConfig,
     compat: bool,
 ) -> ToolRegistry {
+    #[cfg(target_os = "windows")]
+    display_awake::install();
     if cfg.enabled {
         overlay::init(cfg.clone());
         overlay::run_on_thread();

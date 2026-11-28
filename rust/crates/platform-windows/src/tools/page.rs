@@ -157,7 +157,7 @@ unsafe fn query_dom_blocking(
         for a in attributes {
             let v = match a.as_str() {
                 "name" => Some(name.clone()),
-                "id" => read_string(&elem, |e| {
+                "id" if expose => read_string(&elem, |e| {
                     e.CurrentAutomationId()
                         .map(|b| b.to_string())
                         .map_err(|e| e.into())
@@ -177,15 +177,7 @@ unsafe fn query_dom_blocking(
         }
 
         let ct = read_control_type(&elem).unwrap_or_else(|| "Unknown".to_owned());
-        let line = if attr_parts.is_empty() {
-            format!("- {ct} \"{}\"", escape_attr(&name))
-        } else {
-            format!(
-                "- {ct} \"{}\" [{}]",
-                escape_attr(&name),
-                attr_parts.join(" ")
-            )
-        };
+        let line = crate::page_privacy::format_query_node(expose, &ct, &name, &attr_parts);
         formatted.push(line);
     }
 
