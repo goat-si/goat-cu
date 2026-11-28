@@ -2333,28 +2333,41 @@ fn cgevent_type_verified_with(
             if !processed {
                 return super::key_delivery_guard::FocusConfirmation::Unprocessed;
             }
+            let window_matches = match wid {
+                Some(wid) => !crate::input::skylight::sibling_window_focused(pid, wid),
+                None => boundary_probe().keeps_window_of(&before),
+            };
             secure_latch.observe(crate::input::keyboard::secure_event_input_active());
             super::key_delivery_guard::classify_focus_confirmation(
                 pid,
                 Some(pid),
-                wid.is_none_or(|wid| !crate::input::skylight::sibling_window_focused(pid, wid)),
+                window_matches,
                 secure_latch.turned_on(),
             )
         };
     let send_guarded_text = |payload: &str, more_follows: bool| -> anyhow::Result<()> {
         if let Some(wid) = exact_keys_window.or_else(|| element_ptr_and_idx.and(window_id)) {
             let prior_sent = std::cell::Cell::new(0usize);
+            let crossed_boundary = std::cell::Cell::new(false);
             let (sent, abort) = super::key_delivery_guard::drive_key_segments(
                 payload,
                 more_follows,
                 &boundary_probe,
-                |before| confirm_text_focus(Some(wid), before),
+                |before| {
+                    let focus = confirm_text_focus(Some(wid), before);
+                    if focus == super::key_delivery_guard::FocusConfirmation::Confirmed {
+                        crossed_boundary.set(true);
+                    }
+                    focus
+                },
                 |segment, first| {
                     let may_send = || {
                         key_delivery_allowed(
                             crate::input::skylight::sibling_window_focused(pid, wid),
-                            element_ptr_and_idx
-                                .is_none_or(|(ptr, _)| element_has_exact_app_focus(pid, wid, ptr)),
+                            crossed_boundary.get()
+                                || element_ptr_and_idx.is_none_or(|(ptr, _)| {
+                                    element_has_exact_app_focus(pid, wid, ptr)
+                                }),
                         )
                     };
                     let result = if first {
@@ -2375,8 +2388,9 @@ fn cgevent_type_verified_with(
                 return Err(TextFocusAbort { sent }.into());
             }
             if sent < payload.chars().count() {
-                if element_ptr_and_idx
-                    .is_some_and(|(ptr, _)| !element_has_exact_app_focus(pid, wid, ptr))
+                if !crossed_boundary.get()
+                    && element_ptr_and_idx
+                        .is_some_and(|(ptr, _)| !element_has_exact_app_focus(pid, wid, ptr))
                 {
                     return Err(crate::input::keyboard::key_construction_error(
                         anyhow::anyhow!("the exact target lost focus; no further text was sent"),

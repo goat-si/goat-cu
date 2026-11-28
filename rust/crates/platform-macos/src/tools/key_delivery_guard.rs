@@ -125,6 +125,10 @@ impl BoundaryProbe {
         self.secure_input
     }
 
+    pub(super) fn keeps_window_of(&self, before: &Self) -> bool {
+        same_observed_window(before.window, self.window)
+    }
+
     pub(super) fn shows_boundary_since(&self, before: &Self) -> bool {
         observed_change(self.element, before.element)
             || observed_change(self.window, before.window)
@@ -135,6 +139,10 @@ impl BoundaryProbe {
                 .zip(before.value.as_deref())
                 .is_some_and(|(after, before)| value_shows_boundary(before, after))
     }
+}
+
+fn same_observed_window(before: Option<(u32, u32)>, after: Option<(u32, u32)>) -> bool {
+    before.is_some() && before == after
 }
 
 fn observed_change<T: PartialEq>(after: Option<T>, before: Option<T>) -> bool {
@@ -535,6 +543,14 @@ mod tests {
         assert!(!observed_change::<usize>(None, None));
         assert!(!observed_change(Some(4), Some(4)));
         assert!(observed_change(Some(5), Some(4)));
+    }
+
+    #[test]
+    fn an_unaddressed_boundary_must_keep_the_observed_window() {
+        assert!(same_observed_window(Some((5, 5)), Some((5, 5))));
+        assert!(!same_observed_window(Some((5, 5)), Some((6, 6))));
+        assert!(!same_observed_window(Some((5, 5)), None));
+        assert!(!same_observed_window(None, None));
     }
 
     #[test]
