@@ -12,12 +12,12 @@
 //! digests that the page recomputes for its own field values.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::{json, Value};
 
 use super::cdp_ws::CdpConnection;
-use super::engine::{AttachError, BrowserEngine};
+use super::engine::BrowserEngine;
 use super::refusal::{BrowserRefusal, BrowserRefusalCode};
 use super::types::ProcessFingerprint;
 use crate::protocol::ToolResult;
@@ -241,6 +241,8 @@ enum FrameProbe {
 
 const MAX_ATTACHED_FRAME_DEPTH: usize = 8;
 const MAX_ATTACHED_FRAME_SESSIONS: usize = 64;
+const MAX_LOCAL_FRAMES: usize = 256;
+const FENCE_WORLD: &str = "cua-secret-fence";
 
 fn frame_probe_from_reply<E>(reply: Result<Value, E>) -> FrameProbe {
     let Ok(reply) = reply else {
@@ -280,30 +282,122 @@ fn holds_expression(fence: &SecretFence) -> String {
     format!("({HOLDS})({})", Value::Array(pairs))
 }
 
-async fn probe_frame_session(
+async fn probe_local_frame(
     conn: &CdpConnection,
     cdp_session: &str,
+    frame_id: &str,
     expression: &str,
 ) -> FrameProbe {
+    let Ok(world) = conn
+        .call(
+            Some(cdp_session),
+            "Page.createIsolatedWorld",
+            json!({ "frameId": frame_id, "worldName": FENCE_WORLD }),
+        )
+        .await
+    else {
+        return FrameProbe::Failed;
+    };
+    let Some(context_id) = world.get("executionContextId").and_then(Value::as_i64) else {
+        return FrameProbe::Failed;
+    };
     frame_probe_from_reply(
         conn.call(
             Some(cdp_session),
             "Runtime.evaluate",
-            json!({ "expression": expression, "returnByValue": true }),
+            json!({ "expression": expression, "contextId": context_id, "returnByValue": true }),
         )
         .await,
     )
 }
 
+fn local_frame_ids(tree: &Value) -> Option<Vec<String>> {
+    let mut ids = Vec::new();
+    let mut pending = vec![tree.get("frameTree")?];
+    while let Some(node) = pending.pop() {
+        let id = node
+            .pointer("/frame/id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())?;
+        ids.push(id.to_owned());
+        if ids.len() > MAX_LOCAL_FRAMES {
+            return None;
+        }
+        if let Some(children) = node.get("childFrames") {
+            pending.extend(children.as_array()?);
+        }
+    }
+    Some(ids)
+}
+
+async fn probe_local_frames(
+    conn: &CdpConnection,
+    cdp_session: &str,
+    tree: &Value,
+    expression: &str,
+) -> FrameProbe {
+    let Some(frame_ids) = local_frame_ids(tree) else {
+        return FrameProbe::Failed;
+    };
+    for frame_id in frame_ids {
+        let probe = probe_local_frame(conn, cdp_session, &frame_id, expression).await;
+        if probe != FrameProbe::Clear {
+            return probe;
+        }
+    }
+    FrameProbe::Clear
+}
+
+async fn probe_frame_session(
+    conn: &CdpConnection,
+    cdp_session: &str,
+    expression: &str,
+) -> FrameProbe {
+    match conn
+        .call(Some(cdp_session), "Page.getFrameTree", json!({}))
+        .await
+    {
+        Ok(tree) => probe_local_frames(conn, cdp_session, &tree, expression).await,
+        Err(_) => FrameProbe::Failed,
+    }
+}
+
+async fn release_frame_sessions(
+    conn: &CdpConnection,
+    auto_attached_sessions: &[String],
+    minted_sessions: &[(String, String)],
+) {
+    for parent_session in auto_attached_sessions.iter().rev() {
+        let _ = conn
+            .call(
+                Some(parent_session),
+                "Target.setAutoAttach",
+                json!({ "autoAttach": false, "waitForDebuggerOnStart": false, "flatten": true }),
+            )
+            .await;
+    }
+    for (parent_session, child_session) in minted_sessions.iter().rev() {
+        let _ = conn
+            .call(
+                Some(parent_session),
+                "Target.detachFromTarget",
+                json!({ "sessionId": child_session }),
+            )
+            .await;
+    }
+}
+
 struct AttachedFrameSessionWalk {
+    conn: Arc<CdpConnection>,
     probes: Vec<FrameProbe>,
     auto_attached_sessions: Vec<String>,
     minted_sessions: Vec<(String, String)>,
 }
 
 impl AttachedFrameSessionWalk {
-    fn new() -> Self {
+    fn new(conn: &Arc<CdpConnection>) -> Self {
         Self {
+            conn: Arc::clone(conn),
             probes: Vec::new(),
             auto_attached_sessions: Vec::new(),
             minted_sessions: Vec::new(),
@@ -314,52 +408,55 @@ impl AttachedFrameSessionWalk {
         self.probes.iter().any(|probe| *probe != FrameProbe::Clear)
     }
 
-    async fn release(&self, conn: &CdpConnection) {
-        for parent_session in self.auto_attached_sessions.iter().rev() {
-            let _ = conn
-                .call(
-                    Some(parent_session),
-                    "Target.setAutoAttach",
-                    json!({ "autoAttach": false, "waitForDebuggerOnStart": false, "flatten": true }),
-                )
-                .await;
+    async fn finish(mut self) -> Vec<FrameProbe> {
+        release_frame_sessions(
+            &self.conn,
+            &self.auto_attached_sessions,
+            &self.minted_sessions,
+        )
+        .await;
+        self.auto_attached_sessions.clear();
+        self.minted_sessions.clear();
+        std::mem::take(&mut self.probes)
+    }
+}
+
+impl Drop for AttachedFrameSessionWalk {
+    fn drop(&mut self) {
+        if self.auto_attached_sessions.is_empty() && self.minted_sessions.is_empty() {
+            return;
         }
-        for (parent_session, child_session) in self.minted_sessions.iter().rev() {
-            let _ = conn
-                .call(
-                    Some(parent_session),
-                    "Target.detachFromTarget",
-                    json!({ "sessionId": child_session }),
-                )
-                .await;
-        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let conn = Arc::clone(&self.conn);
+        let auto_attached_sessions = std::mem::take(&mut self.auto_attached_sessions);
+        let minted_sessions = std::mem::take(&mut self.minted_sessions);
+        runtime.spawn(async move {
+            release_frame_sessions(&conn, &auto_attached_sessions, &minted_sessions).await;
+        });
     }
 }
 
 impl BrowserEngine {
     async fn probe_attached_frame_sessions(
         &self,
-        conn: &CdpConnection,
+        conn: &Arc<CdpConnection>,
         tab_session: &str,
         expression: &str,
     ) -> Vec<FrameProbe> {
-        let mut walk = AttachedFrameSessionWalk::new();
+        let mut walk = AttachedFrameSessionWalk::new(conn);
         let mut probed_targets: HashSet<String> = HashSet::new();
         let mut pending = vec![(tab_session.to_owned(), 0usize)];
         while let Some((parent_session, depth)) = pending.pop() {
             if walk.settled_held() {
                 break;
             }
-            let children = match self.attached_iframe_children(conn, &parent_session).await {
-                Ok(children) => children,
-                Err(AttachError::Unsupported) => continue,
-                Err(AttachError::Failed(_)) => {
-                    walk.auto_attached_sessions.push(parent_session);
-                    walk.probes.push(FrameProbe::Failed);
-                    break;
-                }
-            };
             walk.auto_attached_sessions.push(parent_session.clone());
+            let Ok(children) = self.attached_iframe_children(conn, &parent_session).await else {
+                walk.probes.push(FrameProbe::Failed);
+                break;
+            };
             for child in children {
                 walk.minted_sessions
                     .push((parent_session.clone(), child.session_id.clone()));
@@ -379,15 +476,14 @@ impl BrowserEngine {
                 }
             }
         }
-        walk.release(conn).await;
-        walk.probes
+        walk.finish().await
     }
 }
 
 /// Check one fence through an attached session on its tab.
 async fn check_on(
     engine: &BrowserEngine,
-    conn: &CdpConnection,
+    conn: &Arc<CdpConnection>,
     cdp_session: &str,
     fence: &SecretFence,
 ) -> FenceCheck {
@@ -408,7 +504,7 @@ async fn check_on(
         return FenceCheck::Clear;
     }
     let expression = holds_expression(fence);
-    let top_level = probe_frame_session(conn, cdp_session, &expression).await;
+    let top_level = probe_local_frames(conn, cdp_session, &tree, &expression).await;
     if top_level != FrameProbe::Clear {
         return FenceCheck::Held;
     }

@@ -209,6 +209,8 @@ pub(super) struct FillPage {
     pub(super) holds_checks: usize,
     pub(super) attached_frame_holds: Option<Option<Value>>,
     pub(super) attached_frame_holds_checks: usize,
+    pub(super) attached_frame_hangs: bool,
+    pub(super) same_process_frame_holds: Option<Value>,
 }
 
 impl Default for FixtureState {
@@ -884,6 +886,15 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                     "loaderId": "L_MAIN_NAVIGATED",
                 }))
             }
+            "Target.setAutoAttach" if is_oopif => MockReply::ok(json!({})),
+            "Page.createIsolatedWorld" if is_tab || is_oopif => {
+                match call.params["frameId"].as_str() {
+                    Some("F_MAIN") => MockReply::ok(json!({ "executionContextId": 1001 })),
+                    Some("F_IFRAME") => MockReply::ok(json!({ "executionContextId": 1002 })),
+                    Some("F_OOPIF") => MockReply::ok(json!({ "executionContextId": 1003 })),
+                    _ => MockReply::err(-32000, "No frame for given id found"),
+                }
+            }
             "Target.setAutoAttach" if is_tab => {
                 if call.params["autoAttach"].as_bool() == Some(false) {
                     return MockReply::ok(json!({}));
@@ -1189,6 +1200,14 @@ fn fill_page_reply(st: &mut FixtureState, call: &super::mock_cdp::MockCall) -> O
             .session_id
             .as_deref()
             .is_some_and(|session| session.starts_with("oopif-sess-"));
+        if on_attached_frame && st.fill.attached_frame_hangs {
+            return Some(MockReply::hang());
+        }
+        if call.params["contextId"].as_i64() == Some(1002) {
+            if let Some(value) = st.fill.same_process_frame_holds.clone() {
+                return Some(MockReply::ok(json!({ "result": { "value": value } })));
+            }
+        }
         if on_attached_frame {
             if let Some(attached_frame_holds) = st.fill.attached_frame_holds.clone() {
                 st.fill.attached_frame_holds_checks += 1;

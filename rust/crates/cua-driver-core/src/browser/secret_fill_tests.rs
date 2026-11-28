@@ -558,6 +558,94 @@ async fn a_failed_attached_child_frame_check_fails_closed() {
     crate::session::fire_session_end(TRANSPORT);
 }
 
+#[tokio::test]
+async fn a_same_process_frame_still_holding_the_value_keeps_the_fence() {
+    const TRANSPORT: &str = "transport-fill-same-process-frame-holds";
+    let (f, target, tab) = claimed(TRANSPORT, login_page).await;
+    let filled = fill(&f, login_args(&target, &tab)).await;
+    assert_eq!(structured(&filled)["status"], "ok");
+    {
+        let mut st = f.state.lock().unwrap();
+        st.fill.holds = Some(json!(false));
+        st.fill.same_process_frame_holds = Some(json!(true));
+    }
+    let refused = read(&f, &target, &tab, json!({})).await;
+    assert_eq!(refusal_code(&refused), "browser_secret_held");
+    assert!(held(&f));
+    let worlds: Vec<String> = recorded_calls(&f, "Page.createIsolatedWorld")
+        .into_iter()
+        .filter_map(|(_, params)| params["frameId"].as_str().map(str::to_owned))
+        .collect();
+    assert!(worlds.iter().any(|frame| frame == "F_IFRAME"), "{worlds:?}");
+
+    f.state.lock().unwrap().fill.same_process_frame_holds = Some(json!(false));
+    let cleared = read(&f, &target, &tab, json!({})).await;
+    assert_eq!(
+        structured(&cleared)["status"],
+        "ok",
+        "{}",
+        structured(&cleared)
+    );
+    assert!(!held(&f));
+    crate::session::fire_session_end(TRANSPORT);
+}
+
+#[tokio::test]
+async fn unsupported_child_frame_discovery_fails_closed() {
+    const TRANSPORT: &str = "transport-fill-attach-unsupported";
+    let (f, target, tab) = claimed(TRANSPORT, login_page).await;
+    let filled = fill(&f, login_args(&target, &tab)).await;
+    assert_eq!(structured(&filled)["status"], "ok");
+    {
+        let mut st = f.state.lock().unwrap();
+        st.fill.holds = Some(json!(false));
+        st.oopif_supported = false;
+    }
+    let refused = read(&f, &target, &tab, json!({})).await;
+    assert_eq!(refusal_code(&refused), "browser_secret_held");
+    assert!(held(&f));
+    crate::session::fire_session_end(TRANSPORT);
+}
+
+#[tokio::test]
+async fn an_abandoned_fence_check_still_releases_child_frame_sessions() {
+    const TRANSPORT: &str = "transport-fill-abandoned-frame-check";
+    let (f, target, tab) = claimed(TRANSPORT, login_page).await;
+    let filled = fill(&f, login_args(&target, &tab)).await;
+    assert_eq!(structured(&filled)["status"], "ok");
+    {
+        let mut st = f.state.lock().unwrap();
+        st.fill.holds = Some(json!(false));
+        st.fill.attached_frame_hangs = true;
+    }
+    let abandoned = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        read(&f, &target, &tab, json!({})),
+    )
+    .await;
+    assert!(abandoned.is_err());
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let auto_attach_off =
+        recorded_calls(&f, "Target.setAutoAttach")
+            .into_iter()
+            .any(|(session, params)| {
+                session.as_deref().unwrap_or("").starts_with("tab-sess-")
+                    && params["autoAttach"].as_bool() == Some(false)
+            });
+    assert!(auto_attach_off);
+    let released: Vec<String> = recorded_calls(&f, "Target.detachFromTarget")
+        .into_iter()
+        .filter_map(|(_, params)| params["sessionId"].as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        released
+            .iter()
+            .any(|session| session.starts_with("oopif-sess-")),
+        "{released:?}"
+    );
+    crate::session::fire_session_end(TRANSPORT);
+}
+
 // ── Desktop observation through the registry ─────────────────────────────────
 
 struct Observer(ToolDefHolder);

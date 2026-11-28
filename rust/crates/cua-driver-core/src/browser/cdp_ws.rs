@@ -65,6 +65,7 @@ const EXISTING_PROFILE_METHODS: &[&str] = &[
     "Input.insertText",
     "Page.bringToFront",
     "Page.captureScreenshot",
+    "Page.createIsolatedWorld",
     "Page.enable",
     "Page.getFrameTree",
     "Page.getLayoutMetrics",

@@ -71,24 +71,66 @@ fn start_worker() {
     });
 }
 
+const RETRY_FIRST: Duration = Duration::from_secs(5);
+const RETRY_MAX: Duration = Duration::from_secs(120);
+
+struct Retry {
+    next_attempt: Option<Instant>,
+    delay: Duration,
+}
+
+impl Retry {
+    fn new() -> Self {
+        Self {
+            next_attempt: None,
+            delay: RETRY_FIRST,
+        }
+    }
+
+    fn wait(&self, now: Instant) -> Option<Duration> {
+        self.next_attempt
+            .and_then(|at| at.checked_duration_since(now))
+            .filter(|wait| !wait.is_zero())
+    }
+
+    fn failed(&mut self, now: Instant) {
+        self.next_attempt = Some(now + self.delay);
+        self.delay = (self.delay * 2).min(RETRY_MAX);
+    }
+}
+
 fn worker(state: Arc<Mutex<IdleState>>, receiver: mpsc::Receiver<()>, idle: Duration) {
     let mut guard = PlatformGuard::new();
     let mut active = false;
+    let mut retry = Retry::new();
     loop {
+        let now = Instant::now();
         let remaining = state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .remaining(Instant::now(), Some(idle));
-        if remaining.is_some() && !active {
-            guard.acquire();
-            active = true;
-            continue;
+            .remaining(now, Some(idle));
+        let mut wait = remaining;
+        match remaining {
+            Some(_) if !active => match retry.wait(now) {
+                Some(backoff) => wait = wait.map(|wait| wait.min(backoff)),
+                None if guard.acquire() => {
+                    active = true;
+                    retry = Retry::new();
+                    continue;
+                }
+                None => {
+                    retry.failed(Instant::now());
+                    continue;
+                }
+            },
+            None if active => {
+                guard.release();
+                active = false;
+            }
+            None => retry = Retry::new(),
+            Some(_) => {}
         }
-        if remaining.is_none() && active {
-            guard.release();
-            active = false;
-        }
-        let result = match remaining {
+        let result = match wait {
             Some(wait) => receiver.recv_timeout(wait),
             None => receiver
                 .recv()
@@ -109,14 +151,16 @@ impl PlatformGuard {
     }
 
     #[cfg(target_os = "windows")]
-    fn acquire(&mut self) {
+    fn acquire(&mut self) -> bool {
         unsafe {
-            SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
+            SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED) != 0
         }
     }
 
     #[cfg(not(target_os = "windows"))]
-    fn acquire(&mut self) {}
+    fn acquire(&mut self) -> bool {
+        true
+    }
 
     #[cfg(target_os = "windows")]
     fn release(&mut self) {
@@ -187,5 +231,22 @@ mod tests {
         );
         assert_eq!(state.remaining(start + Duration::from_secs(18), idle), None);
         assert_eq!(state.remaining(start + Duration::from_secs(19), idle), None);
+    }
+
+    #[test]
+    fn failed_acquisition_retries_with_bounded_backoff() {
+        let start = Instant::now();
+        let mut retry = Retry::new();
+        assert_eq!(retry.wait(start), None);
+        retry.failed(start);
+        assert_eq!(retry.wait(start), Some(RETRY_FIRST));
+        assert_eq!(retry.wait(start + RETRY_FIRST), None);
+        let mut at = start;
+        for _ in 0..10 {
+            retry.failed(at);
+            at += RETRY_MAX;
+        }
+        retry.failed(at);
+        assert_eq!(retry.wait(at), Some(RETRY_MAX));
     }
 }
