@@ -126,14 +126,46 @@ impl BoundaryProbe {
     }
 
     pub(super) fn shows_boundary_since(&self, before: &Self) -> bool {
-        self.element != before.element
-            || self.window != before.window
+        observed_change(self.element, before.element)
+            || observed_change(self.window, before.window)
             || self.secure_input != before.secure_input
             || self
                 .value
                 .as_deref()
                 .zip(before.value.as_deref())
                 .is_some_and(|(after, before)| value_shows_boundary(before, after))
+    }
+}
+
+fn observed_change<T: PartialEq>(after: Option<T>, before: Option<T>) -> bool {
+    after
+        .zip(before)
+        .is_some_and(|(after, before)| after != before)
+}
+
+pub(super) struct SecureInputLatch {
+    seen_off: std::cell::Cell<bool>,
+    turned_on: std::cell::Cell<bool>,
+}
+
+impl SecureInputLatch {
+    pub(super) fn new(active: bool) -> Self {
+        Self {
+            seen_off: std::cell::Cell::new(!active),
+            turned_on: std::cell::Cell::new(false),
+        }
+    }
+
+    pub(super) fn observe(&self, active: bool) {
+        if !active {
+            self.seen_off.set(true);
+        } else if self.seen_off.get() {
+            self.turned_on.set(true);
+        }
+    }
+
+    pub(super) fn turned_on(&self) -> bool {
+        self.turned_on.get()
     }
 }
 
@@ -494,6 +526,31 @@ mod tests {
         assert!(has_checked_boundary("line\n", true));
         assert!(has_checked_boundary("user\tpass", false));
         assert!(has_checked_boundary("한\r글", false));
+    }
+
+    #[test]
+    fn unavailable_focus_reads_are_not_change_evidence() {
+        assert!(!observed_change(None, Some(4)));
+        assert!(!observed_change(Some(4), None));
+        assert!(!observed_change::<usize>(None, None));
+        assert!(!observed_change(Some(4), Some(4)));
+        assert!(observed_change(Some(5), Some(4)));
+    }
+
+    #[test]
+    fn secure_input_reactivation_stays_latched() {
+        let latch = SecureInputLatch::new(true);
+        latch.observe(true);
+        assert!(!latch.turned_on());
+        latch.observe(false);
+        assert!(!latch.turned_on());
+        latch.observe(true);
+        assert!(latch.turned_on());
+        latch.observe(false);
+        assert!(latch.turned_on());
+        let latch = SecureInputLatch::new(false);
+        latch.observe(true);
+        assert!(latch.turned_on());
     }
 
     #[test]

@@ -645,15 +645,22 @@ pub fn plan_chunks(text: &str) -> Vec<TypingChunk<'_>> {
 pub fn type_text_batched(pid: i32, text: &str) -> anyhow::Result<()> {
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
+    let mut sent = 0;
     for chunk in plan_chunks(text) {
-        let (down, up) = match chunk {
-            TypingChunk::Text(run) => key_events(&source, 0, Some(run))?,
-            TypingChunk::Control(ch) => char_key_events(&source, ch)?,
-        };
+        let (down, up, chars) = match chunk {
+            TypingChunk::Text(run) => {
+                key_events(&source, 0, Some(run)).map(|(down, up)| (down, up, run.chars().count()))
+            }
+            TypingChunk::Control(ch) => {
+                char_key_events(&source, ch).map(|(down, up)| (down, up, 1))
+            }
+        }
+        .map_err(|error| key_construction_error(error, sent))?;
         post_keyboard_event(pid, &down);
         key_gap_sleep();
         post_keyboard_event(pid, &up);
         key_gap_sleep();
+        sent += chars;
     }
     Ok(())
 }
@@ -683,8 +690,9 @@ fn type_text_chars_to_pid(
     text: &str,
     inter_char_delay_ms: u64,
 ) -> anyhow::Result<()> {
-    for ch in text.chars() {
-        let (down, up) = char_key_events(source, ch)?;
+    for (sent, ch) in text.chars().enumerate() {
+        let (down, up) =
+            char_key_events(source, ch).map_err(|error| key_construction_error(error, sent))?;
         post_keyboard_event(pid, &down);
         key_gap_sleep();
         post_keyboard_event(pid, &up);
@@ -721,15 +729,42 @@ pub fn type_text_with_delay(pid: i32, text: &str, inter_char_delay_ms: u64) -> a
 #[derive(Debug, thiserror::Error)]
 #[error("some text may have been sent; read the field before retrying: {source}")]
 pub struct KeyDeliveryUncertain {
+    posted: usize,
     source: anyhow::Error,
+}
+
+impl KeyDeliveryUncertain {
+    pub fn posted(&self) -> usize {
+        self.posted
+    }
 }
 
 pub(crate) fn key_construction_error(error: anyhow::Error, posted: usize) -> anyhow::Error {
     if posted == 0 {
         error
     } else {
-        KeyDeliveryUncertain { source: error }.into()
+        KeyDeliveryUncertain {
+            posted,
+            source: error,
+        }
+        .into()
     }
+}
+
+pub(crate) fn offset_posted(mut error: anyhow::Error, prior: usize) -> anyhow::Error {
+    if prior == 0 {
+        return error;
+    }
+    if let Some(uncertain) = error.downcast_mut::<KeyDeliveryUncertain>() {
+        uncertain.posted += prior;
+    } else if let Some(abort) = error.downcast_mut::<DesktopSequenceAbort>() {
+        abort.posted += prior;
+    } else if let Some(abort) = error.downcast_mut::<PasteSequenceAbort>() {
+        abort.posted += prior;
+    } else {
+        return key_construction_error(error, prior);
+    }
+    error
 }
 
 pub fn type_text_while(
@@ -2243,12 +2278,51 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("may have"), "{message}");
         assert!(message.contains("before retry"), "{message}");
+        assert_eq!(
+            error
+                .downcast_ref::<super::KeyDeliveryUncertain>()
+                .map(super::KeyDeliveryUncertain::posted),
+            Some(1)
+        );
         let before = super::key_construction_error(anyhow::anyhow!("construction failed"), 0);
         assert!(before
             .downcast_ref::<super::KeyDeliveryUncertain>()
             .is_none());
     }
     use super::*;
+
+    #[test]
+    fn later_unit_failures_carry_the_cumulative_count() {
+        let raw = offset_posted(anyhow::anyhow!("construction failed"), 2);
+        assert_eq!(
+            raw.downcast_ref::<KeyDeliveryUncertain>()
+                .map(KeyDeliveryUncertain::posted),
+            Some(2)
+        );
+        let inner = offset_posted(key_construction_error(anyhow::anyhow!("x"), 3), 2);
+        assert_eq!(
+            inner
+                .downcast_ref::<KeyDeliveryUncertain>()
+                .map(KeyDeliveryUncertain::posted),
+            Some(5)
+        );
+        let paste = offset_posted(
+            anyhow::Error::new(PasteSequenceAbort {
+                posted: 1,
+                reason: "moved".into(),
+                clipboard_restored: PasteRestoration::Restored,
+            }),
+            4,
+        );
+        assert_eq!(
+            paste
+                .downcast_ref::<PasteSequenceAbort>()
+                .map(|abort| abort.posted),
+            Some(5)
+        );
+        let untouched = offset_posted(anyhow::anyhow!("refused"), 0);
+        assert!(untouched.downcast_ref::<KeyDeliveryUncertain>().is_none());
+    }
 
     #[test]
     fn a_chord_that_cannot_be_built_posts_nothing() {

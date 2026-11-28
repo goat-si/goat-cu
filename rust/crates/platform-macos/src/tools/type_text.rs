@@ -1051,15 +1051,13 @@ pub(crate) fn text_delivery_failure(prefix: &str, error: &anyhow::Error) -> Tool
             "retryable": false,
         }));
     }
-    if error
-        .downcast_ref::<crate::input::keyboard::KeyDeliveryUncertain>()
-        .is_some()
-    {
+    if let Some(uncertain) = error.downcast_ref::<crate::input::keyboard::KeyDeliveryUncertain>() {
         return ToolResult::error(format!(
             "{message}. Read the field before typing or submitting again."
         ))
         .with_structured(serde_json::json!({
             "code": "key_delivery_uncertain", "effect": "unverifiable", "retryable": false,
+            "characters_sent": uncertain.posted(),
         }));
     }
     match error.downcast_ref::<crate::input::keyboard::PasteMayHaveLanded>() {
@@ -2306,16 +2304,15 @@ fn cgevent_type_verified_with(
             )
         }
     }
-    let secure_seen_off =
-        std::cell::Cell::new(!crate::input::keyboard::secure_event_input_active());
+    let secure_latch = super::key_delivery_guard::SecureInputLatch::new(
+        crate::input::keyboard::secure_event_input_active(),
+    );
     let boundary_probe = || {
         let probe = super::key_delivery_guard::BoundaryProbe::sample(
             pid,
             read_axvalue_bound_classified(pid, element_ptr_and_idx, window_id).text(),
         );
-        if !probe.secure_input() {
-            secure_seen_off.set(true);
-        }
+        secure_latch.observe(probe.secure_input());
         probe
     };
     let confirm_text_focus =
@@ -2336,16 +2333,12 @@ fn cgevent_type_verified_with(
             if !processed {
                 return super::key_delivery_guard::FocusConfirmation::Unprocessed;
             }
-            let secure_now = crate::input::keyboard::secure_event_input_active();
-            let secure_turned_on = secure_now && secure_seen_off.get();
-            if !secure_now {
-                secure_seen_off.set(true);
-            }
+            secure_latch.observe(crate::input::keyboard::secure_event_input_active());
             super::key_delivery_guard::classify_focus_confirmation(
                 pid,
                 Some(pid),
                 wid.is_none_or(|wid| !crate::input::skylight::sibling_window_focused(pid, wid)),
-                secure_turned_on,
+                secure_latch.turned_on(),
             )
         };
     let send_guarded_text = |payload: &str, more_follows: bool| -> anyhow::Result<()> {
@@ -2372,7 +2365,7 @@ fn cgevent_type_verified_with(
                         )
                     };
                     let sent = result.map_err(|error| {
-                        crate::input::keyboard::key_construction_error(error, prior_sent.get())
+                        crate::input::keyboard::offset_posted(error, prior_sent.get())
                     })?;
                     prior_sent.set(prior_sent.get() + sent);
                     Ok::<usize, anyhow::Error>(sent)
@@ -2405,7 +2398,7 @@ fn cgevent_type_verified_with(
                 |before| confirm_text_focus(window_id, before),
                 |unit, _| {
                     send_text(pid, unit, delay_ms).map_err(|error| {
-                        crate::input::keyboard::key_construction_error(error, prior_sent.get())
+                        crate::input::keyboard::offset_posted(error, prior_sent.get())
                     })?;
                     let sent = unit.chars().count();
                     prior_sent.set(prior_sent.get() + sent);
