@@ -177,7 +177,7 @@ fn boundary_marks(value: &str) -> usize {
 }
 
 pub(super) fn value_shows_boundary(before: &str, after: &str) -> bool {
-    boundary_marks(after) > boundary_marks(before) || after.chars().count() < before.chars().count()
+    boundary_marks(after) > boundary_marks(before)
 }
 
 pub(super) fn await_boundary<P>(
@@ -558,14 +558,15 @@ mod tests {
         assert!(!value_shows_boundary("user", "username"));
         assert!(!value_shows_boundary("", "한글"));
         assert!(!value_shows_boundary("a\tb", "a\tbc"));
+        assert!(!value_shows_boundary("abcdef", "x"));
+        assert!(!value_shows_boundary("a\tb", "x"));
     }
 
     #[test]
-    fn inserted_boundary_or_cleared_value_is_evidence() {
+    fn inserted_boundary_is_evidence() {
         assert!(value_shows_boundary("username", "username\t"));
         assert!(value_shows_boundary("line", "line\n"));
         assert!(value_shows_boundary("line", "line\r"));
-        assert!(value_shows_boundary("message", ""));
     }
 
     #[test]

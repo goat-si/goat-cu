@@ -1212,7 +1212,7 @@ fn background_titlebar_pixel_click(
 
 unsafe fn titlebar_pixel_hit(
     pid: i32,
-    window_id: u32,
+    window_id: Option<u32>,
     x: f64,
     y: f64,
     mode: super::DeliveryMode,
@@ -1220,10 +1220,12 @@ unsafe fn titlebar_pixel_hit(
     let Some(element) = element_at_screen_position(pid, x, y).map(Retained) else {
         return false;
     };
-    if !crate::ax::exact_target::element_window_ids(element.0)
-        .is_some_and(|window| window.is(window_id))
-    {
-        return false;
+    if let Some(window_id) = window_id {
+        if !crate::ax::exact_target::element_window_ids(element.0)
+            .is_some_and(|window| window.is(window_id))
+        {
+            return false;
+        }
     }
     let role = copy_string_attr(element.0, "AXRole");
     let subrole = copy_string_attr(element.0, "AXSubrole");
@@ -3102,9 +3104,9 @@ impl ClickTool {
                 }
             }
 
-            if let Some(wid) = window_id.filter(|_| !delivery_mode.is_foreground() && !simulated) {
+            if !delivery_mode.is_foreground() && !simulated {
                 let titlebar_hit = latency::spawn_action_blocking(move || unsafe {
-                    titlebar_pixel_hit(pid, wid, screen_x, screen_y, delivery_mode)
+                    titlebar_pixel_hit(pid, window_id, screen_x, screen_y, delivery_mode)
                 })
                 .await
                 .unwrap_or(false);
