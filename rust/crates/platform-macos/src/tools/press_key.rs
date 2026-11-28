@@ -1274,7 +1274,7 @@ impl Tool for PressKeyTool {
                                 late_cell_refusal(pid, Some(wid), printable, pre_focus_ptr.is_some())?;
                                 // Upstream #7338: global HID keys reach the frontmost process.
                                 crate::security_prompt::refuse_frontmost_keys(prompt)?;
-                                super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control), pid, window_id, &focus_sample_in)
+                                super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control), pid, window_id, true, &focus_sample_in)
                             },
                                     )
                                 },
@@ -1322,7 +1322,7 @@ impl Tool for PressKeyTool {
                                 verify_raw_key_target(pid, window_id, pre_focus_ptr, focused_key_route)?;
                             }
                             late_cell_refusal(pid, window_id, printable, pre_focus_ptr.is_some())?;
-                            let posted = super::key_delivery_guard::capture_post_focus(latency::section(latency::Stage::KeyPost, || latency::section(latency::Stage::KeyHold, || crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Pid(pid), &key, &m, duration, &control))), pid, window_id, &focus_sample_in);
+                            let posted = super::key_delivery_guard::capture_post_focus(latency::section(latency::Stage::KeyPost, || latency::section(latency::Stage::KeyHold, || crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Pid(pid), &key, &m, duration, &control))), pid, window_id, false, &focus_sample_in);
                             if posted.is_ok() {
                                 *posted_in.lock().unwrap_or_else(|e| e.into_inner()) =
                                     Some(std::time::Instant::now());

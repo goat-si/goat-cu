@@ -915,9 +915,9 @@ impl Tool for HotkeyTool {
                                 wid,
                                 || {
                                     if screen_sharing_target {
-                                        { crate::security_prompt::refuse_frontmost_keys(prompt)?; super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control), pid, window_id, &focus_sample_in) }
+                                        { crate::security_prompt::refuse_frontmost_keys(prompt)?; super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control), pid, window_id, true, &focus_sample_in) }
                                     } else {
-                                        { crate::security_prompt::refuse_frontmost_keys(prompt)?; super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Global(Some(pid)), &key, &m, duration, &control), pid, window_id, &focus_sample_in) }
+                                        { crate::security_prompt::refuse_frontmost_keys(prompt)?; super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Global(Some(pid)), &key, &m, duration, &control), pid, window_id, true, &focus_sample_in) }
                                     }
                                 },
                             )?;
@@ -933,7 +933,7 @@ impl Tool for HotkeyTool {
                                 wid,
                                 || {
                                     focus_hotkey_element(pid, ptr)?;
-                                    { crate::security_prompt::refuse_frontmost_keys(prompt)?; super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control), pid, window_id, &focus_sample_in) }
+                                    { crate::security_prompt::refuse_frontmost_keys(prompt)?; super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control), pid, window_id, true, &focus_sample_in) }
                                 },
                             )?;
                             Ok(())
@@ -943,7 +943,7 @@ impl Tool for HotkeyTool {
                                 pid as libc::pid_t,
                                 wid,
                                 || {
-                                    { crate::security_prompt::refuse_frontmost_keys(prompt)?; super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control), pid, window_id, &focus_sample_in) }
+                                    { crate::security_prompt::refuse_frontmost_keys(prompt)?; super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control), pid, window_id, true, &focus_sample_in) }
                                 },
                             )?;
                             Ok(())
@@ -952,9 +952,9 @@ impl Tool for HotkeyTool {
                         // raise — even when window_id was supplied for targeting.
                         (false, false, _, Some(ptr)) => {
                             focus_hotkey_element(pid, ptr)?;
-                            super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Pid(pid), &key, &m, duration, &control), pid, window_id, &focus_sample_in)
+                            super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Pid(pid), &key, &m, duration, &control), pid, window_id, false, &focus_sample_in)
                         }
-                        _ => super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Pid(pid), &key, &m, duration, &control), pid, window_id, &focus_sample_in),
+                        _ => super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Pid(pid), &key, &m, duration, &control), pid, window_id, false, &focus_sample_in),
                     }
                 })
                 .await

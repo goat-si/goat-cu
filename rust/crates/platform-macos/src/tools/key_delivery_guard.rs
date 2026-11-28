@@ -8,6 +8,7 @@ pub(super) enum FocusConfirmation {
     SecureInput,
     WrongProcess,
     WrongWindow,
+    Unprocessed,
 }
 
 pub(super) fn classify_focus_confirmation(
@@ -44,45 +45,110 @@ pub(super) fn split_key_segments(text: &str) -> Vec<&str> {
     segments
 }
 
-pub(super) fn drive_key_segments<E>(
+pub(super) fn drive_key_segments<E, P>(
     text: &str,
-    mut check: impl FnMut() -> FocusConfirmation,
+    check_last: bool,
+    mut probe: impl FnMut() -> P,
+    mut check: impl FnMut(P) -> FocusConfirmation,
     mut send: impl FnMut(&str, bool) -> Result<usize, E>,
 ) -> Result<(usize, Option<FocusConfirmation>), E> {
     let segments = split_key_segments(text);
     let mut delivered = 0;
+    let mut first = true;
+    let mut send_unit = |unit: &str, delivered: &mut usize| -> Result<bool, E> {
+        let sent = send(unit, first)?;
+        first = false;
+        *delivered += sent;
+        Ok(sent >= unit.chars().count())
+    };
     for (index, segment) in segments.iter().enumerate() {
-        let sent = send(segment, index == 0)?;
-        delivered += sent;
-        if sent < segment.chars().count() {
+        let boundary = segment
+            .chars()
+            .last()
+            .filter(|ch| matches!(ch, '\t' | '\n' | '\r'))
+            .filter(|_| check_last || index + 1 < segments.len());
+        let Some(boundary) = boundary else {
+            if !send_unit(segment, &mut delivered)? {
+                return Ok((delivered, None));
+            }
+            continue;
+        };
+        let split = segment.len() - boundary.len_utf8();
+        let (body, key) = segment.split_at(split);
+        if !body.is_empty() && !send_unit(body, &mut delivered)? {
             return Ok((delivered, None));
         }
-        if index + 1 < segments.len()
-            && segment
-                .chars()
-                .last()
-                .is_some_and(|ch| matches!(ch, '\t' | '\n' | '\r'))
-        {
-            let focus = check();
-            if focus != FocusConfirmation::Confirmed {
-                return Ok((delivered, Some(focus)));
-            }
+        let before = probe();
+        if !send_unit(key, &mut delivered)? {
+            return Ok((delivered, None));
+        }
+        let focus = check(before);
+        if focus != FocusConfirmation::Confirmed {
+            return Ok((delivered, Some(focus)));
         }
     }
     Ok((delivered, None))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct BoundaryProbe {
+    element: Option<usize>,
+    window: Option<(u32, u32)>,
+    value: Option<String>,
+    secure_input: bool,
+}
+
+impl BoundaryProbe {
+    pub(super) fn sample(pid: i32, value: Option<String>) -> Self {
+        let element = unsafe {
+            crate::ax::bindings::focused_element_of_pid(pid).map(|element| {
+                let hash = core_foundation::base::CFHash(element as _);
+                core_foundation::base::CFRelease(element as _);
+                hash as usize
+            })
+        };
+        Self {
+            element,
+            window: crate::ax::bindings::focused_window_ids_of_pid(pid)
+                .map(|window| (window.own, window.root)),
+            value,
+            secure_input: crate::input::keyboard::secure_event_input_active(),
+        }
+    }
+}
+
+pub(super) fn await_boundary<P: PartialEq>(
+    before: &P,
+    mut sample: impl FnMut() -> P,
+    mut wait: impl FnMut() -> bool,
+) -> bool {
+    loop {
+        if sample() != *before {
+            return true;
+        }
+        if !wait() {
+            return false;
+        }
+    }
 }
 
 pub(super) fn capture_post_focus(
     result: anyhow::Result<()>,
     pid: i32,
     window: Option<u32>,
+    global: bool,
     sample: &std::sync::Mutex<Option<bool>>,
 ) -> anyhow::Result<()> {
     if result.is_ok() {
         if let Some(wid) = window {
-            let routed = crate::input::skylight::window_routes_keys(pid, wid);
+            let observed_pid = if global {
+                crate::input::skylight::front_process_pid()
+            } else {
+                Some(pid)
+            };
+            let routed = !crate::input::skylight::sibling_window_focused(pid, wid);
             let confirmation =
-                classify_focus_confirmation(pid, wid, Some(pid), routed.then_some(wid), false);
+                classify_focus_confirmation(pid, wid, observed_pid, routed.then_some(wid), false);
             *sample.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(confirmation == FocusConfirmation::Confirmed);
         }
@@ -262,14 +328,16 @@ mod tests {
         let mut sent = Vec::new();
         let result = drive_key_segments(
             "한\tremaining\nlast",
-            || FocusConfirmation::WrongWindow,
+            false,
+            || (),
+            |()| FocusConfirmation::WrongWindow,
             |segment, _| {
                 sent.push(segment.to_owned());
                 Ok::<usize, ()>(segment.chars().count())
             },
         );
         assert_eq!(result, Ok((2, Some(FocusConfirmation::WrongWindow))));
-        assert_eq!(sent, vec!["한\t"]);
+        assert_eq!(sent, vec!["한", "\t"]);
     }
 
     #[test]
@@ -278,42 +346,112 @@ mod tests {
             FocusConfirmation::SecureInput,
             FocusConfirmation::WrongProcess,
             FocusConfirmation::WrongWindow,
+            FocusConfirmation::Unprocessed,
         ] {
             let mut sent = Vec::new();
             let result = drive_key_segments(
                 "a\tb\nc",
-                || failure,
+                false,
+                || (),
+                |()| failure,
                 |unit, first| {
                     sent.push((unit.to_owned(), first));
                     Ok::<_, ()>(unit.chars().count())
                 },
             );
             assert_eq!(result, Ok((2, Some(failure))));
-            assert_eq!(sent, vec![("a\t".to_owned(), true)]);
+            assert_eq!(sent, vec![("a".to_owned(), true), ("\t".to_owned(), false)]);
         }
-        let mut checks = 0;
-        let mut sent = Vec::new();
+        let log = std::cell::RefCell::new(Vec::new());
         let result = drive_key_segments(
             "a\tb\nc",
-            || {
-                checks += 1;
+            false,
+            || log.borrow_mut().push("probe".to_owned()),
+            |()| {
+                log.borrow_mut().push("check".to_owned());
                 FocusConfirmation::Confirmed
             },
             |unit, first| {
-                sent.push((unit.to_owned(), first));
+                log.borrow_mut().push(format!("{unit:?} {first}"));
                 Ok::<_, ()>(unit.chars().count())
             },
         );
         assert_eq!(result, Ok((5, None)));
-        assert_eq!(checks, 2);
         assert_eq!(
-            sent,
+            log.into_inner(),
             vec![
-                ("a\t".to_owned(), true),
-                ("b\n".to_owned(), false),
-                ("c".to_owned(), false)
+                "\"a\" true",
+                "probe",
+                "\"\\t\" false",
+                "check",
+                "\"b\" false",
+                "probe",
+                "\"\\n\" false",
+                "check",
+                "\"c\" false",
             ]
         );
+    }
+
+    #[test]
+    fn trailing_boundary_is_checked_only_when_more_input_follows() {
+        for (check_last, checks) in [(false, 0), (true, 1)] {
+            let mut count = 0;
+            let result = drive_key_segments(
+                "ab\t",
+                check_last,
+                || (),
+                |()| {
+                    count += 1;
+                    FocusConfirmation::Confirmed
+                },
+                |unit, _| Ok::<_, ()>(unit.chars().count()),
+            );
+            assert_eq!(result, Ok((3, None)));
+            assert_eq!(count, checks);
+        }
+    }
+
+    #[test]
+    fn short_send_stops_before_the_boundary_key() {
+        let mut sent = Vec::new();
+        let result = drive_key_segments(
+            "abc\td",
+            false,
+            || (),
+            |()| FocusConfirmation::Confirmed,
+            |unit, _| {
+                sent.push(unit.to_owned());
+                Ok::<_, ()>(1)
+            },
+        );
+        assert_eq!(result, Ok((1, None)));
+        assert_eq!(sent, vec!["abc"]);
+    }
+
+    #[test]
+    fn boundary_wait_requires_an_observed_change() {
+        let mut samples = [1, 1, 2].into_iter();
+        let mut waits = 0;
+        assert!(await_boundary(
+            &1,
+            || samples.next().unwrap(),
+            || {
+                waits += 1;
+                true
+            }
+        ));
+        assert_eq!(waits, 2);
+        let mut waits = 0;
+        assert!(!await_boundary(
+            &1,
+            || 1,
+            || {
+                waits += 1;
+                waits < 3
+            }
+        ));
+        assert_eq!(waits, 3);
     }
 
     #[test]
