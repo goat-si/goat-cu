@@ -13,16 +13,15 @@ pub(super) enum FocusConfirmation {
 
 pub(super) fn classify_focus_confirmation(
     expected_pid: i32,
-    expected_window: u32,
     observed_pid: Option<i32>,
-    observed_window: Option<u32>,
-    secure_input_active: bool,
+    window_matches: bool,
+    secure_input_turned_on: bool,
 ) -> FocusConfirmation {
-    if secure_input_active {
+    if secure_input_turned_on {
         FocusConfirmation::SecureInput
     } else if observed_pid != Some(expected_pid) {
         FocusConfirmation::WrongProcess
-    } else if observed_window != Some(expected_window) {
+    } else if !window_matches {
         FocusConfirmation::WrongWindow
     } else {
         FocusConfirmation::Confirmed
@@ -43,6 +42,12 @@ pub(super) fn split_key_segments(text: &str) -> Vec<&str> {
         segments.push(&text[start..]);
     }
     segments
+}
+
+pub(super) fn has_checked_boundary(text: &str, check_last: bool) -> bool {
+    text.char_indices().any(|(index, ch)| {
+        matches!(ch, '\t' | '\n' | '\r') && (check_last || index + ch.len_utf8() < text.len())
+    })
 }
 
 pub(super) fn drive_key_segments<E, P>(
@@ -115,15 +120,42 @@ impl BoundaryProbe {
             secure_input: crate::input::keyboard::secure_event_input_active(),
         }
     }
+
+    pub(super) fn secure_input(&self) -> bool {
+        self.secure_input
+    }
+
+    pub(super) fn shows_boundary_since(&self, before: &Self) -> bool {
+        self.element != before.element
+            || self.window != before.window
+            || self.secure_input != before.secure_input
+            || self
+                .value
+                .as_deref()
+                .zip(before.value.as_deref())
+                .is_some_and(|(after, before)| value_shows_boundary(before, after))
+    }
 }
 
-pub(super) fn await_boundary<P: PartialEq>(
+fn boundary_marks(value: &str) -> usize {
+    value
+        .chars()
+        .filter(|ch| matches!(ch, '\t' | '\n' | '\r'))
+        .count()
+}
+
+pub(super) fn value_shows_boundary(before: &str, after: &str) -> bool {
+    boundary_marks(after) > boundary_marks(before) || after.chars().count() < before.chars().count()
+}
+
+pub(super) fn await_boundary<P>(
     before: &P,
     mut sample: impl FnMut() -> P,
+    shows_boundary: impl Fn(&P, &P) -> bool,
     mut wait: impl FnMut() -> bool,
 ) -> bool {
     loop {
-        if sample() != *before {
+        if shows_boundary(&sample(), before) {
             return true;
         }
         if !wait() {
@@ -147,8 +179,7 @@ pub(super) fn capture_post_focus(
                 Some(pid)
             };
             let routed = !crate::input::skylight::sibling_window_focused(pid, wid);
-            let confirmation =
-                classify_focus_confirmation(pid, wid, observed_pid, routed.then_some(wid), false);
+            let confirmation = classify_focus_confirmation(pid, observed_pid, routed, false);
             *sample.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(confirmation == FocusConfirmation::Confirmed);
         }
@@ -302,23 +333,23 @@ mod tests {
     fn focus_confirmation_requires_process_window_and_no_secure_input() {
         use FocusConfirmation::*;
         assert_eq!(
-            classify_focus_confirmation(7, 9, Some(7), Some(9), false),
+            classify_focus_confirmation(7, Some(7), true, false),
             Confirmed
         );
         assert_eq!(
-            classify_focus_confirmation(7, 9, Some(7), Some(10), false),
+            classify_focus_confirmation(7, Some(7), false, false),
             WrongWindow
         );
         assert_eq!(
-            classify_focus_confirmation(7, 9, Some(8), Some(9), false),
+            classify_focus_confirmation(7, Some(8), true, false),
             WrongProcess
         );
         assert_eq!(
-            classify_focus_confirmation(7, 9, Some(7), None, false),
-            WrongWindow
+            classify_focus_confirmation(7, None, true, false),
+            WrongProcess
         );
         assert_eq!(
-            classify_focus_confirmation(7, 9, Some(7), Some(9), true),
+            classify_focus_confirmation(7, Some(7), true, true),
             SecureInput
         );
     }
@@ -436,6 +467,7 @@ mod tests {
         assert!(await_boundary(
             &1,
             || samples.next().unwrap(),
+            |after, before| after != before,
             || {
                 waits += 1;
                 true
@@ -446,12 +478,37 @@ mod tests {
         assert!(!await_boundary(
             &1,
             || 1,
+            |after, before| after != before,
             || {
                 waits += 1;
                 waits < 3
             }
         ));
         assert_eq!(waits, 3);
+    }
+
+    #[test]
+    fn only_boundaries_followed_by_more_input_need_checks() {
+        assert!(!has_checked_boundary("plain", true));
+        assert!(!has_checked_boundary("line\n", false));
+        assert!(has_checked_boundary("line\n", true));
+        assert!(has_checked_boundary("user\tpass", false));
+        assert!(has_checked_boundary("한\r글", false));
+    }
+
+    #[test]
+    fn late_preceding_text_is_not_boundary_evidence() {
+        assert!(!value_shows_boundary("user", "username"));
+        assert!(!value_shows_boundary("", "한글"));
+        assert!(!value_shows_boundary("a\tb", "a\tbc"));
+    }
+
+    #[test]
+    fn inserted_boundary_or_cleared_value_is_evidence() {
+        assert!(value_shows_boundary("username", "username\t"));
+        assert!(value_shows_boundary("line", "line\n"));
+        assert!(value_shows_boundary("line", "line\r"));
+        assert!(value_shows_boundary("message", ""));
     }
 
     #[test]
