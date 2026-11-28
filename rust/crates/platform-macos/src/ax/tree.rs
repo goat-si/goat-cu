@@ -1431,6 +1431,7 @@ where
     S: AxTreeSource,
     E: WalkOrchestration<S>,
 {
+    let _pending_scope = PendingSiblings::reset();
     let WalkRequest {
         pid,
         window_id,
@@ -1495,8 +1496,10 @@ where
             }
         }
 
-        let shares = SiblingShares::reserve(&mut budget, false, walk_these.len());
+        let top_count = walk_these.len();
+        let shares = SiblingShares::reserve(&mut budget, false, top_count);
         for (position, child) in walk_these.into_iter().enumerate() {
+            let _pending = PendingSiblings::add(top_count - position - 1);
             budget.release(shares.of(position));
             environment.with_walk_element(source, child, |source, child| {
                 walk_root(
@@ -3441,6 +3444,42 @@ fn walk_element<S: AxTreeSource>(
     );
 }
 
+thread_local! {
+    static PENDING_SIBLINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+struct PendingSiblings(usize);
+
+impl PendingSiblings {
+    fn reset() -> Self {
+        Self(PENDING_SIBLINGS.with(|cell| cell.replace(0)))
+    }
+
+    fn add(count: usize) -> Self {
+        Self(PENDING_SIBLINGS.with(|cell| {
+            let previous = cell.get();
+            cell.set(previous.saturating_add(count));
+            previous
+        }))
+    }
+}
+
+impl Drop for PendingSiblings {
+    fn drop(&mut self) {
+        PENDING_SIBLINGS.with(|cell| cell.set(self.0));
+    }
+}
+
+const DENSE_BODY_FREE_DIVISOR: usize = 2;
+
+fn dense_body_held_back(free: usize, pending_siblings: usize) -> usize {
+    if pending_siblings == 0 {
+        0
+    } else {
+        free / DENSE_BODY_FREE_DIVISOR
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn walk_children<S: AxTreeSource>(
     source: &S,
@@ -3503,8 +3542,17 @@ fn walk_children<S: AxTreeSource>(
     } else {
         None
     };
-    let shares = SiblingShares::reserve(budget, in_web_content, children.len());
+    let child_count = children.len();
+    let pending_siblings = PENDING_SIBLINGS.with(std::cell::Cell::get);
+    let held = if !in_web_content && dense_rows::DENSE_COLLECTION_ROLES.contains(&role) {
+        budget.reserve(dense_body_held_back(budget.free_nodes(), pending_siblings))
+    } else {
+        0
+    };
+    let pending_before = budget.outcome().nodes_pending;
+    let shares = SiblingShares::reserve(budget, in_web_content, child_count);
     for (index, child) in children.into_iter().enumerate() {
+        let _pending = PendingSiblings::add(child_count - index - 1);
         budget.release(shares.of(index));
         if let Some(ref tp) = tab_plan {
             if index == tp.first_omitted_index {
@@ -3565,6 +3613,18 @@ fn walk_children<S: AxTreeSource>(
             ),
         }
     }
+    let outcome = budget.outcome();
+    if held > 0
+        && outcome.nodes_pending > pending_before
+        && outcome.stop == Some(cua_driver_core::walk_budget::WalkStop::NodeBudget)
+    {
+        note_skipped();
+        budget.record_cut(IncompleteReason {
+            kind: IncompleteReasonKind::Budget,
+            detail: IncompleteReasonDetail::NodeBudget,
+        });
+    }
+    budget.release(held);
 }
 
 fn observed_walk_children<S: AxTreeSource>(
@@ -4104,6 +4164,36 @@ fn is_web_content_role(role: &str) -> bool {
         .flat_map(char::to_lowercase)
         .collect::<String>();
     normalized.contains("webarea") || normalized.contains("documentweb") || normalized == "document"
+}
+
+#[cfg(test)]
+mod dense_budget_tests {
+    use super::{dense_body_held_back, PendingSiblings, PENDING_SIBLINGS};
+    use std::cell::Cell;
+
+    #[test]
+    fn dense_holdback_arithmetic() {
+        assert_eq!(dense_body_held_back(100, 0), 0);
+        assert_eq!(dense_body_held_back(0, 1), 0);
+        assert_eq!(dense_body_held_back(1, 1), 0);
+        assert_eq!(dense_body_held_back(3, 1), 1);
+        assert_eq!(dense_body_held_back(1000, 8), 500);
+    }
+
+    #[test]
+    fn pending_sibling_guards_restore_nested_counts() {
+        let initial = PENDING_SIBLINGS.with(Cell::get);
+        {
+            let _outer = PendingSiblings::add(3);
+            assert_eq!(PENDING_SIBLINGS.with(Cell::get), initial + 3);
+            {
+                let _inner = PendingSiblings::add(2);
+                assert_eq!(PENDING_SIBLINGS.with(Cell::get), initial + 5);
+            }
+            assert_eq!(PENDING_SIBLINGS.with(Cell::get), initial + 3);
+        }
+        assert_eq!(PENDING_SIBLINGS.with(Cell::get), initial);
+    }
 }
 
 #[cfg(test)]

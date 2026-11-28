@@ -807,6 +807,7 @@ fn a_target_window_that_is_already_key_posts_nothing_and_reads_no_window_order()
     assert_eq!(scope.primed(), KeyPrime::AlreadyKey);
     assert!(env.state.borrow().posts.is_empty());
     assert!(env.state.borrow().ax_writes.is_empty());
+    assert!(env.state.borrow().waits.is_empty());
     assert_eq!(env.state.borrow().order_reads, 0);
     assert_eq!(scope.finish(), HandBack::NotMoved);
 }

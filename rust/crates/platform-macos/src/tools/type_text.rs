@@ -995,6 +995,12 @@ pub(crate) fn text_delivery_failure(prefix: &str, error: &anyhow::Error) -> Tool
         return refusal;
     }
     let message = format!("{prefix}: {error:#}");
+    if let Some(abort) = error.downcast_ref::<TextFocusAbort>() {
+        return ToolResult::error(message).with_structured(serde_json::json!({
+            "code": "key_delivery_uncertain", "effect": "unverifiable", "retryable": false,
+            "characters_sent": abort.sent, "focus_confirmed": false,
+        }));
+    }
     if let Some(write) = error.downcast_ref::<TextWriteError>() {
         let effect = if write.chain.no_input() {
             "refused"
@@ -1045,15 +1051,13 @@ pub(crate) fn text_delivery_failure(prefix: &str, error: &anyhow::Error) -> Tool
             "retryable": false,
         }));
     }
-    if error
-        .downcast_ref::<crate::input::keyboard::KeyDeliveryUncertain>()
-        .is_some()
-    {
+    if let Some(uncertain) = error.downcast_ref::<crate::input::keyboard::KeyDeliveryUncertain>() {
         return ToolResult::error(format!(
             "{message}. Read the field before typing or submitting again."
         ))
         .with_structured(serde_json::json!({
             "code": "key_delivery_uncertain", "effect": "unverifiable", "retryable": false,
+            "characters_sent": uncertain.posted(),
         }));
     }
     match error.downcast_ref::<crate::input::keyboard::PasteMayHaveLanded>() {
@@ -1068,6 +1072,15 @@ pub(crate) fn text_delivery_failure(prefix: &str, error: &anyhow::Error) -> Tool
         })),
         None => ToolResult::error(message),
     }
+}
+
+const BOUNDARY_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+const BOUNDARY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(15);
+
+#[derive(Debug, thiserror::Error)]
+#[error("focus could not be confirmed after text delivery")]
+struct TextFocusAbort {
+    sent: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2291,18 +2304,93 @@ fn cgevent_type_verified_with(
             )
         }
     }
-    let send_guarded_text = |payload: &str| -> anyhow::Result<()> {
+    let secure_latch = super::key_delivery_guard::SecureInputLatch::new(
+        crate::input::keyboard::secure_event_input_active(),
+    );
+    let boundary_probe = || {
+        let probe = super::key_delivery_guard::BoundaryProbe::sample(
+            pid,
+            read_axvalue_bound_classified(pid, element_ptr_and_idx, window_id).text(),
+        );
+        secure_latch.observe(probe.secure_input());
+        probe
+    };
+    let confirm_text_focus =
+        |wid: Option<u32>, before: super::key_delivery_guard::BoundaryProbe| {
+            let deadline = std::time::Instant::now() + BOUNDARY_SETTLE_TIMEOUT;
+            let processed = super::key_delivery_guard::await_boundary(
+                &before,
+                &boundary_probe,
+                super::key_delivery_guard::BoundaryProbe::shows_boundary_since,
+                || {
+                    if std::time::Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(BOUNDARY_POLL_INTERVAL);
+                    true
+                },
+            );
+            if !processed {
+                return super::key_delivery_guard::FocusConfirmation::Unprocessed;
+            }
+            let window_matches = match wid {
+                Some(wid) => !crate::input::skylight::sibling_window_focused(pid, wid),
+                None => boundary_probe().keeps_window_of(&before),
+            };
+            secure_latch.observe(crate::input::keyboard::secure_event_input_active());
+            super::key_delivery_guard::classify_focus_confirmation(
+                pid,
+                Some(pid),
+                window_matches,
+                secure_latch.turned_on(),
+            )
+        };
+    let send_guarded_text = |payload: &str, more_follows: bool| -> anyhow::Result<()> {
         if let Some(wid) = exact_keys_window.or_else(|| element_ptr_and_idx.and(window_id)) {
-            let sent = crate::input::keyboard::type_text_while(pid, payload, delay_ms, || {
-                key_delivery_allowed(
-                    crate::input::skylight::sibling_window_focused(pid, wid),
-                    element_ptr_and_idx
-                        .is_none_or(|(ptr, _)| element_has_exact_app_focus(pid, wid, ptr)),
-                )
-            })?;
+            let prior_sent = std::cell::Cell::new(0usize);
+            let crossed_boundary = std::cell::Cell::new(false);
+            let (sent, abort) = super::key_delivery_guard::drive_key_segments(
+                payload,
+                more_follows,
+                &boundary_probe,
+                |before| {
+                    let focus = confirm_text_focus(Some(wid), before);
+                    if focus == super::key_delivery_guard::FocusConfirmation::Confirmed {
+                        crossed_boundary.set(true);
+                    }
+                    focus
+                },
+                |segment, first| {
+                    let may_send = || {
+                        key_delivery_allowed(
+                            crate::input::skylight::sibling_window_focused(pid, wid),
+                            crossed_boundary.get()
+                                || element_ptr_and_idx.is_none_or(|(ptr, _)| {
+                                    element_has_exact_app_focus(pid, wid, ptr)
+                                }),
+                        )
+                    };
+                    let result = if first {
+                        crate::input::keyboard::type_text_while(pid, segment, delay_ms, may_send)
+                    } else {
+                        crate::input::keyboard::type_text_while_with_paste(
+                            pid, segment, delay_ms, may_send, false,
+                        )
+                    };
+                    let sent = result.map_err(|error| {
+                        crate::input::keyboard::offset_posted(error, prior_sent.get())
+                    })?;
+                    prior_sent.set(prior_sent.get() + sent);
+                    Ok::<usize, anyhow::Error>(sent)
+                },
+            )?;
+            if abort.is_some() {
+                return Err(TextFocusAbort { sent }.into());
+            }
             if sent < payload.chars().count() {
-                if element_ptr_and_idx
-                    .is_some_and(|(ptr, _)| !element_has_exact_app_focus(pid, wid, ptr))
+                if !crossed_boundary.get()
+                    && element_ptr_and_idx
+                        .is_some_and(|(ptr, _)| !element_has_exact_app_focus(pid, wid, ptr))
                 {
                     return Err(crate::input::keyboard::key_construction_error(
                         anyhow::anyhow!("the exact target lost focus; no further text was sent"),
@@ -2311,6 +2399,60 @@ fn cgevent_type_verified_with(
                 }
                 return Err(crate::input::keyboard::key_construction_error(
                     crate::input::skylight::sibling_focus_refusal(pid, wid, sent > 0),
+                    sent,
+                ));
+            }
+            Ok(())
+        } else if super::key_delivery_guard::has_checked_boundary(payload, more_follows) {
+            let prior_sent = std::cell::Cell::new(0usize);
+            let anchor = std::cell::Cell::new(None::<Option<(u32, u32)>>);
+            let (sent, abort) = super::key_delivery_guard::drive_key_segments(
+                payload,
+                more_follows,
+                &boundary_probe,
+                |before| {
+                    let window = before.window();
+                    let focus = confirm_text_focus(window_id, before);
+                    if focus == super::key_delivery_guard::FocusConfirmation::Confirmed {
+                        anchor.set(Some(window));
+                    }
+                    focus
+                },
+                |unit, _| {
+                    let sent = match anchor.get() {
+                        None => send_text(pid, unit, delay_ms).map(|()| unit.chars().count()),
+                        Some(window) => crate::input::keyboard::type_text_while_with_paste(
+                            pid,
+                            unit,
+                            delay_ms,
+                            || match window_id {
+                                Some(wid) => {
+                                    !crate::input::skylight::sibling_window_focused(pid, wid)
+                                }
+                                None => super::key_delivery_guard::same_observed_window(
+                                    window,
+                                    crate::ax::bindings::focused_window_ids_of_pid(pid)
+                                        .map(|focused| (focused.own, focused.root)),
+                                ),
+                            },
+                            false,
+                        ),
+                    }
+                    .map_err(|error| {
+                        crate::input::keyboard::offset_posted(error, prior_sent.get())
+                    })?;
+                    prior_sent.set(prior_sent.get() + sent);
+                    Ok::<usize, anyhow::Error>(sent)
+                },
+            )?;
+            if abort.is_some() {
+                return Err(TextFocusAbort { sent }.into());
+            }
+            if sent < payload.chars().count() {
+                return Err(crate::input::keyboard::key_construction_error(
+                    anyhow::anyhow!(
+                        "the focused window changed after a confirmed tab or return; no further text was sent"
+                    ),
                     sent,
                 ));
             }
@@ -2409,7 +2551,7 @@ fn cgevent_type_verified_with(
                     || crate::input::keyboard::press_key(pid, "delete", &[]),
                 )?;
             } else {
-                send_guarded_text(text)?;
+                send_guarded_text(text, false)?;
             }
         } else {
             let (verified, delivered, document) = replace_ax_with(
@@ -2488,7 +2630,7 @@ fn cgevent_type_verified_with(
                     .or_else(|| text.strip_suffix('\n'))
                     .or_else(|| text.strip_suffix('\r'))
                     .unwrap_or(text);
-                send_guarded_text(body)?;
+                send_guarded_text(body, true)?;
                 if let Some(wid) = exact_keys_window {
                     if crate::input::skylight::sibling_window_focused(pid, wid) {
                         return Err(crate::input::keyboard::key_construction_error(
@@ -2505,7 +2647,7 @@ fn cgevent_type_verified_with(
                     crate::input::keyboard::key_construction_error(error, body.chars().count())
                 })?;
             } else {
-                send_guarded_text(text)?;
+                send_guarded_text(text, false)?;
             }
 
             Ok(())
@@ -4540,6 +4682,15 @@ mod u32_outcome_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn focus_abort_payload_contains_delivered_count() {
+        let error = anyhow::Error::new(super::TextFocusAbort { sent: 3 });
+        let result = super::text_delivery_failure("typing failed", &error);
+        let payload = result.structured_content.unwrap();
+        assert_eq!(payload["characters_sent"], 3);
+        assert_eq!(payload["focus_confirmed"], false);
+        assert_eq!(payload["effect"], "unverifiable");
+    }
     #[test]
     fn focus_change_during_clipboard_preparation_sends_no_paste() {
         use crate::input::keyboard::{

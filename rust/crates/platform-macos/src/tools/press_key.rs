@@ -1215,6 +1215,8 @@ impl Tool for PressKeyTool {
         // When the background key post returned: the sheet watch counts from it.
         let posted_at = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
         let posted_in = posted_at.clone();
+        let focus_sample = Arc::new(std::sync::Mutex::new(None));
+        let focus_sample_in = focus_sample.clone();
         let control = Arc::new(crate::input::key_hold::HoldControl::default());
         let result = focus_guard::with_focus_suppressed(
             Some(pid),
@@ -1272,7 +1274,7 @@ impl Tool for PressKeyTool {
                                 late_cell_refusal(pid, Some(wid), printable, pre_focus_ptr.is_some())?;
                                 // Upstream #7338: global HID keys reach the frontmost process.
                                 crate::security_prompt::refuse_frontmost_keys(prompt)?;
-                                crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control)
+                                super::key_delivery_guard::capture_post_focus(crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::BareGlobal(pid), &key, &m, duration, &control), pid, window_id, true, &focus_sample_in)
                             },
                                     )
                                 },
@@ -1320,7 +1322,7 @@ impl Tool for PressKeyTool {
                                 verify_raw_key_target(pid, window_id, pre_focus_ptr, focused_key_route)?;
                             }
                             late_cell_refusal(pid, window_id, printable, pre_focus_ptr.is_some())?;
-                            let posted = latency::section(latency::Stage::KeyPost, || latency::section(latency::Stage::KeyHold, || crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Pid(pid), &key, &m, duration, &control)));
+                            let posted = super::key_delivery_guard::capture_post_focus(latency::section(latency::Stage::KeyPost, || latency::section(latency::Stage::KeyHold, || crate::input::key_hold::deliver(crate::input::key_hold::KeyRoute::Pid(pid), &key, &m, duration, &control))), pid, window_id, false, &focus_sample_in);
                             if posted.is_ok() {
                                 *posted_in.lock().unwrap_or_else(|e| e.into_inner()) =
                                     Some(std::time::Instant::now());
@@ -1403,6 +1405,13 @@ impl Tool for PressKeyTool {
             }
             PressKeyDeliveryOutcome::Failed(error) => delivery_failed(error),
         };
+        let mut result = result;
+        if let Some(structured) = result.structured_content.as_mut() {
+            super::key_delivery_guard::add_focus_confirmation(
+                structured,
+                *focus_sample.lock().unwrap_or_else(|e| e.into_inner()),
+            );
+        }
         // Any refusal after a delivered focus action carries its receipt.
         super::not_editable::account_focus_receipt(result, px_receipt)
     }
